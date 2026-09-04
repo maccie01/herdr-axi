@@ -1716,6 +1716,49 @@ test_monitor_survives_quiet_intervals() (
   done
 )
 
+test_monitor_separates_readiness_completion_and_acceptance() (
+  setup_case monitor-display
+  write_complete_transcript
+  HERDR_MONITOR_INBOX=1 run_hook settled "$(payload)"
+  run_file="$FAKE_HERDR_CASE/run.json"
+  jq -nc --arg receipt "$HERDR_MONITOR_RECEIPT" --arg generation "$(receipt_read_field 10)" \
+    '{tasks:[{name:"worker",pane:"pane-1",state:"running"}],workers:[{name:"worker",pane:"pane-1",receipt:$receipt,generation:$generation}]}' > "$run_file"
+  display_log="$FAKE_HERDR_CASE/display"
+  HERDR_MONITOR_INBOX=1 HERDR_MONITOR_CHANGE_WAIT_TICKS=100 \
+    bash "$monitor_script" worker worker orch "$HERDR_MONITOR_RECEIPT" "$hook_script" > "$display_log" &
+  monitor_pid=$!
+  trap 'kill "$monitor_pid" 2>/dev/null || true; wait "$monitor_pid" 2>/dev/null || true' EXIT
+  expect_display() {
+    local expected attempt
+    expected=$(printf 'agent: %s\ntask: %s\nproof: %s' "$1" "$2" "$3")
+    for attempt in $(seq 1 500); do
+      [[ "$(tail -n 4 "$display_log")" != "$expected" ]] || return 0
+      sleep 0.02
+    done
+    fail "missing monitor display: $expected; got $(tail -n 4 "$display_log")"
+  }
+  expect_display done review complete
+  printf '%s\n' idle > "$FAKE_HERDR_CASE/status"
+  expect_display idle review complete
+  # Coordinator-only changes must refresh without another agent transition.
+  jq '.tasks[0].state = "accepted"' "$run_file" > "$run_file.tmp"
+  mv "$run_file.tmp" "$run_file"
+  expect_display idle accepted complete
+  # Reusing a pane must not label the old generation's receipt as new proof.
+  jq '.tasks[0].state = "starting"' "$run_file" > "$run_file.tmp"
+  mv "$run_file.tmp" "$run_file"
+  expect_display idle starting pending
+  jq '.tasks[0].state = "running" | .workers[0].generation = "next-generation"' "$run_file" > "$run_file.tmp"
+  mv "$run_file.tmp" "$run_file"
+  expect_display idle awaiting-proof pending
+  printf '%s\n' working > "$FAKE_HERDR_CASE/status"
+  expect_display working running pending
+  kill "$monitor_pid" 2>/dev/null || true
+  wait "$monitor_pid" 2>/dev/null || true
+  trap - EXIT
+  assert_no_fake_waiters "monitor display cleanup"
+)
+
 test_failed_native_waits_back_off_and_lost_terminates() (
   setup_case failed-native-waits
   write_complete_transcript
@@ -1867,6 +1910,7 @@ tests=(
   test_idle_completion_is_collected
   test_blocked_startup_resumes_owned_pane
   test_monitor_survives_quiet_intervals
+  test_monitor_separates_readiness_completion_and_acceptance
   test_failed_native_waits_back_off_and_lost_terminates
   test_managed_inbox_never_prompts_owner
   test_prompt_ack_and_no_nested_agents

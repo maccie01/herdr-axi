@@ -50,6 +50,48 @@ state() {
     jq -r '.result.agent.agent_status // empty' 2>/dev/null
 }
 
+# Display only: receipt/run reads, no backend polls or lifecycle mutations.
+# Agent readiness and coordinator acceptance are independent states.
+display_status() {
+  local agent_state="${1:-unknown}" task_state proof_state=missing snapshot
+  local generation="" registered_generation="" saved_state="" saved_generation=""
+  local registry="${receipt_file%.event}.json"
+  local run_file="${receipt_file%/receipts/*}/run.json"
+  case "$agent_state" in
+    done|idle) task_state=awaiting-proof ;;
+    working) task_state=running ;;
+    *) task_state="$agent_state" ;;
+  esac
+  if herdr_receipt_read "$receipt_file" && [[ -n "$receipt_generation" ]]; then
+    generation="$receipt_generation"
+    proof_state=pending
+    if [[ "$receipt_settled_fingerprint" == "generation:$generation" ]]; then proof_state=complete; fi
+    if [[ -e "$registry" ]]; then
+      registered_generation=$(jq -er '.generation // empty' "$registry" 2>/dev/null) || registered_generation=""
+      [[ "$generation" == "$registered_generation" ]] || proof_state=pending
+    fi
+  fi
+  if [[ -e "$run_file" ]]; then
+    # Managed receipts live at RUN/receipts/WORKSPACE/NAME.event. Read only the
+    # latest assignment bound to this worker; never infer acceptance from idle.
+    snapshot=$(jq -er --arg name "$agent_name" --arg receipt "$receipt_file" '
+      . as $run | [.tasks[] | select(.name == $name)] | last as $task |
+      [$run.workers[] | select(.name == $name and .receipt == $receipt and .pane == $task.pane)] | last as $worker |
+      select($task != null) | [$task.state, ($worker.generation // "-")] | @tsv
+    ' "$run_file" 2>/dev/null) || snapshot=$'unknown\t-'
+    IFS=$'\t' read -r saved_state saved_generation <<< "$snapshot"
+    [[ "$generation" == "$saved_generation" ]] || proof_state=pending
+    case "$saved_state" in running|accepted) ;; *) proof_state=pending ;; esac
+    if [[ "$saved_state" != "running" ]]; then task_state="$saved_state"; fi
+  fi
+  if [[ "$proof_state" == "complete" && "$task_state" == "awaiting-proof" ]]; then task_state=review; fi
+  snapshot=$(printf 'agent: %s\ntask: %s\nproof: %s' "$agent_state" "$task_state" "$proof_state")
+  if [[ "$snapshot" != "$displayed_state" ]]; then
+    printf '%s\n\n' "$snapshot"
+    displayed_state="$snapshot"
+  fi
+}
+
 # Broken/expired native waits must not turn transcript collection into a hot
 # loop. Stay supervised; real transitions reset this bounded failure backoff.
 backoff() {
@@ -122,6 +164,7 @@ wait_for_any_transition() {
 
   tick=0
   while (( tick < ticks )); do
+    if (( tick % 50 == 0 )); then display_status "$worker_baseline"; fi
     if [[ -s "$wait_marker" ]]; then
       for child_pid in "$wait_pid_one" "$wait_pid_two"; do
         if kill -0 "$child_pid" 2>/dev/null; then
@@ -223,6 +266,7 @@ wait_worker_transition() {
   wait_for_transition "$agent_name" "$baseline" "$wait_marker" worker &
   wait_pid_one=$!
   while (( tick < ticks )); do
+    if (( tick % 50 == 0 )); then display_status "$baseline"; fi
     if [[ -s "$wait_marker" ]]; then
       transition_state=$(cut -f 2 "$wait_marker")
       wait "$wait_pid_one" 2>/dev/null || true
@@ -277,16 +321,14 @@ apply_pending_rearm() {
 
 while true; do
   current_state=$(state "$agent_name") || {
+    display_status lost
     notify lost || true
     exit 0
   }
-  if [[ "$current_state" != "$displayed_state" ]]; then
-    printf 'agent: %s\nstate: %s\n' "$agent_name" "$current_state"
-    displayed_state="$current_state"
-  fi
   if [[ "$current_state" == "working" && "$pending_rearm" == "true" ]]; then
     apply_pending_rearm || exit 0
   fi
+  display_status "$current_state"
 
   case "$current_state" in
     done|idle)
