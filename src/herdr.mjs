@@ -78,7 +78,7 @@ export function listAgents(options = {}) {
 
 export function projectAgent(a) {
   return {
-    name: a.terminal_title_stripped || a.pane_id,
+    name: (a.name || a.terminal_title_stripped || a.pane_id).slice(0, 100),
     kind: a.agent,
     state: STATES.includes(a.agent_status) ? a.agent_status : "unknown",
     pane: a.pane_id,

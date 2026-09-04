@@ -10,6 +10,7 @@
   "phases": { "explore": 4, "build": 3, "integrate": 2, "verify": 2, "fix": 1 },
   "agentRatio": 0.75,
   "nativeSubagentLimit": 4,
+  "sharedReadWorktree": false,
   "context": { "warnPercent": 70, "criticalPercent": 85 },
   "retention": { "detailDays": 30, "summaryDays": 180 }
 }

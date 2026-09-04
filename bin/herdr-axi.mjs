@@ -30,7 +30,8 @@ herdr-axi run queue <task-id> --role <role> --cwd <path> --area <relative-path> 
   Legacy --kind claude|codex|copilot instead of --role. Explicit acceptance criteria. 128 tasks/run.
 herdr-axi run next
   Reserve free slots; concurrent starts; reuse matching kind/cwd/policy. One writer per worktree.
-  Read-only verifiers may overlap; final verification needs an accepted writer dependency.
+  Separate worktrees for parallel work; sharedReadWorktree explicitly opts into instruction-only verifier overlap.
+  Final verification needs an accepted writer dependency.
   Pending/unknown/unreviewed work occupies slots. Native leaf reviewers have a separate bounded budget.
 herdr-axi run status | inbox
   Owned fleet only, context warnings, summaries <=600 chars/worker. No owner prompt injection.
@@ -47,9 +48,9 @@ herdr-axi run cancel <task-id>
   Queued tasks only.
 herdr-axi run recover <pane-or-task-id>
   Inspect first. Resume approved startup, acknowledge uncertain submission without resend,
-  or requeue only after all registered resources are verified absent.
+  or requeue only after all registered resources are verified absent. Accepted/cancelled tasks: repair their leftover lease only.
 herdr-axi run unlock
-  Dead transaction holder only. Writer leases fail closed after an unrecorded crash; inspect before manual recovery.
+  Dead transaction holder only. Same queued task reclaims an unlaunched lease; never unlock live work.
 herdr-axi run finish
   Accepted/cancelled tasks + closed workers required. Archive detail; prune known runtime files.
 herdr-axi run history [--task <task-id> | --all]
