@@ -39,6 +39,8 @@ if (process.argv[2] === "agent") {
       process.exit(0);
     }
     if (scenario === "long-line") { console.log("😀".repeat(12000) + "END"); process.exit(0); }
+    if (scenario === "layout-only") { console.log("┌─────┐\n│     │\n└─────┘"); process.exit(0); }
+    if (scenario === "padding") { process.stdout.write("  indented text  \n\n  \n"); process.exit(0); }
     const count = Number(args[args.indexOf("--lines") + 1]);
     console.log(Array.from({ length: count }, (_, i) => `line-${i + 1}`).join("\n"));
   } else if (args[1] === "prompt") {
@@ -169,15 +171,45 @@ if (process.argv[2] === "agent") {
   });
 
   test("compact reads remove layout noise while preserving text and indentation", () => {
-    const raw = run(["read", pane, "--full"], "chrome");
-    const compact = run(["read", pane, "--compact"], "chrome");
+    const raw = run(["read", pane, "--full", "--raw"], "chrome");
+    const compact = run(["read", pane], "chrome");
     assert.equal(compact.status, 0, compact.output);
     assert.match(raw.output, /─{8}/);
     assert.doesNotMatch(compact.output, /─{8}/);
     for (let i = 1; i <= 8; i++) assert(compact.output.includes(`Step ${i}: keep this text`));
     assert.match(compact.output, /  indented code/);
-    assert.match(compact.output, /compact: true/);
+    assert.doesNotMatch(compact.output, /raw: true/);
+    assert.equal(run(["read", pane, "--compact"], "chrome").output, compact.output);
     assert(Buffer.byteLength(compact.output) < Buffer.byteLength(raw.output) / 5);
+  });
+
+  test("history and formatting are independent; raw preserves terminal padding", () => {
+    for (const raw of [false, true]) for (const full of [false, true]) {
+      const r = run(["read", pane, ...(raw ? ["--raw"] : []), ...(full ? ["--full"] : [])], "chrome");
+      assert.equal(r.status, 0, r.output);
+      assert.equal(r.output.includes("─".repeat(8)), raw);
+      assert.equal(r.output.includes("raw: true"), raw);
+      assert.equal(r.calls.at(-1)[4], full ? (raw ? "recent" : "recent-unwrapped") : "visible");
+    }
+    const padded = run(["read", pane, "--raw"], "padding");
+    const value = padded.output.split("\n").find((line) => line.startsWith("output: ")).slice(8);
+    assert.equal(JSON.parse(value), "  indented text  \n\n  ");
+    const limited = run(["read", pane, "--full", "--lines", "5", "--chars", "10", "--raw"]);
+    assert.equal(limited.status, 0, limited.output);
+    assert.equal(limited.calls.at(-1).at(-1), "6");
+    assert.match(limited.output, /5-line cap, 10-character cap/);
+    assert.equal(run(["read", pane, "--full", "--lines", "NaN"]).status, 1);
+  });
+
+  test("layout-only content is disclosed and blocked reads offer raw inspection", () => {
+    const r = run(["read", pane], "layout-only");
+    assert.equal(r.status, 0, r.output);
+    assert.match(r.output, /layout-only output/);
+    assert.match(r.output, /herdr-axi read w1:pTEST --raw/);
+    assert.doesNotMatch(r.output, /no visible output/);
+    const blocked = run(["read", pane, "--lines", "5"], "blocked");
+    assert.match(blocked.output, /herdr-axi read w1:pTEST --lines 120/);
+    assert.doesNotMatch(blocked.output, /--full/);
   });
 
   test("character caps bound long lines without splitting Unicode characters", () => {
@@ -185,7 +217,7 @@ if (process.argv[2] === "agent") {
     assert.equal(r.status, 0, r.output);
     assert.match(r.output, /😀😀😀😀😀END/);
     assert.match(r.output, /8-character cap/);
-    assert.match(r.output, /herdr-axi read w1:pTEST --full/);
+    assert.match(r.output, /herdr-axi read w1:pTEST --lines 60 --chars 12003/);
     assert.doesNotMatch(r.output, /�/);
     assert.match(run(["read", pane], "long-line").output, /8000-character cap/);
     const full = run(["read", pane, "--full"], "long-line");
@@ -261,6 +293,36 @@ if (process.argv[2] === "agent") {
 
   test("unknown commands exit 2, invalid flags exit 1", () => {
     assert.equal(run(["nonexistent"]).status, 2);
+    assert.equal(run(["constructor"]).status, 2);
+    assert.equal(run(["toString", "--help"]).status, 2);
     assert.equal(run(["read", pane, "--typo"]).status, 1);
+  });
+
+  test("contradictory and misleading flags fail before touching the backend", () => {
+    for (const args of [
+      ["read", pane, "--raw", "--compact"], ["read", pane, "--raw=false"],
+      ["dispatch", pane, "hello", "--no-wait=false"], ["fleet", "--full"],
+      ["fleet", "unexpected"], ["read", pane, "unexpected"],
+      ["fleet", "--toString"],
+    ]) {
+      const r = run(args);
+      assert.equal(r.status, 1, r.output);
+      assert.equal(r.calls.length, 0);
+      assert(r.output.endsWith("\n"));
+      assert.match(r.output, /herdr-axi .*--help/);
+    }
+  });
+
+  test("agent-facing help teaches defaults and pane safety without querying the fleet", () => {
+    for (const args of [["--help"], ["read", "--help"]]) {
+      const r = run(args);
+      assert.equal(r.status, 0, r.output);
+      assert.match(r.output, /compact/);
+      assert.match(r.output, /--raw/);
+      assert.match(r.output, /--full/);
+      assert.equal(r.calls.length, 0);
+      assert(r.output.endsWith("\n"));
+    }
+    assert.match(run(["--help"]).output, /pane IDs.*never titles/);
   });
 }

@@ -27,7 +27,8 @@ export function runHerdr(args, { timeoutMs = 30_000, text = false } = {}) {
     throw new AxiError(`herdr ${args[0]} ${args[1] ?? ""} timed out after ${timeoutMs}ms`,
       "TIMEOUT", ["Raise --timeout-ms.", "Check the server: herdr status"]);
   }
-  if (text && r.status === 0) return (r.stdout || "").trimEnd();
+  // Remove only the CLI's final newline; --raw must retain terminal padding.
+  if (text && r.status === 0) return (r.stdout || "").replace(/\r?\n$/, "");
   const stdout = (r.stdout || "").trim();
   let parsed;
   try { parsed = JSON.parse(r.status === 0 ? stdout : (r.stderr || stdout)); } catch { parsed = null; }
