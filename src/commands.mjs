@@ -13,11 +13,14 @@ function parseArgs(args, spec) {
     const a = args[i];
     if (!a.startsWith("--")) { out._.push(a); continue; }
     const [flag, inline] = a.slice(2).split("=", 2);
-    if (!(flag in spec)) {
+    if (!Object.hasOwn(spec, flag)) {
       throw new AxiError(`unknown flag: --${flag}`, "UNKNOWN_FLAG",
         [`Valid flags: ${Object.keys(spec).map((f) => "--" + f).join(", ") || "(none)"}`, "herdr-axi --help"]);
     }
-    if (spec[flag] === "boolean") out[flag] = true;
+    if (spec[flag] === "boolean") {
+      if (inline !== undefined) throw new AxiError(`--${flag} takes no value`, "INVALID_VALUE", ["herdr-axi --help"]);
+      out[flag] = true;
+    }
     else { const v = inline ?? args[++i]; if (v === undefined || v.startsWith("--")) throw new AxiError(`--${flag} needs a value`, "MISSING_VALUE", ["herdr-axi --help"]); out[flag] = v; }
   }
   return out;
@@ -68,25 +71,31 @@ export function agents(args) {
   return { agents: rows.map(({ name, kind, state, pane }) => ({ name, kind, state, pane })), help: nextSteps(fleet(rows)) };
 }
 
-export function fleetCmd() {
+export function fleetCmd(args = []) {
+  const o = parseArgs(args, {});
+  if (o._.length) throw new AxiError("fleet takes no arguments", "INVALID_VALUE", ["herdr-axi fleet --help"]);
   const f = fleet();
   return { total: f.total, counts: f.counts, blocked: brief(f.blocked), working: brief(f.working), idle: brief(f.idle), done: brief(f.done), unknown: brief(f.unknown), help: nextSteps(f) };
 }
 
 export function read(args) {
-  const o = parseArgs(args, { lines: "string", chars: "string", full: "boolean", compact: "boolean" });
+  const o = parseArgs(args, { lines: "string", chars: "string", full: "boolean", raw: "boolean", compact: "boolean" });
+  if (o.raw && o.compact) throw new AxiError("--raw and --compact conflict", "INVALID_VALUE", ["herdr-axi read --help"]);
   const name = o._[0];
   if (!name) throw new AxiError("read needs a pane ID", "MISSING_ARG", ["herdr-axi read --help"]);
-  const a = findAgent(name);
-  const lines = o.full ? 2000 : positiveInt(o.lines ?? 60, "lines");
+  if (o._.length !== 1) throw new AxiError("read takes one pane ID", "INVALID_VALUE", ["herdr-axi read --help"]);
+  const requestedLines = positiveInt(o.lines ?? (o.full ? 2000 : 60), "lines");
+  const lines = o.full ? Math.min(requestedLines, 2000) : requestedLines;
   const chars = o.chars !== undefined ? positiveInt(o.chars, "chars") : (o.full ? Infinity : 8000);
-  const text = runHerdr(["agent", "read", a.pane, "--source", o.full ? "recent-unwrapped" : "visible", "--lines", String(lines + 1)], { timeoutMs: 20000, text: true });
+  const a = findAgent(name);
+  const source = o.full ? (o.raw ? "recent" : "recent-unwrapped") : "visible";
+  const text = runHerdr(["agent", "read", a.pane, "--source", source, "--lines", String(lines + 1)], { timeoutMs: 20000, text: true });
   const all = text.split("\n");
   // Truncate with a size hint and an escape hatch (AXI #3).
   const shown = all.slice(-lines);
   let output = shown.join("\n");
-  if (o.compact) {
-    // Opt-in: border-only diagram rows and terminal padding are layout, too.
+  if (!o.raw) {
+    // --raw preserves diagram borders and terminal layout within the same limits.
     output = output.split("\n")
       .map((line) => line.trimEnd().replace(/[ \t]+([│┃])$/, " $1"))
       .filter((line) => !/^[ \t]*[\u2500-\u259f][\s\u2500-\u259f]*$/u.test(line))
@@ -95,12 +104,22 @@ export function read(args) {
   const characters = Array.from(output);
   const clipped = characters.length > chars;
   output = characters.slice(-chars).join("");
+  const help = [];
+  const rawFlag = o.raw ? " --raw" : "";
+  if (clipped) help.push(`herdr-axi read ${a.pane}${o.full ? " --full" : ""}${rawFlag} --lines ${lines} --chars ${characters.length}`);
+  else if (all.length > shown.length) help.push(o.full
+    ? "History limit; ask the agent to write a file."
+    : ["working", "blocked"].includes(a.state)
+      ? `herdr-axi read ${a.pane}${rawFlag} --lines ${Math.max(lines + 1, 120)}`
+      : `herdr-axi read ${a.pane} --full${rawFlag}`);
+  else if (!o.raw && !output && text.trim()) help.push(`herdr-axi read ${a.pane} --raw${o.full ? " --full" : ""}`);
+  else if (a.state === "blocked") help.push(o.raw ? "herdr-axi dispatch --help" : `herdr-axi read ${a.pane} --raw`);
   return {
     pane: a.pane, state: a.state,
-    output: output || "(no visible output)",
+    output: output || (!o.raw && text.trim() ? "(layout-only output; use --raw)" : "(no visible output)"),
     ...(all.length > shown.length || clipped ? { truncated: [all.length > shown.length ? `${lines}-line cap` : "", clipped ? `${chars}-character cap` : ""].filter(Boolean).join(", ") } : {}),
-    ...(o.compact ? { compact: true } : {}),
-    ...(all.length > shown.length || clipped ? { help: [o.full && all.length > shown.length ? "History limit; ask the agent to write a file." : `herdr-axi read ${a.pane} --full`] } : a.state === "blocked" ? { help: ["herdr-axi dispatch --help"] } : {}),
+    ...(o.raw ? { raw: true } : {}),
+    ...(help.length ? { help } : {}),
   };
 }
 
