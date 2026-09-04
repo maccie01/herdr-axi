@@ -40,9 +40,11 @@ export function contextStatus(run, workers, rows) {
   let cache = {};
   try { cache = JSON.parse(fs.readFileSync(file)); } catch { /* diagnostic cache only */ }
   const now = Date.now();
-  // ponytail: at most two 1s probes/call; shared cache avoids a poll fan-out.
+  // ponytail: at most two 1s backend probes/call; bounded local transcript tails
+  // need no terminal round trip and do not compete for that budget.
   const candidates = workers.filter((w) => !w.closed && rows.some((a) => a.pane === w.pane));
-  const due = candidates.filter((w) => !cache[w.pane] || cache[w.pane].generation !== w.generation || now - cache[w.pane].at >= 15000).sort((a, b) => (cache[a.pane]?.at ?? 0) - (cache[b.pane]?.at ?? 0)).slice(0, 2);
+  let probes = 0;
+  const due = candidates.filter((w) => !cache[w.pane] || cache[w.pane].generation !== w.generation || now - cache[w.pane].at >= 15000).sort((a, b) => (cache[a.pane]?.at ?? 0) - (cache[b.pane]?.at ?? 0)).filter((w) => w.kind !== "codex" || ++probes <= 2);
   for (const w of due) {
     let value = { source: "unknown" };
     try {
@@ -63,11 +65,15 @@ export function contextStatus(run, workers, rows) {
     fs.renameSync(temp, file);
   }
   const warnings = [];
-  let unknown = 0;
+  let unknown = 0, stale = 0;
   for (const w of candidates) {
     const c = cache[w.pane];
-    if (!c || c.generation !== w.generation || now - c.at > 120000 || c.percent === undefined) { unknown++; continue; }
-    if (c.percent >= run.config.context.warnPercent) warnings.push({ pane: w.pane, percent: c.percent, level: c.percent >= run.config.context.criticalPercent ? "critical" : "warning", source: c.source });
+    if (!c || c.generation !== w.generation || c.percent === undefined) { unknown++; continue; }
+    const expired = now - c.at > 120000;
+    if (expired) { unknown++; stale++; }
+    // A slow poll/large fleet must not erase a previously observed warning.
+    // Retain the evidence with its age, never pretend it is a fresh reading.
+    if (c.percent >= run.config.context.warnPercent) warnings.push({ pane: w.pane, percent: c.percent, level: c.percent >= run.config.context.criticalPercent ? "critical" : "warning", source: c.source, ...(expired ? { stale: true, ageSeconds: Math.floor((now - c.at) / 1000) } : {}) });
   }
-  return { warnings, unknown };
+  return { warnings, unknown, stale };
 }

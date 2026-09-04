@@ -12,6 +12,8 @@ import { collectArchives, projectRuns } from "../src/archive.mjs";
 test("project config rejects typos, recursive/write delegates and impossible budgets", () => {
   const c = validateConfig({ roles: { implementer: { subagents: [{ role: "verifier", max: 1, when: "review" }] } } });
   assert.equal(c.agentRatio, 0.75); assert.equal(c.roles.implementer.model, "gpt-5.6-sol");
+  assert.equal(c.sharedReadWorktree, false);
+  assert.throws(() => validateConfig({ sharedReadWorktree: "true" }), /boolean/);
   for (const config of [{ agentsRatio: 0.5 }, { phases: { fix: 0 } }, { context: { warnPercent: 90, criticalPercent: 80 } }, { retention: { detailDays: 90, summaryDays: 30 } }, { roles: { verifier: { typo: 1 } } }, { roles: { implementer: { subagents: [{ role: "implementer", max: 1, when: "recurse" }] } } }, { nativeSubagentLimit: 0, roles: { implementer: { subagents: [{ role: "verifier", max: 1, when: "review" }] } } }]) assert.throws(() => validateConfig(config), /Invalid|require|exceeds/i);
 });
 
@@ -27,11 +29,17 @@ test("canonical worktree and cross-run writer leases, read-only exception", () =
     const task = { id: "a", cwd: repo, worktree: worktree(repo), access: "write" };
     assert(writerLease({ id: "first" }, task));
     assert(!writerLease({ id: "second" }, task));
-    assert(writerLease({ id: "second" }, { ...task, access: "read" }));
+    assert(!writerLease({ id: "second" }, { ...task, access: "read" }), "read contracts are not isolation");
+    assert(writerLease({ id: "second", config: { sharedReadWorktree: true } }, { ...task, access: "read" }));
     writerLease({ id: "second" }, task, true);
     assert(!writerLease({ id: "second" }, task), "wrong owner cannot release lease");
     writerLease({ id: "first" }, task, true);
     assert(writerLease({ id: "second" }, task));
+    const leases = path.join(dir, "state/writers");
+    for (const invalid of ["partial lease", "null"]) {
+      fs.writeFileSync(path.join(leases, fs.readdirSync(leases)[0]), invalid);
+      assert(!writerLease({ id: "third" }, { ...task, state: "queued" }), "unknown lease defers, never aborts unrelated selections");
+    }
   } finally { if (previous === undefined) delete process.env.HERDR_AXI_STATE_HOME; else process.env.HERDR_AXI_STATE_HOME = previous; fs.rmSync(dir, { recursive: true, force: true }); }
 });
 

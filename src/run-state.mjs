@@ -25,6 +25,8 @@ export function changeRun(fn, { allowFinished = false } = {}) {
   try { fd = fs.openSync(lock, "wx", 0o600); }
   catch (e) { if (e.code === "EEXIST") throw runError("Run transaction busy; retry. After a crash: herdr-axi run unlock", "RUN_BUSY"); throw e; }
   const temp = path.join(dir, `run.${process.pid}.tmp`);
+  const rollback = [], afterCommit = [];
+  let committed = false;
   try {
     fs.writeFileSync(fd, String(process.pid));
     if (fs.existsSync(path.join(dir, "run.unlock"))) throw runError("Run lock recovery in progress; retry", "RUN_BUSY");
@@ -32,18 +34,22 @@ export function changeRun(fn, { allowFinished = false } = {}) {
     if (run.finishedAt && !allowFinished) throw runError("Archived run is read-only", "RUN_FINISHED");
     const before = new Map(run.tasks.map((t) => [t.id, t.state]));
     const phase = run.phase;
-    const result = fn(run);
+    const result = fn(run, { rollback, afterCommit });
     const at = new Date().toISOString();
     run.events ??= [];
     for (const t of run.tasks) if (before.get(t.id) !== t.state) run.events.push({ at, task: t.id, state: t.state, ...(t.pane ? { pane: t.pane } : {}), ...(t.error ? { error: t.error } : {}) });
     if (phase !== run.phase) run.events.push({ at, phase: run.phase });
     fs.writeFileSync(temp, JSON.stringify(run) + "\n", { mode: 0o600 });
     fs.renameSync(temp, path.join(dir, "run.json"));
+    committed = true;
+    for (const effect of afterCommit) effect();
     return result;
   } finally {
+    // Undo reservations before unlocking; crashes remain fail-closed.
+    if (!committed) for (const undo of rollback.reverse()) { try { undo(); } catch { /* lease retained */ } }
     fs.closeSync(fd);
     fs.rmSync(temp, { force: true });
-    fs.unlinkSync(lock);
+    fs.rmSync(lock, { force: true });
   }
 }
 
@@ -53,7 +59,7 @@ export function isSelf(pane, run = loadRun()) {
 
 export function ownedRows(rows, { all = false } = {}) {
   const run = loadRun();
-  const workers = run ? ownedWorkers(run) : [];
+  const workers = run && !all ? ownedWorkers(run, { observe: true }) : [];
   return rows.filter((a) => !isSelf(a.pane, run) && (all || !run || workers.some((w) => !w.closed && w.tab !== run.owner.tab && w.pane === a.pane && w.workspace === a.workspace && w.tab === a.tab && w.name === a.backendName && (!w.terminal || w.terminal === a.terminal) && (!w.session || w.session === a.session))));
 }
 
@@ -67,11 +73,13 @@ export function registeredWorker(run, task) {
   return { name: task.name, pane: r.agent_pane, tab: r.tab_id, monitor: r.monitor_pane, workspace: run.workspace, kind: task.kind, cwd: task.cwd, model: task.model, effort: task.effort, policy: task.policy, contextWindowTokens: task.contextWindowTokens, receipt: r.receipt_file, generation: r.generation, stage: r.stage };
 }
 
-export function ownedWorkers(run) {
+export function ownedWorkers(run, { observe = false } = {}) {
   const workers = [...run.workers];
   for (const t of pending(run)) if (!workers.some((w) => w.name === t.name)) {
-    const w = registeredWorker(run, t);
-    if (w) workers.push(w);
+    try {
+      const w = registeredWorker(run, t);
+      if (w) workers.push(w);
+    } catch (e) { if (!observe) throw e; }
   }
   return workers;
 }

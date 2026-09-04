@@ -178,7 +178,9 @@ Tiny tasks are usually faster locally. Put scope, acceptance criteria and requir
 checks in each prompt. `--area` is one write subtree relative to `--cwd`. Writers
 serialize across the entire canonical Git worktree, even for disjoint areas or
 different subdirectories. Cross-run writer leases enforce the same rule. Use
-separate worktrees for parallel edits. Read-only verifiers can overlap; final
+separate worktrees for parallel work. By default read-only roles also reserve
+their worktree: an instruction is not a sandbox. `sharedReadWorktree: true` opts
+into instruction-only verifier overlap, accepting the risk of accidental writes; final
 verification should depend on the writer's acceptance (`--after`). Existing
 unmanaged agents in the same workspace/worktree conservatively block new writers.
 The area is scheduling metadata and a worker instruction, not a filesystem sandbox.
@@ -235,6 +237,16 @@ separate action. If a lost worker's tab remains, inspect it and explicitly clean
 up only its recorded resources first. Missing registry or unreadable resource
 identity fails closed. `run unlock` releases only a dead process's short transaction
 lock; an interrupted unlock itself requires inspecting `run.unlock` manually.
+Status degrades identity drift to `lost` and keeps its slot reserved; unrelated
+workers remain observable. Control never adopts a replacement session automatically.
+Inbox collection errors are isolated per worker and bounded to eight diagnostics.
+
+Failed queue transactions roll back acquired leases; an interrupted reservation
+can be reclaimed only by its same queued task. Lease release follows durable state
+publication. `run recover <accepted-or-cancelled-task>` repairs a leftover lease
+without touching panes. Worker publication retries a busy transaction for up to
+five seconds, never rerunning startup or prompting. Persistent failures return
+`delivery:record_pending` and recovery instructions; the registry remains discoverable.
 
 `run close <pane>` requires acceptance and the matching generation's completion
 proof. The engine verifies tab/pane identity, refuses extra unregistered panes,
@@ -259,6 +271,7 @@ already-running owner's model. `--kind` remains an explicit legacy worker option
 | `roles.<name>.subagents` | Optional `[{role, max, when}]`; read-only leaf roles only |
 | `roles.<name>.contextWindowTokens` | Optional known input-window size; never guessed |
 | `nativeSubagentLimit` | Maximum reserved native children across pending tasks; 4 |
+| `sharedReadWorktree` | `false`; explicit instruction-only read/write overlap opt-in |
 | `phases` | Primary caps: explore 4, build 3, integrate 2, verify 2, fix 1 |
 | `agentRatio` | Original agent pane share, 0.75; lower monitor pane 0.25 |
 | `context` | `warnPercent: 70`, `criticalPercent: 85` |
@@ -267,9 +280,13 @@ already-running owner's model. `--kind` remains an explicit legacy worker option
 Context warnings use Codex's explicit `Context N% left` footer or the latest
 Claude/Copilot input-token count divided by a configured window. No cost, weekly
 quota, or cumulative token totals. Missing telemetry is `contextUnknown`, never
-healthy zero. Probes: at most two owned panes per status call, 1s each, 15s shared
-cache; no background daemon or per-poll full transcript scan. Native transcripts
+healthy zero. Probes: at most two terminal reads per status call, 1s each, 15s shared
+cache; local transcript tails do not consume that backend budget. No background
+daemon or per-poll full transcript scan. Native transcripts
 are bounded to their last 128KB and require matching available session metadata.
+After 120s, readings count as unknown/stale. Previous warnings remain visible with
+`stale:true` and `ageSeconds`; `contextStale` exposes coverage lag in large/slowly
+polled fleets. No stale value is presented as a fresh health measurement.
 Warnings advise a safe checkpoint/review/replacement, never interrupt or kill work.
 
 Run state defaults outside Git: `~/.local/state/herdr-axi/projects/<hash>/runs/<id>`.

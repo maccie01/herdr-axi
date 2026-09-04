@@ -384,7 +384,10 @@ chmod +x "$fake_bin/uuidgen"
 
 ln -s /opt/homebrew/bin/rg "$fake_bin/rg"
 export PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export HERDR_BIN="$fake_bin/herdr"
 export FAKE_HERDR_ORCHESTRATOR=orch
+unset HERDR_AXI_RUN HERDR_AXI_OWNER_PANE HERDR_AXI_OWNER_TAB HERDR_AXI_MANAGED_TASK HERDR_AXI_AGENT_RATIO
+unset HERDR_MONITOR_INBOX HERDR_MONITOR_RENDER_ONLY
 
 [[ "$(command -v herdr)" == "$fake_bin/herdr" ]] || {
   printf '%s\n' "FAIL: fake herdr is not the only reachable herdr" >&2
@@ -1713,6 +1716,40 @@ test_monitor_survives_quiet_intervals() (
   done
 )
 
+test_failed_native_waits_back_off_and_lost_terminates() (
+  setup_case failed-native-waits
+  write_complete_transcript
+  printf '%s\n' 999 > "$FAKE_HERDR_CASE/prompt-failures"
+  : > "$FAKE_HERDR_CASE/release-waits"
+  bash "$monitor_script" worker worker orch "$HERDR_MONITOR_RECEIPT" "$hook_script" &
+  monitor_pid=$!
+  sleep 5
+  kill -0 "$monitor_pid" 2>/dev/null || fail "failed wait ended supervision"
+  attempts=$(file_value "$FAKE_HERDR_CASE/prompt-attempts")
+  (( attempts > 0 && attempts <= 9 )) || fail "failed waits caused a hot loop: $attempts prompt attempts"
+  kill "$monitor_pid" 2>/dev/null || true
+  wait "$monitor_pid" 2>/dev/null || true
+  assert_no_fake_waiters "failed wait cleanup"
+
+  setup_case lost-with-hook-failure
+  : > "$FAKE_HERDR_CASE/agent-get-fail"
+  empty_hook="$FAKE_HERDR_CASE/empty-hook.sh"
+  printf '%s\n' '#!/bin/bash' 'exit 0' > "$empty_hook"
+  bash "$monitor_script" worker worker orch "$HERDR_MONITOR_RECEIPT" "$empty_hook" &
+  monitor_pid=$!
+  for _ in $(seq 1 100); do
+    kill -0 "$monitor_pid" 2>/dev/null || break
+    sleep 0.02
+  done
+  if kill -0 "$monitor_pid" 2>/dev/null; then
+    kill "$monitor_pid" 2>/dev/null || true
+    wait "$monitor_pid" 2>/dev/null || true
+    fail "lost notification retried forever"
+  fi
+  wait "$monitor_pid"
+  assert_eq 0 "$(call_count 'agent wait')" "lost worker must not wait for a transition"
+)
+
 test_managed_inbox_never_prompts_owner() (
   setup_case managed-inbox
   write_complete_transcript
@@ -1749,6 +1786,12 @@ test_idle_completion_is_collected() (
     bash "$monitor_script" worker worker orch "$HERDR_MONITOR_RECEIPT" "$hook_script" &
   monitor_pid=$!
   wait_for_file "${HERDR_MONITOR_RECEIPT}.inbox" || fail "idle completion was never collected"
+  # Inbox publication precedes receipt acknowledgement. Wait for the actual
+  # condition, not a sibling file (especially under concurrent test load).
+  for _ in $(seq 1 250); do
+    [[ "$(receipt_read_field 4)" == "delivered" ]] && break
+    sleep 0.02
+  done
   assert_eq delivered "$(receipt_read_field 4)" "idle completion receipt"
   kill "$monitor_pid" 2>/dev/null || true
   wait "$monitor_pid" 2>/dev/null || true
@@ -1824,6 +1867,7 @@ tests=(
   test_idle_completion_is_collected
   test_blocked_startup_resumes_owned_pane
   test_monitor_survives_quiet_intervals
+  test_failed_native_waits_back_off_and_lost_terminates
   test_managed_inbox_never_prompts_owner
   test_prompt_ack_and_no_nested_agents
   test_close_owner_tab_is_refused

@@ -22,6 +22,7 @@ export const DEFAULT_CONFIG = {
   phases: PHASES,
   agentRatio: 0.75,
   nativeSubagentLimit: 4,
+  sharedReadWorktree: false,
   context: { warnPercent: 70, criticalPercent: 85 },
   retention: { detailDays: 30, summaryDays: 180 },
 };
@@ -37,7 +38,8 @@ export function validateConfig(input = {}) {
   for (const key of ["phases", "context", "retention"]) {
     if (input[key] !== undefined) { keys(input[key], Object.keys(config[key]), key); Object.assign(config[key], input[key]); }
   }
-  for (const key of ["agentRatio", "nativeSubagentLimit"]) if (input[key] !== undefined) config[key] = input[key];
+  for (const key of ["agentRatio", "nativeSubagentLimit", "sharedReadWorktree"]) if (input[key] !== undefined) config[key] = input[key];
+  if (typeof config.sharedReadWorktree !== "boolean") throw runError("sharedReadWorktree must be boolean", "CONFIG_INVALID");
   if (input.roles !== undefined) {
     if (!object(input.roles)) throw runError("roles must be an object", "CONFIG_INVALID");
     for (const [name, role] of Object.entries(input.roles)) {
@@ -75,14 +77,22 @@ export function projectConfig(cwd) {
 // Shared across runs; fail closed after crashes. A lease is released only by
 // its recorded task, after acceptance or verified disappearance of its panes.
 export function writerLease(run, task, release = false) {
-  if (task.access === "read") return true;
+  if (task.access === "read" && run.config?.sharedReadWorktree) return true;
   const dir = path.join(stateRoot(), "writers");
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const file = path.join(dir, hash(task.worktree || task.cwd) + ".json");
   const value = { run: run.id, directory: process.env.HERDR_AXI_RUN ? path.resolve(process.env.HERDR_AXI_RUN) : null, task: task.id, worktree: task.worktree || task.cwd };
   if (!release) {
     try { fs.writeFileSync(file, JSON.stringify(value), { flag: "wx", mode: 0o600 }); return true; }
-    catch (e) { if (e.code !== "EEXIST") throw e; return false; }
+    catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      // A queued task cannot have launched. Reclaim its own reservation after
+      // an interrupted transaction, never another run/task's lease.
+      let old;
+      try { old = JSON.parse(fs.readFileSync(file, "utf8")); }
+      catch { return false; } // Unreadable reservation blocks only this worktree.
+      return task.state === "queued" && old?.run === value.run && old.task === value.task && old.directory === value.directory;
+    }
   }
   try {
     const old = JSON.parse(fs.readFileSync(file, "utf8"));

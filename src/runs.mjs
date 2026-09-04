@@ -25,14 +25,29 @@ export function ownerCheck(run) {
     throw runError("Owner identity changed; refusing to control this run", "OWNER_CHANGED");
 }
 
-function safeWorker(run, worker, rows) {
-  if (!worker || worker.closed) throw runError("Pane is not a live owned worker", "NOT_OWNED");
-  if (worker.pane === run.owner.pane || worker.tab === run.owner.tab || worker.pane === process.env.HERDR_PANE_ID || worker.tab === process.env.HERDR_TAB_ID)
-    throw runError("Refusing an operation on the orchestrator or its tab", "SELF_TARGET");
-  const a = rows.find((a) => a.pane === worker.pane);
-  if (a && (a.workspace !== run.workspace || a.tab !== worker.tab || a.backendName !== worker.name || (worker.terminal && a.terminal !== worker.terminal) || (worker.session && a.session !== worker.session)))
-    throw runError("Worker identity changed", "WORKER_CHANGED");
-  return a;
+function safeWorker(run, worker, rows, { observe = false } = {}) {
+  try {
+    if (!worker || worker.closed) throw runError("Pane is not a live owned worker", "NOT_OWNED");
+    if (worker.pane === run.owner.pane || worker.tab === run.owner.tab || worker.pane === process.env.HERDR_PANE_ID || worker.tab === process.env.HERDR_TAB_ID)
+      throw runError("Refusing an operation on the orchestrator or its tab", "SELF_TARGET");
+    const a = rows.find((a) => a.pane === worker.pane);
+    if (a && (a.workspace !== run.workspace || a.tab !== worker.tab || a.backendName !== worker.name || (worker.terminal && a.terminal !== worker.terminal) || (worker.session && a.session !== worker.session)))
+      throw runError("Worker identity changed", "WORKER_CHANGED");
+    return a;
+  } catch (e) {
+    if (observe && ["NOT_OWNED", "SELF_TARGET", "WORKER_CHANGED"].includes(e.code)) return null;
+    throw e;
+  }
+}
+
+// Retry publication only, never the engine call or prompt delivery.
+async function publishRun(fn) {
+  const deadline = Date.now() + 5000;
+  while (true) {
+    try { return changeRun(fn); }
+    catch (e) { if (e.code !== "RUN_BUSY" || Date.now() >= deadline) throw e; }
+    await delay(50);
+  }
 }
 
 function engineCall(args, run) {
@@ -91,15 +106,19 @@ async function launch(task, run) {
       runHerdr(["tab", "rename", worker.tab, label]);
     } catch (e) { labelError = e.message.slice(0, 300); }
   }
-  changeRun((r) => {
-    const t = r.tasks.find((t) => t.id === task.id);
-    t.state = error ? "uncertain" : "running";
-    if (error) t.error = error.message.slice(0, 600); else delete t.error;
-    if (worker) {
-      t.pane = worker.pane;
-      r.workers = [...r.workers.filter((w) => w.pane !== worker.pane), worker];
-    }
-  });
+  try {
+    await publishRun((r) => {
+      const t = r.tasks.find((t) => t.id === task.id);
+      t.state = error ? "uncertain" : "running";
+      if (error) t.error = error.message.slice(0, 600); else delete t.error;
+      if (worker) {
+        t.pane = worker.pane;
+        r.workers = [...r.workers.filter((w) => w.pane !== worker.pane), worker];
+      }
+    });
+  } catch (e) {
+    return { task: task.id, ...(worker ? { pane: worker.pane } : {}), state: "uncertain", delivery: "record_pending", error: e.message.slice(0, 600), note: "Worker registry retained. Inspect, then recover; do not resend the prompt.", help: [`herdr-axi run recover ${task.id}`] };
+  }
   const startup = error && worker?.stage === "created";
   const blocked = startup && error.message.includes("agent_not_ready");
   return { task: task.id, ...(worker ? { pane: worker.pane } : {}), state: blocked ? "blocked" : error ? "uncertain" : "running", ...(error ? { error: error.message.slice(0, 600) } : {}), ...(labelError ? { labelError } : {}),
@@ -111,26 +130,29 @@ export function runStatus() {
   if (!run) throw runError("Select a run with HERDR_AXI_RUN", "RUN_REQUIRED");
   if (run.finishedAt) return { finished: run.finishedAt, complete: true, help: ["herdr-axi run history"] };
   const rows = listAgents({ all: true });
-  const workers = ownedWorkers(run);
+  const workers = ownedWorkers(run, { observe: true });
   const tasks = pending(run).map((t) => {
     const w = workers.find((w) => (t.pane ? w.pane === t.pane : w.name === t.name) && !w.closed);
-    const a = w ? safeWorker(run, w, rows) : null;
-    const current = w?.stage === "created" ? registeredWorker(run, t) : null;
+    const a = w ? safeWorker(run, w, rows, { observe: true }) : null;
+    let current;
+    try { current = !w || w.stage === "created" ? registeredWorker(run, t) : null; }
+    catch { return { task: t.id, pane: w?.pane ?? t.pane ?? "pending", state: "lost", error: "Unreadable worker registry; inspect run receipts" }; }
     const stage = w?.stage === "created"
       ? (current?.pane === w.pane && current?.tab === w.tab ? current.stage : undefined) : w?.stage;
-    const state = a?.state === "blocked" ? "blocked" : t.state === "starting" ? "starting" : a?.state ?? (w ? "lost" : t.state);
+    const state = w && !a ? "lost" : a?.state === "blocked" ? "blocked" : t.state === "starting" ? "starting" : a?.state ?? t.state;
     const complete = t.state === "running" && w && receipt(w)?.complete && ["idle", "done"].includes(state);
     return { task: t.id, pane: w?.pane ?? t.pane ?? "pending", state: complete ? "review" : state, ...(stage === "created" ? { delivery: "not_submitted" } : t.state === "uncertain" ? { delivery: "uncertain" } : {}) };
   });
   const queued = run.tasks.filter((t) => t.state === "queued");
   const parked = run.workers.filter((w) => !w.closed && !pending(run).some((t) => t.pane === w.pane)).map((w) => w.pane);
-  const context = run.config ? contextStatus(run, workers, rows) : null;
+  const context = run.config ? contextStatus(run, workers.filter((w) => !w.closed && safeWorker(run, w, rows, { observe: true })), rows) : null;
   const blocked = tasks.find((t) => t.state === "blocked");
   const ready = tasks.find((t) => t.delivery === "not_submitted" && ["idle", "done"].includes(t.state));
   return { phase: run.phase, capacity: limit(run), occupied: tasks.length, queued: queued.length, tasks,
     ...(run.config ? { nativeReserved: pending(run).reduce((n, t) => n + (t.nativeSlots ?? 0), 0), nativeCapacity: run.config.nativeSubagentLimit } : {}),
     ...(context?.warnings.length ? { contextWarnings: context.warnings, contextAction: "Checkpoint at a safe boundary; review, then replace/compact the accepted worker. Never interrupt unfinished work automatically." } : {}),
     ...(context?.unknown ? { contextUnknown: context.unknown } : {}),
+    ...(context?.stale ? { contextStale: context.stale } : {}),
     parked,
     ...(!tasks.length && queued.length ? { backlog: queued.slice(0, 8).map((t) => ({ task: t.id, phase: t.phase, after: t.deps })), ...(queued.length > 8 ? { more: queued.length - 8 } : {}) } : {}),
     ...(!tasks.length && !queued.length && !parked.length ? { complete: true } : {}),
@@ -191,7 +213,8 @@ export async function runCommand(action, o) {
     const late = status.tasks.filter((t) => ["idle", "done"].includes(t.state))
       .map((t) => run.workers.find((w) => w.pane === t.pane))
       .filter((w) => w && fs.existsSync(`${w.receipt}.proof.${w.generation}`));
-    await Promise.all(late.map((w) => engineCall(["collect", w.name], run)));
+    const collected = await Promise.allSettled(late.map((w) => engineCall(["collect", w.name], run)));
+    const errors = collected.flatMap((r, i) => r.status === "rejected" ? [{ pane: late[i].pane, error: r.reason.message.slice(0, 300) }] : []);
     if (late.length) status = runStatus();
     const events = [];
     for (const t of pending(run)) {
@@ -200,10 +223,10 @@ export async function runCommand(action, o) {
       try {
         const e = JSON.parse(fs.readFileSync(`${w.receipt}.inbox`, "utf8"));
         if (e.generation === w.generation) events.push({ task: t.id, pane: w.pane, event: e.event, summary: String(e.summary).slice(0, 600), ...(e.truncated ? { truncated: true } : {}) });
-      } catch (e) { if (e.code !== "ENOENT") throw e; }
+      } catch (e) { if (e.code !== "ENOENT") errors.push({ pane: w.pane, error: e.message.slice(0, 300) }); }
     }
     const first = status.tasks.find((t) => t.state === "blocked") ?? status.tasks.find((t) => t.pane !== "pending");
-    return { ...status, events, help: [first ? `herdr-axi read ${first.pane}${first.state === "blocked" ? " --raw" : ""}` : "herdr-axi run status", "herdr-axi run --help"] };
+    return { ...status, events, ...(errors.length ? { errors: errors.slice(0, 8), ...(errors.length > 8 ? { moreErrors: errors.length - 8 } : {}) } : {}), help: [first ? `herdr-axi read ${first.pane}${first.state === "blocked" ? " --raw" : ""}` : "herdr-axi run status", "herdr-axi run --help"] };
   }
   ownerCheck(run);
   if (action === "finish") return { ...finishRun(), cleanup: collectArchives(run.project) };
@@ -264,16 +287,25 @@ export async function runCommand(action, o) {
     return { phase, capacity: cap, ...(retired.length ? { retired } : {}), help: ["herdr-axi run status"] };
   }
   if (action === "cancel") {
-    changeRun((r) => {
+    changeRun((r, { afterCommit }) => {
       const t = r.tasks.find((t) => t.id === o._[0]);
       if (!t || t.state !== "queued") throw runError("Only queued tasks can be cancelled; never abandon live work");
       t.state = "cancelled";
+      afterCommit.push(() => writerLease(r, t, true));
     });
     return { cancelled: o._[0] };
   }
   const rows = listAgents({ all: true });
   if (action === "recover") {
     const t = [...run.tasks].reverse().find((t) => t.id === o._[0] || t.pane === o._[0]);
+    if (t && ["accepted", "cancelled"].includes(t.state)) {
+      changeRun((r, { afterCommit }) => {
+        const current = r.tasks.find((p) => p.id === t.id);
+        if (current.state !== t.state) throw runError("Task changed; retry");
+        afterCommit.push(() => writerLease(r, current, true));
+      });
+      return { releasedLease: t.id, note: "Only this completed task's reservation released; no pane input or prompt resend." };
+    }
     if (!t || !["starting", "uncertain", "running"].includes(t.state)) throw runError("Task is not active");
     if (t.state === "starting" && t.launcher) {
       try { process.kill(t.launcher, 0); throw runError("Launcher still running; wait for its result"); }
@@ -287,11 +319,11 @@ export async function runCommand(action, o) {
         catch (e) { if (e.code === "UNKNOWN_AGENT") return true; throw e; }
       };
       if (absent("tab", recorded.tab) && absent("pane", recorded.pane) && (!recorded.monitor || absent("pane", recorded.monitor))) {
-        changeRun((r) => {
+        changeRun((r, { afterCommit }) => {
           const current = r.tasks.find((p) => p.id === t.id);
           if (current.state !== t.state) throw runError("Task changed; retry");
           current.state = "queued"; delete current.pane; delete current.name;
-          writerLease(r, current, true);
+          afterCommit.push(() => writerLease(r, current, true));
           r.workers = r.workers.filter((w) => w.pane !== recorded.pane);
         });
         return { requeued: t.id, note: "Registered tab and panes verified absent; no prompt resent.", help: ["herdr-axi run next"] };
@@ -319,19 +351,22 @@ export async function runCommand(action, o) {
     return { recovered: worker.pane, help: ["herdr-axi watch"] };
   }
   if (action === "next") {
-    const otherTrees = rows.filter((a) => a.kind && a.cwd && !run.workers.some((w) => w.pane === a.pane) && a.workspace === run.workspace).map((a) => { try { return worktree(a.cwd); } catch { return a.cwd; } });
-    const selection = changeRun((r) => {
+    const sharedReaders = new Set(run.config?.sharedReadWorktree ? pending(run).filter((t) => t.access === "read").map((t) => t.pane) : []);
+    const otherTrees = rows.filter((a) => a.kind && a.cwd && !run.workers.some((w) => w.pane === a.pane && (["idle", "done"].includes(a.state) || sharedReaders.has(a.pane)) && safeWorker(run, w, rows, { observe: true })) && a.workspace === run.workspace).map((a) => { try { return worktree(a.cwd); } catch { return a.cwd; } });
+    const selection = changeRun((r, { rollback }) => {
       const selected = [], deferred = [];
       const defer = (t, reason) => deferred.push({ task: t.id, reason });
       for (const t of r.tasks.filter((t) => t.state === "queued" && t.phase === r.phase)) {
         if (pending(r).length >= limit(r)) { defer(t, "primary capacity"); continue; }
         if (t.deps.some((id) => r.tasks.find((d) => d.id === id)?.state !== "accepted")) { defer(t, "unaccepted dependency"); continue; }
-        if (t.access !== "read" && (otherTrees.includes(t.worktree) || pending(r).some((p) => p.access !== "read" && ((p.worktree && p.worktree === t.worktree) || overlaps(p.area, t.area))))) { defer(t, "worktree busy"); continue; }
+        const exclusive = (task) => task.access !== "read" || !r.config?.sharedReadWorktree;
+        if (exclusive(t) && (otherTrees.includes(t.worktree) || pending(r).some((p) => exclusive(p) && ((p.worktree && p.worktree === t.worktree) || overlaps(p.area, t.area))))) { defer(t, "worktree busy"); continue; }
         if (pending(r).reduce((n, p) => n + (p.nativeSlots ?? 0), 0) + (t.nativeSlots ?? 0) > (r.config?.nativeSubagentLimit ?? 0)) { defer(t, "native capacity"); continue; }
-        const reusable = r.workers.find((w) => !w.closed && !w.closing && w.kind === t.kind && w.cwd === t.cwd && w.policy === t.policy && !pending(r).some((p) => p.pane === w.pane) && ["idle", "done"].includes(safeWorker(r, w, rows)?.state));
+        const reusable = r.workers.find((w) => !w.closed && !w.closing && w.kind === t.kind && w.cwd === t.cwd && w.policy === t.policy && !pending(r).some((p) => p.pane === w.pane) && ["idle", "done"].includes(safeWorker(r, w, rows, { observe: true })?.state));
         // Parked workers remain a bounded pool, even after a phase narrows.
         if (!reusable && r.workers.filter((w) => !w.closed).length + pending(r).filter((p) => !p.pane).length >= limit(r)) { defer(t, "parked pool full; close an unused accepted worker"); continue; }
         if (!writerLease(r, t)) { defer(t, "worktree writer lease held; inspect before recovery"); continue; }
+        rollback.push(() => writerLease(r, t, true));
         t.state = "starting";
         t.launcher = process.pid;
         // Herdr names are lowercase and at most 32 characters; task IDs need
@@ -343,7 +378,7 @@ export async function runCommand(action, o) {
       return { selected, deferred };
     });
     const started = await Promise.all(selection.selected.map((t) => launch(t, run)));
-    return { started, ...(selection.deferred.length ? { deferred: selection.deferred.slice(0, 8), ...(selection.deferred.length > 8 ? { more: selection.deferred.length - 8 } : {}) } : {}), help: started.find((t) => t.submitted === false)?.help ?? [started.length ? "herdr-axi watch" : "herdr-axi run status"], ...(!started.length ? { note: "No eligible task; inspect deferred reasons or queued phases." } : {}) };
+    return { started, ...(selection.deferred.length ? { deferred: selection.deferred.slice(0, 8), ...(selection.deferred.length > 8 ? { more: selection.deferred.length - 8 } : {}) } : {}), help: started.find((t) => t.help)?.help ?? [started.length ? "herdr-axi watch" : "herdr-axi run status"], ...(!started.length ? { note: "No eligible task; inspect deferred reasons or queued phases." } : {}) };
   }
   const pane = o._[0];
   const worker = run.workers.find((w) => w.pane === pane && !w.closed);
@@ -352,14 +387,14 @@ export async function runCommand(action, o) {
   if (action === "accept") {
     if (!o.evidence?.trim()) throw runError("accept requires --evidence describing coordinator review and checks");
     if (!live || !["idle", "done"].includes(live.state) || !receipt(worker)?.complete) throw runError("Acceptance requires live settlement and this generation's completion receipt", "NOT_COMPLETE");
-    changeRun((r) => {
+    changeRun((r, { afterCommit }) => {
       const t = r.tasks.find((t) => t.id === task.id);
       if (t.state !== "running" || r.workers.find((w) => w.pane === pane)?.generation !== worker.generation) throw runError("Task changed or delivery uncertain; inspect before accepting");
       t.state = "accepted"; t.evidence = o.evidence.slice(0, 1000);
       try { const e = JSON.parse(fs.readFileSync(worker.receipt + ".inbox")); if (e.generation === worker.generation) { t.summary = String(e.summary).slice(0, 600); t.result = String(e.detail ?? e.summary).slice(0, 3500); } } catch { /* evidence remains mandatory */ }
       const commit = spawnSync("git", ["-C", t.cwd, "rev-parse", "HEAD"], { encoding: "utf8", timeout: 2000 });
       if (commit.status === 0) t.commit = commit.stdout.trim();
-      writerLease(r, t, true);
+      afterCommit.push(() => writerLease(r, t, true));
     });
     return { accepted: task.id, pane, help: ["herdr-axi run next"] };
   }
@@ -387,7 +422,7 @@ export async function runCommand(action, o) {
       r.workers.find((w) => w.pane === pane).closing = true;
     });
     await engineCall(["close", worker.name], run);
-    changeRun((r) => { r.workers.find((w) => w.pane === pane).closed = true; });
+    await publishRun((r) => { r.workers.find((w) => w.pane === pane).closed = true; });
     return { closed: pane, tab: worker.tab, help: ["herdr-axi run next"] };
   }
   throw runError(`Unknown run action: ${action}`);

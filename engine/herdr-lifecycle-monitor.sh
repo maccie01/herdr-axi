@@ -29,6 +29,7 @@ pending_cycle=""
 pending_settled=""
 notify_reason=""
 displayed_state=""
+retry_delay=1
 cleanup() {
   for child_pid in "$wait_pid_one" "$wait_pid_two"; do
     if [[ -n "$child_pid" ]] && kill -0 "$child_pid" 2>/dev/null; then
@@ -47,6 +48,17 @@ trap 'exit 143' TERM
 state() {
   herdr agent get "$1" 2>/dev/null |
     jq -r '.result.agent.agent_status // empty' 2>/dev/null
+}
+
+# Broken/expired native waits must not turn transcript collection into a hot
+# loop. Stay supervised; real transitions reset this bounded failure backoff.
+backoff() {
+  sleep "$retry_delay" &
+  wait_pid_one=$!
+  wait "$wait_pid_one" || true
+  wait_pid_one=""
+  retry_delay=$((retry_delay * 2))
+  (( retry_delay <= 30 )) || retry_delay=30
 }
 
 wait_for_transition() {
@@ -73,7 +85,9 @@ wait_for_transition() {
       wait_args+=(--until working --until idle --until done --until blocked)
       ;;
   esac
-  herdr "${wait_args[@]}" >/dev/null 2>&1 &
+  # Invoke the executable directly: the HERDR_BIN shell-function adapter would
+  # otherwise add an intermediate process and leave the real waiter orphaned.
+  command "${HERDR_BIN:-herdr}" "${wait_args[@]}" >/dev/null 2>&1 &
   wait_command_pid=$!
   trap '
     if [[ -n "$wait_command_pid" ]] && kill -0 "$wait_command_pid" 2>/dev/null; then
@@ -119,6 +133,7 @@ wait_for_any_transition() {
       wait_pid_two=""
       rm -f "$wait_marker"
       wait_marker=""
+      retry_delay=1
       return 0
     fi
     if ! kill -0 "$wait_pid_one" 2>/dev/null &&
@@ -131,7 +146,7 @@ wait_for_any_transition() {
       wait_marker=""
       # Native waits can expire or lose their connection without a transition.
       # Retry with backoff; a quiet minute is not the end of supervision.
-      sleep 1
+      backoff
       return 0
     fi
     tick=$((tick + 1))
@@ -181,6 +196,8 @@ notify() {
         return 10
         ;;
       error|"")
+        # Lost is terminal: there can be no worker transition to recover on.
+        [[ "$event_kind" != "lost" ]] || return 1
         worker_before=$(state "$agent_name" || true)
         orchestrator_before=$(state "$orchestrator_agent" || true)
         if ! wait_for_any_transition "$worker_before" "$orchestrator_before"; then
@@ -212,6 +229,7 @@ wait_worker_transition() {
       wait_pid_one=""
       rm -f "$wait_marker"
       wait_marker=""
+      retry_delay=1
       return 0
     fi
     if ! kill -0 "$wait_pid_one" 2>/dev/null; then
@@ -219,7 +237,7 @@ wait_worker_transition() {
       wait_pid_one=""
       rm -f "$wait_marker"
       wait_marker=""
-      sleep 1
+      backoff
       transition_state=$(state "$agent_name" || true)
       return 0
     fi

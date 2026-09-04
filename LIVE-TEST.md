@@ -198,3 +198,31 @@ launcher, `starting` also masked native `blocked` in fleet/watch.
   checked, test cancelled and run archived. TLP panes/records were read-only.
 - Regression suites: 38 JavaScript / 38 Bash checks; early-registry startup,
   recovery, tab-label creation/reuse and cosmetic-failure delivery isolation.
+
+## Adversarial review follow-up (5 September 2026)
+
+| Finding | Verification / change |
+| --- | --- |
+| Lease survives failed transaction | Injected failure at run.json publication. Acquisition rollback under the lock; same queued task can reclaim its unlaunched lease after a crash. Release only after durable state; accepted/cancelled recovery repairs residual leases. |
+| Identity drift breaks fleet | Replaced saved session identity. Fleet/home/watch/inbox degrade to `lost`; capacity retained, no control of replacement. Parked drift blocks its worktree, not unrelated selections. Malformed early registries also degrade. |
+| Failed waits hot-loop | Forced immediate wait failures and repeated notification errors. Exponential backoff 1–30s; real transitions reset it. Quiet supervision persists; a failed terminal lost notification cannot retry forever. |
+| Worker publication loses a lock race | Held run.lock after prompt delivery; publication retried without resend. Injected persistent publication failure: `record_pending`, discoverable registry, explicit recover, exactly one prompt. |
+| Read-only concurrency lacks enforcement | Confirmed instruction-only, not an OS sandbox. Default worktree reservation now includes read roles; separate worktrees retain parallelism. `sharedReadWorktree:true` explicitly accepts instruction-only overlap. No incompatible native flags added. |
+| One collect failure breaks inbox | Forced engine subprocess failure and corrupt inbox JSON. Healthy events remain visible with bounded per-worker errors. |
+| Large-fleet context coverage | Simulated 16 workers / 30s polling. Two terminal probes/call retained; stale warnings include age, stale readings remain unknown. Local transcript tails no longer compete for terminal probe budget. |
+| Verbose names | Agent projection prefers bounded stable backend name, not command-line terminal title. Readable task tab labels from the previous fix retained. |
+| Parallel suite failure | Confirmed inbox-before-receipt assertion race, not shared fixture deletion. Wait for receipt acknowledgement. Explicit fake HERDR_BIN also prevents inherited overrides escaping test isolation. |
+| HERDR_BIN waiter cleanup | Parallel stress exposed an intermediate shell-function process: killing it could orphan the actual native waiter. Monitor now invokes/tracks the backend executable directly. JS fake agent records also publish atomically across concurrent startups. |
+| Lock cleanup masks error | force removal; regression preserves original error if lock already absent. |
+
+Trust approval remains explicit. Startup reporting was already fixed in `3cfa10f`;
+no blanket auto-approval added. Empty successful JSON-command output was not
+reproduced against the installed backend; prior live key-dispatch tests succeeded.
+Strict JSON validation retained (plain terminal reads already allow empty output).
+
+This pass uses deterministic fault injection, not new live coding agents or user
+pane mutations. No production outages, session replacements or worktree conflicts
+were induced. No global instruction edits, push or publication.
+
+Validation: 47/47 JavaScript tests; two simultaneously started Bash suites,
+39/39 each after the waiter fix. Bash/Node syntax and `git diff --check` clean.
