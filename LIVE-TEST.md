@@ -179,3 +179,22 @@ Claude/Copilot percentages require configured known context windows; absent data
 remains unknown. No large-fleet throughput or multi-month real-time retention test.
 The retention checks use deterministic aged fixtures. No global agent instruction
 files changed; no npm publish, remote push, or unrelated pane input/closure.
+
+## Follow-up: startup attention and tab labels (5 September 2026)
+
+The reported TLP run's recorded event showed `agent_not_ready` after four seconds;
+startup resumed roughly eight minutes later. Detection worked, but the returned
+`uncertain` error lacked clear startup-specific actions. During an in-flight
+launcher, `starting` also masked native `blocked` in fleet/watch.
+
+- Startup result: `blocked`, `submitted:false`, exact pane read/recovery hints.
+- Fleet/watch: native blocked takes priority; current registry stage distinguishes
+  unsubmitted startup from resumed submission. No automatic approval or resend.
+- Tab label: task ID + kind; stable private IDs retained. Reuse updates the label;
+  rename errors cannot corrupt delivery state or trigger duplicate prompts.
+- Live scratch: `/private/tmp/herdr-axi-startup.QaJ15B`, pane `w1B:pW`, tab `w1B:tN`.
+  Native label `trust-check · claude`; trust dialog detected; watch returned blocked
+  immediately. No trust keys or work prompt sent. Owned tab closed, disappearance
+  checked, test cancelled and run archived. TLP panes/records were read-only.
+- Regression suites: 38 JavaScript / 38 Bash checks; early-registry startup,
+  recovery, tab-label creation/reuse and cosmetic-failure delivery isolation.

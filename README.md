@@ -218,6 +218,15 @@ authorized dialog, then `run recover <task-id>` resumes that same startup. No
 dialog is automatically approved. Startup acknowledges a post-submit transition
 within 15 seconds instead of waiting for the whole task to finish.
 
+A blocked startup returns `blocked`, `submitted:false` and pane-specific read/recovery
+commands. Fleet/watch report `delivery:not_submitted`; live `blocked` takes priority
+even while the launcher is still `starting`. After explicit approval and readiness,
+recover the same worker. A trust dialog is detected, not automatically accepted.
+
+Worker tabs use readable `<task-id> · <kind>` labels, updated on worker reuse.
+Internal unique agent IDs remain unchanged. Cosmetic rename failures are reported
+separately and never turn acknowledged work into uncertain delivery.
+
 An ambiguous submission remains `uncertain`; inspect it before `run recover
 <pane-or-task-id>`. Recovery never blindly resends an uncertain prompt. A crashed
 launcher can be recovered after its process exits. If the recorded tab and all
