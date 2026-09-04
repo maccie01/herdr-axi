@@ -1,0 +1,15 @@
+{
+  "roles": {
+    "orchestrator": { "kind": "codex", "model": "gpt-5.6-sol", "effort": "high", "access": "read" },
+    "implementer": {
+      "kind": "copilot", "model": "gpt-5.6-sol", "effort": "high", "access": "write",
+      "subagents": [{ "role": "verifier", "max": 1, "when": "A bounded independent review is useful; skip for trivial work" }]
+    },
+    "verifier": { "kind": "claude", "model": "claude-opus-5", "effort": "high", "access": "read" }
+  },
+  "phases": { "explore": 4, "build": 3, "integrate": 2, "verify": 2, "fix": 1 },
+  "agentRatio": 0.75,
+  "nativeSubagentLimit": 4,
+  "context": { "warnPercent": 70, "criticalPercent": 85 },
+  "retention": { "detailDays": 30, "summaryDays": 180 }
+}

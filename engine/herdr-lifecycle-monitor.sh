@@ -28,6 +28,7 @@ pending_rearm=false
 pending_cycle=""
 pending_settled=""
 notify_reason=""
+displayed_state=""
 cleanup() {
   for child_pid in "$wait_pid_one" "$wait_pid_two"; do
     if [[ -n "$child_pid" ]] && kill -0 "$child_pid" 2>/dev/null; then
@@ -38,7 +39,10 @@ cleanup() {
   [[ -z "$wait_marker" ]] || rm -f "$wait_marker"
   herdr_receipt_lock_release
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 state() {
   herdr agent get "$1" 2>/dev/null |
@@ -125,7 +129,10 @@ wait_for_any_transition() {
       wait_pid_two=""
       rm -f "$wait_marker"
       wait_marker=""
-      return 1
+      # Native waits can expire or lose their connection without a transition.
+      # Retry with backoff; a quiet minute is not the end of supervision.
+      sleep 1
+      return 0
     fi
     tick=$((tick + 1))
     sleep 0.1
@@ -141,7 +148,7 @@ wait_for_any_transition() {
   wait_pid_two=""
   rm -f "$wait_marker"
   wait_marker=""
-  return 1
+  return 0
 }
 
 notify() {
@@ -212,7 +219,9 @@ wait_worker_transition() {
       wait_pid_one=""
       rm -f "$wait_marker"
       wait_marker=""
-      return 1
+      sleep 1
+      transition_state=$(state "$agent_name" || true)
+      return 0
     fi
     tick=$((tick + 1))
     sleep 0.1
@@ -224,7 +233,8 @@ wait_worker_transition() {
   wait_pid_one=""
   rm -f "$wait_marker"
   wait_marker=""
-  return 1
+  transition_state=$(state "$agent_name" || true)
+  return 0
 }
 
 remember_rearm_boundary() {
@@ -252,18 +262,22 @@ while true; do
     notify lost || true
     exit 0
   }
+  if [[ "$current_state" != "$displayed_state" ]]; then
+    printf 'agent: %s\nstate: %s\n' "$agent_name" "$current_state"
+    displayed_state="$current_state"
+  fi
   if [[ "$current_state" == "working" && "$pending_rearm" == "true" ]]; then
     apply_pending_rearm || exit 0
   fi
 
   case "$current_state" in
-    done)
+    done|idle)
       notify_status=0
       notify settled || notify_status=$?
       case "$notify_status" in
         0)
           remember_rearm_boundary
-          wait_worker_transition done || exit 0
+          wait_worker_transition "$current_state" || exit 0
           if [[ "$transition_state" == "working" ]]; then
             apply_pending_rearm || exit 0
           fi
@@ -272,7 +286,7 @@ while true; do
           if [[ "$notify_reason" != "no-completion-proof" ]]; then
             remember_rearm_boundary
           fi
-          wait_worker_transition done || exit 0
+          wait_worker_transition "$current_state" || exit 0
           if [[ "$transition_state" == "working" &&
             "$pending_rearm" == "true" ]]; then
             apply_pending_rearm || exit 0
@@ -297,7 +311,7 @@ while true; do
         *) exit 0 ;;
       esac
       ;;
-    working|idle)
+    working)
       wait_worker_transition "$current_state" || exit 0
       if [[ "$transition_state" == "working" && "$pending_rearm" == "true" ]]; then
         apply_pending_rearm || exit 0

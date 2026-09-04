@@ -1,10 +1,8 @@
-import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
-import path from "node:path";
 import { AxiError } from "axi-sdk-js";
 import { listAgents, findAgent, fleet, runHerdr, requireHerdrEnv, projectAgent, STATES } from "./herdr.mjs";
 
-const ENGINE = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "engine");
+import { loadRun, runError } from "./run-state.mjs";
+import { runCommand, runStatus, watchRun, ownerCheck } from "./runs.mjs";
 
 // Fail loud on unknown flags (AXI #6) - a typo must never silently no-op.
 function parseArgs(args, spec) {
@@ -12,7 +10,9 @@ function parseArgs(args, spec) {
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (!a.startsWith("--")) { out._.push(a); continue; }
-    const [flag, inline] = a.slice(2).split("=", 2);
+    const equals = a.indexOf("=");
+    const flag = a.slice(2, equals < 0 ? undefined : equals);
+    const inline = equals < 0 ? undefined : a.slice(equals + 1);
     if (!Object.hasOwn(spec, flag)) {
       throw new AxiError(`unknown flag: --${flag}`, "UNKNOWN_FLAG",
         [`Valid flags: ${Object.keys(spec).map((f) => "--" + f).join(", ") || "(none)"}`, "herdr-axi --help"]);
@@ -47,6 +47,7 @@ const nextSteps = (f) => {
 const brief = (rows) => rows.map((a) => a.pane);
 
 export function home() {
+  if (loadRun()) return runStatus();
   const f = fleet();
   if (!f.total) return { fleet: "0 agents", help: ["No live herdr agents.", "Startup usage: herdr agent start --help"] };
   return {
@@ -61,10 +62,10 @@ export function home() {
 }
 
 export function agents(args) {
-  const o = parseArgs(args, { state: "string", kind: "string" });
+  const o = parseArgs(args, { state: "string", kind: "string", all: "boolean" });
   if (o.state && !STATES.includes(o.state))
     throw new AxiError(`invalid state: ${o.state}`, "INVALID_STATE", [`Valid: ${STATES.join(", ")}`, "herdr-axi agents --help"]);
-  let rows = listAgents();
+  let rows = listAgents({ all: o.all });
   if (o.state) rows = rows.filter((a) => a.state === o.state);
   if (o.kind) rows = rows.filter((a) => a.kind === o.kind);
   if (!rows.length) return { agents: "0 matching agents", help: ["Widen the filter, or: herdr-axi agents"] };
@@ -72,9 +73,10 @@ export function agents(args) {
 }
 
 export function fleetCmd(args = []) {
-  const o = parseArgs(args, {});
+  const o = parseArgs(args, { all: "boolean" });
   if (o._.length) throw new AxiError("fleet takes no arguments", "INVALID_VALUE", ["herdr-axi fleet --help"]);
-  const f = fleet();
+  if (loadRun() && !o.all) return runStatus();
+  const f = fleet(listAgents({ all: o.all }));
   return { total: f.total, counts: f.counts, blocked: brief(f.blocked), working: brief(f.working), idle: brief(f.idle), done: brief(f.done), unknown: brief(f.unknown), help: nextSteps(f) };
 }
 
@@ -125,6 +127,7 @@ export function read(args) {
 
 export function wait(args) {
   const o = parseArgs(args, { until: "string", "timeout-ms": "string" });
+  if (o._.length > 1) throw new AxiError("wait takes one pane ID", "INVALID_VALUE", ["herdr-axi wait --help"]);
   const name = o._[0];
   if (!name) throw new AxiError("wait needs a pane ID", "MISSING_ARG", ["herdr-axi wait --help"]);
   const until = o.until ?? "idle";
@@ -146,7 +149,9 @@ export function dispatch(args) {
   if (a.state === "working")
     throw new AxiError(`${a.pane} is already working`, "AGENT_BUSY",
       [`wait first: herdr-axi wait ${a.pane} --until idle`, "or pick another: herdr-axi agents --state idle"]);
+  if (loadRun() && !o.keys) throw runError("Managed tasks use run queue/next or run revise; direct prompts bypass generation and capacity checks", "MANAGED_DISPATCH");
   if (o.keys) {
+    if (loadRun()) ownerCheck(loadRun());
     runHerdr(["agent", "send-keys", a.pane, ...rest]);
     return { pane: a.pane, keys: rest, help: [`check the result: herdr-axi read ${a.pane}`] };
   }
@@ -158,11 +163,24 @@ export function dispatch(args) {
   return { pane: a.pane, submitted: true, state: after.state, help: [`herdr-axi read ${after.pane}`] };
 }
 
-// The tested bash engine stays the engine; this only routes to it.
-export function watch(args) {
+export function watch(args = []) {
   requireHerdrEnv();
-  const script = path.join(ENGINE, "herdr-orchestrator.sh");
-  const r = spawnSync("bash", [script, ...args], { stdio: "inherit", env: { ...process.env, HERDR_ENV: "1" } });
-  if (r.status !== 0) throw new AxiError(`orchestrator exited ${r.status}`, "ENGINE_ERROR", ["Run with --help for the engine's own usage."]);
-  return { watch: "orchestrator finished", help: ["fleet state: herdr-axi"] };
+  const o = parseArgs(args, { "timeout-ms": "string" });
+  if (o._.length) throw runError("watch takes no engine arguments; use run commands");
+  return watchRun(positiveInt(o["timeout-ms"] ?? 30000, "timeout-ms"));
+}
+
+export function run(args) {
+  const [action = "status", ...rest] = args;
+  const specs = {
+    init: { dir: "string", owner: "string", project: "string" }, status: {}, inbox: {}, next: {}, unlock: {}, config: {}, history: { task: "string", all: "boolean" }, finish: {}, gc: {},
+    queue: { kind: "string", role: "string", cwd: "string", area: "string", "prompt-file": "string", after: "string" },
+    phase: { cap: "string" }, accept: { evidence: "string" }, revise: { "prompt-file": "string" },
+    cancel: {}, close: {}, recover: {},
+  };
+  if (!Object.hasOwn(specs, action)) throw runError(`Unknown run action: ${action}`);
+  const o = parseArgs(rest, specs[action]);
+  const count = ["queue", "phase", "accept", "revise", "cancel", "close", "recover"].includes(action) ? 1 : 0;
+  if (o._.length !== count) throw runError(`${action} takes ${count} positional argument(s)`);
+  return runCommand(action, o).catch((e) => { throw e instanceof AxiError ? e : runError(e.message); });
 }

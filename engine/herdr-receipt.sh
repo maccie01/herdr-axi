@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# Honor the same backend override as the JS adapter, including child scripts.
+if [[ -n "${HERDR_BIN:-}" ]]; then
+  herdr() { command "$HERDR_BIN" "$@"; }
+  export -f herdr
+fi
+
 HERDR_RECEIPT_SCHEMA="herdr-receipt/3"
 herdr_receipt_lock_path=""
 herdr_receipt_lock_inode=""
@@ -35,15 +41,14 @@ herdr_append_completion_instruction() {
   local task="$1"
   local receipt_file="$2"
   local generation="$3"
-  local completion_file completion_tmp_q completion_file_q generation_q
+  local completion_file completion_file_q generation_q
   completion_file=$(herdr_completion_file "$receipt_file" "$generation") || return 1
-  printf -v completion_tmp_q '%q' "${completion_file}.tmp"
   printf -v completion_file_q '%q' "$completion_file"
   printf -v generation_q '%q' "$generation"
   printf '%s\n\n%s\n%s\n' \
     "$task" \
-    "Struktureller Abschlussbeleg: Erst nachdem der gesamte Auftrag, alle verlangten Prüfungen und alle verlangten Ausgabedateien vollständig abgeschlossen sind, führe exakt diesen Befehl aus. Erzeuge den Beleg niemals für eine Zwischenantwort oder während Hintergrundarbeit läuft." \
-    "umask 077; printf '%s\\n' $generation_q > $completion_tmp_q && mv -f $completion_tmp_q $completion_file_q"
+    "Completion proof — last action only: all requested work, checks and output files finished; no background work/subagents pending. Never for an intermediate response. Run exactly:" \
+    "umask 077; herdr_completion_proof=$completion_file_q; printf '%s\\n' $generation_q > \"\${herdr_completion_proof}.tmp\" && mv -f \"\${herdr_completion_proof}.tmp\" \"\$herdr_completion_proof\""
 }
 
 herdr_start_lock_lease() {
@@ -382,7 +387,11 @@ herdr_deliver_prompt() {
   local delivery_marker="$3"
   local prompt_json prompt_status=0 error_code visible state
 
-  prompt_json=$(herdr agent prompt "$agent_name" "$task" --wait 2>&1) ||
+  # Acknowledge a post-submit transition, not the entire task. Native prompt
+  # wait rejects the pre-submit idle snapshot; fast completion is also valid.
+  prompt_json=$(herdr agent prompt "$agent_name" "$task" --wait \
+    --until working --until blocked --until idle --until done \
+    --timeout 15000 2>&1) ||
     prompt_status=$?
   if (( prompt_status == 0 )); then
     return 0

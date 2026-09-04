@@ -27,12 +27,14 @@ effort="high"
 max_autopilot_continues="3"
 workspace_id=""
 orchestrator_agent="orchestrator"
+resume=false
 script_dir=$(cd -- "$(dirname -- "$0")" && pwd)
 # shellcheck source=herdr-receipt.sh
 source "$script_dir/herdr-receipt.sh"
 
 while (( $# > 0 )); do
   case "$1" in
+    --resume) resume=true; shift ;;
     --name) name="${2:-}"; shift 2 ;;
     --kind) kind="${2:-}"; shift 2 ;;
     --cwd) worker_cwd="${2:-}"; shift 2 ;;
@@ -68,7 +70,19 @@ fi
 receipt_dir="$HERDR_RECEIPT_REGISTRY_DIR"
 receipt_file="$HERDR_RECEIPT_FILE"
 
-tab_json=$(herdr tab create \
+if [[ "$resume" == "true" ]]; then
+  registered="$receipt_dir/$name.json"
+  [[ -r "$registered" ]] || exit 1
+  agent_pane=$(jq -r '.agent_pane' "$registered")
+  tab_id=$(jq -r '.tab_id' "$registered")
+  [[ "$(jq -r '.stage' "$registered")" == "created" ]] || exit 1
+  info=$(herdr agent get "$agent_pane")
+  jq -e --arg pane "$agent_pane" --arg tab "$tab_id" --arg ws "$workspace_id" \
+    --arg name "$name" --arg kind "$kind" \
+    '.result.agent | .pane_id == $pane and .tab_id == $tab and .workspace_id == $ws and .name == $name and .agent == $kind and (.agent_status == "idle" or .agent_status == "done")' <<<"$info" >/dev/null || exit 1
+  cleanup_created_tab=false
+else
+  tab_json=$(herdr tab create \
   --workspace "$workspace_id" \
   --cwd "$worker_cwd" \
   --label "$name" \
@@ -79,10 +93,16 @@ tab_json=$(herdr tab create \
   --env "HERDR_MONITOR_AGENT=$name" \
   --env "HERDR_MONITOR_LABEL=$name" \
   --env "HERDR_MONITOR_HOOK_SCRIPT=$script_dir/herdr-hook-notify.sh" \
+  --env "HERDR_MONITOR_INBOX=${HERDR_MONITOR_INBOX:-0}" \
+  --env "HERDR_AXI_RUN=" \
+  --env "HERDR_AXI_WORKER=1" \
+  --env "HERDR_AXI_BIN=$script_dir/../bin/herdr-axi.mjs" \
+  --env "PATH=$script_dir/../bin:$PATH" \
   --no-focus)
 agent_pane=$(printf '%s\n' "$tab_json" | jq -r '.result.root_pane.pane_id')
 tab_id=$(printf '%s\n' "$tab_json" | jq -r '.result.tab.tab_id')
-cleanup_created_tab=true
+  cleanup_created_tab=true
+fi
 cleanup_on_exit() {
   if [[ "$cleanup_created_tab" == "true" ]]; then
     herdr tab close "$tab_id" >/dev/null || true
@@ -94,6 +114,14 @@ monitor_pane=""
 monitoring_mode="native-hooks+event-wait"
 completion_generation=$(herdr_new_generation)
 completion_task=""
+
+# Record returned topology immediately, even when agent startup later fails.
+registry_tmp=$(mktemp "$receipt_dir/$name.json.tmp.XXXXXXXX")
+jq -nc --arg name "$name" --arg workspace_id "$workspace_id" \
+  --arg tab_id "$tab_id" --arg agent_pane "$agent_pane" \
+  --arg receipt_file "$receipt_file" --arg generation "$completion_generation" \
+  '{name:$name,workspace_id:$workspace_id,tab_id:$tab_id,agent_pane:$agent_pane,monitor_pane:null,receipt_file:$receipt_file,generation:$generation,stage:"created"}' > "$registry_tmp"
+mv -f "$registry_tmp" "$receipt_dir/$name.json"
 
 case "$kind" in
   copilot)
@@ -126,7 +154,6 @@ case "$kind" in
     native_args=(
       --model "$model"
       --approve-for-me
-      --sandbox workspace-write
       --add-dir "$receipt_dir"
       --cd "$worker_cwd"
       --config "model_reasoning_effort=$effort"
@@ -136,22 +163,8 @@ case "$kind" in
 esac
 
 start_json=""
-pane_ready_deadline=$(($(date +%s) + 12))
-wait_for_agent_pane() {
-  local remaining_seconds remaining_ms
-  remaining_seconds=$((pane_ready_deadline - $(date +%s)))
-  (( remaining_seconds > 0 )) || return 1
-  remaining_ms=$((remaining_seconds * 1000))
-  herdr pane wait-output "$agent_pane" \
-    --regex '(^|[[:space:]])[$#%>] ?$' \
-    --timeout "$remaining_ms" >/dev/null 2>&1
-}
-
-for attempt in 1 2 3; do
-  if ! wait_for_agent_pane; then
-    printf '%s\n' "herdr-worker: agent pane did not become ready: $name" >&2
-    exit 1
-  fi
+pane_ready_deadline=$(($(date +%s) + ${HERDR_START_READY_TIMEOUT_SECONDS:-12}))
+while [[ "$resume" != "true" ]]; do
   if start_json=$(herdr agent start "$name" \
     --kind "$kind" \
     --pane "$agent_pane" \
@@ -159,10 +172,17 @@ for attempt in 1 2 3; do
     -- "${native_args[@]}" 2>&1); then
     break
   fi
-  if (( attempt == 3 )) || ! jq -e '.error.code == "agent_pane_busy"' <<<"$start_json" >/dev/null; then
+  if (( $(date +%s) >= pane_ready_deadline )) || ! jq -e '.error.code == "agent_pane_busy"' <<<"$start_json" >/dev/null; then
+    # Keep startup dialogs inspectable; a human/owner must decide the response.
+    if jq -e '.error.code == "agent_not_ready"' <<<"$start_json" >/dev/null; then
+      cleanup_created_tab=false
+    fi
     printf '%s\n' "$start_json" >&2
     exit 1
   fi
+  # Native startup validates the foreground shell. Prompt glyphs vary by
+  # shell/theme and cannot establish readiness (Powerlevel10k, Starship, etc.).
+  sleep 0.25
 done
 
 herdr_receipt_rearm "$receipt_file" worker-start "$completion_generation" || {
@@ -171,24 +191,16 @@ herdr_receipt_rearm "$receipt_file" worker-start "$completion_generation" || {
 }
 
 task=$(< "$prompt_file")
-case "$kind" in
-  copilot|codex)
-    task+=$'\n\nLaufzeitdirektive der Orchestrierung: Nutze einmal einen Claude-Opus-Subagenten über die direkte Subagent-Funktion deiner Runtime für eine kurze adversariale Beratung zum riskantesten Teil dieses Pakets. Starte selbst weder Herdr noch den Repo-Orchestrator; falls Opus nicht direkt verfügbar ist, dokumentiere diese Grenze knapp und arbeite selbst weiter. Das ersetzt keine spätere unabhängige Abnahme. Beginne kein Folgepaket und führe weder Commit noch Push aus.'
-    ;;
-  claude)
-    task+=$'\n\nLaufzeitdirektive der Orchestrierung: Nutze einmal einen GPT-5.6-Sol-Subagenten über die direkte Subagent-Funktion deiner Runtime für mechanische Evidenzsammlung oder einen eng begrenzten Gegencheck. Starte selbst weder Herdr noch den Repo-Orchestrator; falls Sol nicht direkt verfügbar ist, dokumentiere diese Grenze knapp und arbeite selbst weiter. Deine unabhängige Opus-Bewertung bleibt maßgeblich. Führe weder Commit noch Push aus.'
-    ;;
-esac
+if [[ "${HERDR_AXI_MANAGED_TASK:-0}" != "1" ]]; then
+  task+=$'\n\nDo not start subagents. No Herdr workers, follow-up tasks, commits or pushes. Scope: assigned files only. Output: concise TOON; files, checks, decisions, blockers. No repository plans/state logs unless explicit deliverables. Coordinator review required.'
+fi
 completion_task=$(herdr_append_completion_instruction \
   "$task" "$receipt_file" "$completion_generation")
-if ! herdr_deliver_prompt "$name" "$completion_task" "$completion_generation"; then
-  printf '%s\n' "herdr-worker: prompt delivery could not be proven for ${name}" >&2
-  exit 1
-fi
 
 monitor_json=$(herdr pane split \
   --pane "$agent_pane" \
   --direction down \
+  --ratio "${HERDR_AXI_AGENT_RATIO:-0.75}" \
   --cwd "$worker_cwd" \
   --no-focus)
 monitor_pane=$(printf '%s\n' "$monitor_json" | jq -r '.result.pane.pane_id // empty')
@@ -204,6 +216,23 @@ printf -v monitor_command '%q %q %q %q %q %q' \
   "$receipt_file" \
   "$script_dir/herdr-hook-notify.sh"
 herdr pane run "$monitor_pane" "$monitor_command" >/dev/null
+
+# Persist ownership before submitting any work. A lost startup response must
+# not leave the coordinator unaware of a tab it owns.
+registry_tmp=$(mktemp "$receipt_dir/$name.json.tmp.XXXXXXXX")
+jq -nc --arg name "$name" --arg workspace_id "$workspace_id" \
+  --arg tab_id "$tab_id" --arg agent_pane "$agent_pane" \
+  --arg monitor_pane "$monitor_pane" --arg receipt_file "$receipt_file" \
+  --arg generation "$completion_generation" \
+  '{name:$name,workspace_id:$workspace_id,tab_id:$tab_id,agent_pane:$agent_pane,monitor_pane:$monitor_pane,receipt_file:$receipt_file,generation:$generation,stage:"submitting"}' > "$registry_tmp"
+mv -f "$registry_tmp" "$receipt_dir/$name.json"
+if ! herdr_deliver_prompt "$name" "$completion_task" "$completion_generation"; then
+  # Submission may have succeeded. Keep the registered tab for inspection;
+  # never destroy a possibly working agent because acknowledgement timed out.
+  cleanup_created_tab=false
+  printf '%s\n' "herdr-worker: prompt delivery uncertain; inspect registered pane ${agent_pane}" >&2
+  exit 1
+fi
 
 cleanup_created_tab=false
 trap - EXIT
@@ -226,4 +255,4 @@ jq -n \
   --arg receipt_file "$receipt_file" \
   --arg generation "$completion_generation" \
   --arg monitoring_mode "$monitoring_mode" \
-  '{name:$name,kind:$kind,model:$model,permission_mode:$permission_mode,workspace_id:$workspace_id,tab_id:$tab_id,agent_pane:$agent_pane,monitor_pane:($monitor_pane | if . == "" then null else . end),receipt_file:$receipt_file,generation:$generation,monitoring:$monitoring_mode}'
+  '{name:$name,kind:$kind,model:$model,permission_mode:$permission_mode,workspace_id:$workspace_id,tab_id:$tab_id,agent_pane:$agent_pane,monitor_pane:($monitor_pane | if . == "" then null else . end),receipt_file:$receipt_file,generation:$generation,monitoring:$monitoring_mode,stage:"submitted"}'

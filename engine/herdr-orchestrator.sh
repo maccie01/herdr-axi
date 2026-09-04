@@ -213,6 +213,13 @@ resolve_close_lifecycle() {
   close_agent_pane=$(jq -r '.agent_pane // empty' "$close_registry_file" 2>/dev/null || true)
   close_monitor_pane=$(jq -r '.monitor_pane // empty' "$close_registry_file" 2>/dev/null || true)
   close_generation=$(jq -r '.generation // empty' "$close_registry_file" 2>/dev/null || true)
+  if [[ "$close_agent_pane" == "${HERDR_PANE_ID:-}" ||
+    "$close_agent_pane" == "${HERDR_AXI_OWNER_PANE:-}" ||
+    "$close_tab_id" == "${HERDR_TAB_ID:-}" ||
+    "$close_tab_id" == "${HERDR_AXI_OWNER_TAB:-}" ]]; then
+    printf '%s\n' "herdr-orchestrator: refusing to close the owner pane or tab" >&2
+    return 1
+  fi
   if [[ "$registry_name" != "$name" ||
     "$registry_workspace" != "$close_workspace_id" ||
     "$registry_receipt" != "$close_receipt_file" ||
@@ -254,7 +261,7 @@ probe_resource() {
 }
 
 validate_registered_resources() {
-  local tab_workspace pane_tab
+  local tab_workspace pane_tab tab_pane_count="" known_panes=0
   local tab_state agent_pane_state monitor_pane_state
 
   probe_resource tab "$close_tab_id"
@@ -262,6 +269,8 @@ validate_registered_resources() {
   if [[ "$tab_state" == "present" ]]; then
     tab_workspace=$(printf '%s\n' "$resource_json" |
       jq -r '.result.tab.workspace_id // empty')
+    tab_pane_count=$(printf '%s\n' "$resource_json" |
+      jq -r '.result.tab.pane_count // empty')
     [[ "$tab_workspace" == "$close_workspace_id" ]] ||
       return 1
   fi
@@ -269,6 +278,7 @@ validate_registered_resources() {
   probe_resource pane "$close_agent_pane"
   agent_pane_state="$resource_state"
   if [[ "$agent_pane_state" == "present" ]]; then
+    known_panes=$((known_panes + 1))
     pane_tab=$(printf '%s\n' "$resource_json" |
       jq -r '.result.pane.tab_id // empty')
     [[ "$pane_tab" == "$close_tab_id" ]] || return 1
@@ -277,6 +287,7 @@ validate_registered_resources() {
   probe_resource pane "$close_monitor_pane"
   monitor_pane_state="$resource_state"
   if [[ "$monitor_pane_state" == "present" ]]; then
+    known_panes=$((known_panes + 1))
     pane_tab=$(printf '%s\n' "$resource_json" |
       jq -r '.result.pane.tab_id // empty')
     [[ "$pane_tab" == "$close_tab_id" ]] || return 1
@@ -291,6 +302,8 @@ validate_registered_resources() {
       "$monitor_pane_state" == "absent" ]]
     return
   fi
+  # A user may have added/moved another pane into our tab after startup.
+  [[ "$tab_pane_count" == "$known_panes" ]] || return 1
   [[ "$agent_pane_state" == "present" ||
     "$monitor_pane_state" == "present" ]]
 }
@@ -361,6 +374,14 @@ case "$command_name" in
   result)
     (( $# == 1 )) || usage
     render_result "$1"
+    ;;
+  collect)
+    (( $# == 1 )) || usage
+    resolve_agent_paths "$1"
+    env HERDR_MONITOR_ENABLED=1 HERDR_MONITOR_INBOX=1 \
+      HERDR_MONITOR_ORCHESTRATOR="${HERDR_AXI_OWNER_PANE:-orchestrator}" \
+      HERDR_MONITOR_AGENT="$1" HERDR_MONITOR_RECEIPT="$HERDR_RECEIPT_FILE" \
+      "$script_dir/herdr-hook-notify.sh" settled </dev/null
     ;;
   followup)
     if (( $# != 3 )) || [[ "${2:-}" != "--prompt-file" || ! -r "${3:-}" ]]; then

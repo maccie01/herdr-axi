@@ -146,19 +146,30 @@ native_transcript_tail() {
           end
           | select(type == "string" and length > 0)
           | gsub("[[:space:]]+"; " ")
-          | .[0:1400]
+          | .[0:3500]
         ' 2>/dev/null |
-        tail -n 3
+        tail -n 1
       ;;
     claude)
       tail -n 500 "$path" 2>/dev/null |
-        jq -r 'select(.type == "assistant" and .message.role == "assistant") | [.message.content[]? | select(.type == "text") | .text] | join(" ") | select(length > 0) | gsub("[[:space:]]+"; " ") | .[0:1000]' 2>/dev/null |
-        tail -n 3
+        jq -sr '
+          reduce .[] as $e ({last:"",report:""};
+            if $e.type == "user" and
+              (($e.message.content | type) == "string" or
+               any($e.message.content[]?; .type == "text")) then {last:"",report:""}
+            elif $e.type == "assistant" and $e.message.role == "assistant" then
+              ([$e.message.content[]? | select(.type == "text") | .text] | join("\n")) as $text |
+              if ($text | length) > 0 then .last = $text |
+                if ($text | test("(?m)^\\s*task:")) then .report = $text else . end
+              else . end
+            else . end) |
+          (if .report != "" then .report else .last end) | .[0:3500]
+        ' 2>/dev/null
       ;;
     codex)
       tail -n 500 "$path" 2>/dev/null |
-        jq -r 'select(.type == "response_item" and .payload.type == "message" and .payload.role == "assistant") | [.payload.content[]? | .text // empty] | join(" ") | select(length > 0) | gsub("[[:space:]]+"; " ") | .[0:1000]' 2>/dev/null |
-        tail -n 3
+        jq -r 'select(.type == "response_item" and .payload.type == "message" and .payload.role == "assistant") | [.payload.content[]? | .text // empty] | join(" ") | select(length > 0) | gsub("[[:space:]]+"; " ") | .[0:3500]' 2>/dev/null |
+        tail -n 1
       ;;
   esac
 }
@@ -358,12 +369,26 @@ if [[ -n "$suppression_reason" ]]; then
 fi
 
 delivered=false
-for _ in 1 2 3; do
-  if herdr agent prompt "$HERDR_MONITOR_ORCHESTRATOR" "$message" >/dev/null 2>&1; then
+if [[ "${HERDR_MONITOR_INBOX:-0}" == "1" ]]; then
+  # One atomic, generation-bound inbox item per worker. The coordinator pulls
+  # summaries in batches; hooks never type into its terminal.
+  inbox_tmp=$(mktemp "${receipt_file}.inbox.tmp.XXXXXXXX")
+  if jq -nc --arg event "$event_kind" --arg generation "$receipt_generation" \
+    --arg summary "$detail" --arg fingerprint "$fingerprint" \
+    '{event:$event,generation:$generation,fingerprint:$fingerprint,summary:($summary | .[0:600]),detail:($summary | .[0:3500]),truncated:($summary | length > 600)}' > "$inbox_tmp" &&
+    mv -f "$inbox_tmp" "${receipt_file}.inbox"; then
     delivered=true
-    break
+  else
+    rm -f "$inbox_tmp"
   fi
-done
+else
+  for _ in 1 2 3; do
+    if herdr agent prompt "$HERDR_MONITOR_ORCHESTRATOR" "$message" >/dev/null 2>&1; then
+      delivered=true
+      break
+    fi
+  done
+fi
 
 if [[ "$delivered" == "true" ]]; then
   if [[ "$event_kind" == "settled" ]]; then
