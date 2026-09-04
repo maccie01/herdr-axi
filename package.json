@@ -6,6 +6,7 @@
   "bin": { "herdr-axi": "bin/herdr-axi.mjs" },
   "files": ["bin", "src", "engine"],
   "engines": { "node": ">=20" },
+  "scripts": { "test": "node --test test/*.test.mjs" },
   "dependencies": { "axi-sdk-js": "^0.1.11" },
   "license": "MIT",
   "keywords": ["axi", "agent", "cli", "herdr", "orchestration", "toon"]

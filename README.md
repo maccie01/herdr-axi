@@ -24,6 +24,7 @@ herdr-axi agents --state blocked       # filter by state or --kind
 herdr-axi fleet                        # counts + blocked/working/idle in one call
 herdr-axi read w1:pP --lines 40        # visible output, truncated, --full to expand
 herdr-axi dispatch w1:pP "run tests"   # submit and wait until settled
+herdr-axi dispatch w1:pP --keys enter # explicit UI input after inspecting a dialog
 herdr-axi wait w1:pP --until idle      # block on a state transition
 herdr-axi watch                        # bash supervision engine (receipts, lifecycle)
 ```
@@ -45,6 +46,32 @@ titles containing spaces; every suggestion this CLI emits is a runnable command.
 
 `dispatch` refuses an agent that is already working rather than interleaving prompts.
 
+`dispatch` uses Herdr's native prompt wait, which requires a lifecycle change after
+submission. `--no-wait` confirms submission only: an immediate standalone `wait`
+can still match the state from before work started. Do not automatically resubmit
+after a timeout or `PROMPT_STALLED`; read the pane first.
+
+`wait --until idle` accepts both `idle` and `done`: Herdr uses `done` for unseen
+background completion. The result reports the actual state in `reached` and the
+requested state in `requested`. `blocked` requires input; `unknown` is not evidence
+of completion. State detection comes from Herdr and can misclassify UI screens
+(for example, a Codex folder-trust dialog reported as idle). A settled agent may
+still have background tools running; verify task results separately.
+
+Normal prompts cannot answer approval menus. After reading the controls and
+deciding the action is authorized, `dispatch <pane> --keys down enter` sends those
+explicit keys and returns immediately. It never automatically approves a dialog.
+
+`read` returns the last 60 visible lines (or `--lines N`) and discloses truncation.
+`--full` requests available unwrapped history, capped at 2000 lines with a limit
+notice when exceeded. Herdr may need to scroll an idle alternate-screen agent to
+retrieve history; while it is working or blocked, use a normal visible read.
+Unrecoverable history requires asking the agent to write its response to a file.
+All reads honor `HERDR_BIN` and surface backend failures.
+
+`fleet` includes `done` and `unknown` panes as well as their counts, so neither
+disappears from the next-step view.
+
 ## Engine
 
 `engine/` holds the bash supervision layer — orchestrator, worker, lifecycle
@@ -56,6 +83,11 @@ verification.
 ```sh
 cd engine && HERDR_ENV=1 ./test-herdr-monitor.sh
 ```
+
+The dependency-free JavaScript regressions run with `npm test` (`node:test`).
+Both suites isolate their fake backend from the live fleet. The bash suite needs
+process inspection (`ps`) for its lock-identity tests; restrictive sandboxes may
+cause those checks to fail closed.
 
 ## Prior art
 
