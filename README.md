@@ -23,6 +23,7 @@ herdr-axi                              # live fleet state — no args needed
 herdr-axi agents --state blocked       # filter by state or --kind
 herdr-axi fleet                        # counts + blocked/working/idle in one call
 herdr-axi read w1:pP --lines 40        # visible output, truncated, --full to expand
+herdr-axi read w1:pP --compact        # remove terminal layout noise
 herdr-axi dispatch w1:pP "run tests"   # submit and wait until settled
 herdr-axi dispatch w1:pP --keys enter # explicit UI input after inspecting a dialog
 herdr-axi wait w1:pP --until idle      # block on a state transition
@@ -41,7 +42,7 @@ titles containing spaces; every suggestion this CLI emits is a runnable command.
 | Pre-computed aggregates | `fleet` answers "what needs me?" in one call |
 | Structured errors | `UNKNOWN_AGENT`, `AGENT_BUSY`, `INVALID_STATE`, `UNKNOWN_FLAG`; exit 0/1/2 |
 | Fail loud | unknown flags are an error, never a silent no-op |
-| Truncation | `read` defaults to 60 lines with a size hint and `--full` |
+| Truncation | `read` defaults to 60 lines / 8000 characters; `--full` expands |
 | Contextual disclosure | every result ends in runnable next steps |
 
 `dispatch` refuses an agent that is already working rather than interleaving prompts.
@@ -62,15 +63,38 @@ Normal prompts cannot answer approval menus. After reading the controls and
 deciding the action is authorized, `dispatch <pane> --keys down enter` sends those
 explicit keys and returns immediately. It never automatically approves a dialog.
 
-`read` returns the last 60 visible lines (or `--lines N`) and discloses truncation.
+`read` returns the last 60 visible lines (or `--lines N`), capped at 8000 Unicode
+characters (or `--chars N`), and discloses each limit that clipped output.
 `--full` requests available unwrapped history, capped at 2000 lines with a limit
-notice when exceeded. Herdr may need to scroll an idle alternate-screen agent to
-retrieve history; while it is working or blocked, use a normal visible read.
+notice when exceeded, and removes the default character cap. Herdr may need to
+scroll an idle alternate-screen agent to retrieve history; while it is working
+or blocked, use a normal visible read with a larger `--chars N` if needed.
 Unrecoverable history requires asking the agent to write its response to a file.
 All reads honor `HERDR_BIN` and surface backend failures.
 
-`fleet` includes `done` and `unknown` panes as well as their counts, so neither
-disappears from the next-step view.
+`read --compact` optionally removes border-only rows, right padding, and repeated
+blank lines. Text and code indentation remain; diagram borders and terminal
+layout may change. Omit `--compact` to preserve layout. Compaction precedes the
+character cap, so padding does not consume the budget.
+
+Bare `herdr-axi` and `fleet` show pane IDs by state, including `done` and `unknown`.
+Use `agents` for titles and kinds. Fleet and agent listings suggest one action,
+prioritizing blocked, unknown, done, working, then idle.
+
+Dispatch receipts include `pane`, `submitted`, and (when awaited) `state`; they
+do not echo the task or title. Wait receipts include `pane`, `requested`, and
+`reached`, without duplicating the observed state. These are output-schema changes
+from the initial release; consumers of `task`, `dispatched`, `agent`, or wait's
+`state` should use the command input and pane ID instead.
+
+Measured UTF-8 output bytes on fixed fake-backend inputs (not token counts):
+
+| Output | Before | After | Reduction |
+| --- | ---: | ---: | ---: |
+| 13-agent fleet | 532 | 287 | 46% |
+| Submission of a 10,000-character task | 10,188 | 133 | 99% |
+| Padded terminal, opting into `--compact` | 10,360 | 460 | 96% |
+| Settled wait | 142 | 82 | 42% |
 
 ## Engine
 
