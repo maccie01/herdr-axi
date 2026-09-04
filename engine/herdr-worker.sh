@@ -14,11 +14,12 @@ for dependency in herdr jq uuidgen rg awk find mktemp stat ps date; do
 done
 
 usage() {
-  printf '%s\n' "usage: $0 --name NAME --kind copilot|claude|codex --cwd PATH --prompt-file PATH [--model MODEL] [--effort LEVEL] [--max-autopilot-continues N] [--workspace ID] [--orchestrator-agent NAME]" >&2
+  printf '%s\n' "usage: $0 --name NAME --kind copilot|claude|codex --cwd PATH --prompt-file PATH [--label LABEL] [--model MODEL] [--effort LEVEL] [--max-autopilot-continues N] [--workspace ID] [--orchestrator-agent NAME]" >&2
   exit 2
 }
 
 name=""
+label=""
 kind=""
 worker_cwd=""
 prompt_file=""
@@ -36,6 +37,7 @@ while (( $# > 0 )); do
   case "$1" in
     --resume) resume=true; shift ;;
     --name) name="${2:-}"; shift 2 ;;
+    --label) label="${2:-}"; shift 2 ;;
     --kind) kind="${2:-}"; shift 2 ;;
     --cwd) worker_cwd="${2:-}"; shift 2 ;;
     --prompt-file) prompt_file="${2:-}"; shift 2 ;;
@@ -53,6 +55,7 @@ done
 [[ -d "$worker_cwd" && -r "$prompt_file" ]] || usage
 [[ "$kind" == "copilot" || "$kind" == "claude" || "$kind" == "codex" ]] || usage
 [[ "$max_autopilot_continues" =~ ^[0-9]+$ && "$max_autopilot_continues" -gt 0 ]] || usage
+[[ -n "$label" ]] || label="$name"
 
 if ! herdr_receipt_resolve "$name" "$workspace_id" "$orchestrator_agent"; then
   printf '%s\n' "herdr-worker: workspace could not be resolved: $name" >&2
@@ -85,7 +88,7 @@ else
   tab_json=$(herdr tab create \
   --workspace "$workspace_id" \
   --cwd "$worker_cwd" \
-  --label "$name" \
+  --label "$label" \
   --env HERDR_MONITOR_ENABLED=1 \
   --env "HERDR_WORKSPACE_ID=$workspace_id" \
   --env "HERDR_RECEIPT_ROOT=$HERDR_RECEIPT_ROOT_DIR" \

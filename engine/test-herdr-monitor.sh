@@ -269,6 +269,10 @@ case "$group:$action" in
     printf '%s\n' working > "$case_dir/status"
     ;;
   tab:create)
+    while (( $# > 0 )); do
+      if [[ "$1" == "--label" ]]; then printf '%s\n' "$2" > "$case_dir/tab-label"; break; fi
+      shift
+    done
     : > "$case_dir/tab-alive"
     : > "$case_dir/pane-1-alive"
     rm -f "$case_dir/pane-ready"
@@ -1726,7 +1730,8 @@ test_prompt_ack_and_no_nested_agents() (
   worker_prompt="$FAKE_HERDR_CASE/worker.txt"
   printf '%s\n' "bounded task" > "$worker_prompt"
   bash "$worker_script" --name worker --kind codex --cwd "$FAKE_HERDR_CASE" \
-    --prompt-file "$worker_prompt" --workspace ws --orchestrator-agent orch >/dev/null
+    --prompt-file "$worker_prompt" --workspace ws --orchestrator-agent orch --label 'Byte review · codex' >/dev/null
+  assert_eq 'Byte review · codex' "$(< "$FAKE_HERDR_CASE/tab-label")" "readable tab label"
   rg -q -- '--wait --until working --until blocked --until idle --until done --timeout 15000' "$FAKE_HERDR_CASE/calls" || fail "startup waits for settlement"
   rg -q 'Do not start subagents' "$FAKE_HERDR_CASE/visible" || fail "nested workers not prohibited"
   rg -q -- '--ratio 0.75' "$FAKE_HERDR_CASE/calls" || fail "worker layout not 75/25"

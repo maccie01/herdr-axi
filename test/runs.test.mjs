@@ -52,11 +52,16 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
   } else if (group === "tab") {
     if (action === "create") {
       const id = randomUUID().slice(0, 8);
-      const a = { ...owner, pane_id: `wTEST:p${id}`, tab_id: `wTEST:t${id}`, terminal_id: id, name: "", agent: "", agent_status: "idle", cwd: args[args.indexOf("--cwd") + 1] };
+      const a = { ...owner, pane_id: `wTEST:p${id}`, tab_id: `wTEST:t${id}`, terminal_id: id, name: "", label: args[args.indexOf("--label") + 1], agent: "", agent_status: "idle", cwd: args[args.indexOf("--cwd") + 1] };
       save(a); emit({ tab: { tab_id: a.tab_id }, root_pane: { pane_id: a.pane_id } });
     } else if (action === "get") {
       const a = [owner, ...all()].find((a) => a.tab_id === args[0]) ?? missing("tab");
       emit({ tab: { tab_id: a.tab_id, workspace_id: a.workspace_id, pane_count: 2 } });
+    } else if (action === "rename") {
+      assert.notEqual(args[0], owner.tab_id);
+      if (fs.existsSync(path.join(dir, "rename-fail"))) { console.error("rename unavailable"); process.exit(1); }
+      const a = all().find((a) => a.tab_id === args[0]) ?? missing("tab");
+      a.label = args.slice(1).join(" "); save(a); emit({ renamed: true });
     } else if (action === "close") {
       assert.notEqual(args[0], owner.tab_id);
       for (const a of all().filter((a) => a.tab_id === args[0])) fs.unlinkSync(path.join(dir, `${a.pane_id}.agent`));
@@ -168,6 +173,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       f.ok(["run", "next"]);
       assert.equal(f.state().workers.length, 2, "reuse must not open another tab");
       assert.equal(f.state().tasks.find((t) => t.id === "overlap").state, "running");
+      assert.equal(JSON.parse(fs.readFileSync(path.join(f.dir, `${first.pane}.agent`))).label, "overlap · codex", "reused tab follows its current assignment");
       const second = f.state().workers.find((w) => w.pane !== first.pane);
       const oldGeneration = second.generation;
       f.ok(["run", "revise", second.pane, "--prompt-file", path.join(f.dir, "prompt")]);
@@ -205,8 +211,12 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
     const f = fixture();
     try {
       fs.writeFileSync(path.join(f.dir, "startup-blocked"), "");
-      f.queue("a"); assert.match(f.ok(["run", "next"]), /uncertain/);
+      f.queue("a"); const result = f.ok(["run", "next"]);
+      assert.match(result, /blocked/); assert.match(result, /submitted: false/);
       const w = f.state().workers[0];
+      assert.match(result, new RegExp(`herdr-axi read ${w.pane} --raw`));
+      assert.equal(JSON.parse(fs.readFileSync(path.join(f.dir, `${w.pane}.agent`))).label, "a · codex");
+      assert.equal(f.calls().filter((c) => ["prompt", "send-keys"].includes(c.action)).length, 0);
       assert.match(f.ok(["read", w.pane]), /Worker result/);
       assert.equal(f.execute(["run", "recover", "a"]).status, 1);
       f.ok(["dispatch", w.pane, "--keys", "enter"]);
@@ -229,6 +239,47 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       fs.unlinkSync(path.join(f.dir, `${w.pane}.agent`));
       assert.match(f.ok(["run", "recover", w.pane]), /requeued/);
       assert.equal(f.state().tasks[0].state, "queued");
+    } finally { f.clean(); }
+  });
+
+  test("live blocked wins over starting and wakes watch before the launcher returns", () => {
+    const f = fixture();
+    try {
+      fs.writeFileSync(path.join(f.dir, "startup-blocked"), "");
+      f.queue("a"); f.ok(["run", "next"]);
+      const r = f.state(), w = r.workers[0];
+      r.tasks[0].state = "starting"; r.tasks[0].launcher = process.pid;
+      r.workers = []; f.write(r); // Early registry only, launcher still in flight.
+      const status = f.ok(["fleet"]);
+      assert.match(status, /blocked/); assert.match(status, /not_submitted/);
+      assert.doesNotMatch(status, /starting/);
+      assert.match(status, new RegExp(`herdr-axi read ${w.pane} --raw`));
+      const at = Date.now();
+      assert.match(f.ok(["watch", "--timeout-ms", "10000"]), /blocked/);
+      assert(Date.now() - at < 5000);
+      r.workers = [w]; f.write(r);
+      const registryFile = path.join(path.dirname(w.receipt), `${w.name}.json`);
+      const registry = JSON.parse(fs.readFileSync(registryFile)); registry.stage = "submitting";
+      fs.writeFileSync(registryFile, JSON.stringify(registry));
+      assert.doesNotMatch(f.ok(["fleet"]), /not_submitted/, "resumed startup must read current submission stage");
+      assert(f.calls().every((c) => !["prompt", "send-keys", "close"].includes(c.action)));
+    } finally { f.clean(); }
+  });
+
+  test("cosmetic relabel failure cannot corrupt task delivery or trigger a resend", () => {
+    const f = fixture();
+    try {
+      f.queue("first", "shared"); f.ok(["run", "next"]);
+      const w = f.state().workers[0]; f.complete(w);
+      f.ok(["run", "accept", w.pane, "--evidence", "checked"]);
+      fs.writeFileSync(path.join(f.dir, "rename-fail"), "");
+      f.queue("second", "shared");
+      const result = f.ok(["run", "next"]);
+      assert.match(result, /labelError/); assert.doesNotMatch(result, /uncertain/);
+      assert.equal(f.state().tasks[1].state, "running");
+      assert.notEqual(f.state().workers[0].generation, w.generation);
+      assert.equal(f.execute(["run", "recover", w.pane]).status, 1);
+      assert.equal(f.calls().filter((c) => c.action === "prompt").length, 2);
     } finally { f.clean(); }
   });
 
