@@ -1,0 +1,49 @@
+{
+  "description": "Notify the Herdr orchestrator without influencing Claude's decisions.",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HERDR_MONITOR_HOOK_SCRIPT\" settled",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HERDR_MONITOR_HOOK_SCRIPT\" input",
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "matcher": "elicitation_dialog",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HERDR_MONITOR_HOOK_SCRIPT\" input",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HERDR_MONITOR_HOOK_SCRIPT\" error",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

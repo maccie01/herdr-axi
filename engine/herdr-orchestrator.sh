@@ -1,0 +1,516 @@
+#!/bin/bash
+set -euo pipefail
+
+if [[ "${HERDR_ENV:-}" != "1" ]]; then
+  printf '%s\n' "herdr-orchestrator: not running inside Herdr" >&2
+  exit 2
+fi
+
+for dependency in herdr jq rg cut awk find mktemp stat ps; do
+  command -v "$dependency" >/dev/null || {
+    printf '%s\n' "herdr-orchestrator: missing dependency: $dependency" >&2
+    exit 2
+  }
+done
+
+script_dir=$(cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=herdr-receipt.sh
+source "$script_dir/herdr-receipt.sh"
+registry_dir=""
+
+usage() {
+  printf '%s\n' \
+    "usage:" \
+    "  $0 start <herdr-worker.sh options>" \
+    "  $0 inspect NAME [NAME ...]" \
+    "  $0 result NAME" \
+    "  $0 followup NAME --prompt-file PATH" \
+    "  $0 close NAME" >&2
+  exit 2
+}
+
+agent_info() {
+  herdr agent get "$1"
+}
+
+resolve_agent_paths() {
+  local name="$1"
+  local workspace_hint="${2:-}"
+  if ! herdr_receipt_resolve "$name" "$workspace_hint" "$name"; then
+    printf '%s\n' "herdr-orchestrator: workspace could not be resolved: $name" >&2
+    return 1
+  fi
+  registry_dir="$HERDR_RECEIPT_REGISTRY_DIR"
+}
+
+receipt_state() {
+  local receipt_file="$1"
+  herdr_receipt_read "$receipt_file" || return 1
+  if [[ "$receipt_terminal" == "closed" ]]; then
+    printf '%s\n' done
+    return 0
+  fi
+  if [[ -n "$receipt_settled_fingerprint" ]]; then
+    printf '%s\n' done
+    return 0
+  fi
+  case "$receipt_event:$receipt_outcome" in
+    settled:delivered) printf '%s\n' done ;;
+    input:delivered) printf '%s\n' blocked ;;
+    error:delivered|error:error) printf '%s\n' error ;;
+    *) return 1 ;;
+  esac
+}
+
+resolved_state() {
+  local name="$1"
+  local info="$2"
+  local receipt_file="$3"
+  local herdr_state receipt
+  herdr_state=$(printf '%s\n' "$info" |
+    jq -r '.result.agent.agent_status // empty')
+
+  # A live Herdr turn is authoritative. A native completion can only refine
+  # idle/done state, never interrupt work Herdr still observes as active.
+  if [[ "$herdr_state" == "working" || "$herdr_state" == "blocked" ]]; then
+    printf '%s\n' "$herdr_state"
+    return 0
+  fi
+  receipt=$(receipt_state "$receipt_file" 2>/dev/null || true)
+  if [[ -n "$receipt" ]]; then
+    printf '%s\n' "$receipt"
+  elif [[ "$herdr_state" == "done" ]]; then
+    printf '%s\n' idle
+  else
+    printf '%s\n' "$herdr_state"
+  fi
+}
+
+agent_state() {
+  local name="$1"
+  local info
+  resolve_agent_paths "$name" || return 1
+  info=$(agent_info "$name")
+  resolved_state "$name" "$info" "$HERDR_RECEIPT_FILE"
+}
+
+deliver_prompt() {
+  local name="$1"
+  local task="$2"
+  local generation="$3"
+  herdr_deliver_prompt "$name" "$task" "$generation"
+}
+
+render_result() {
+  local name="$1"
+  local state event
+  resolve_agent_paths "$name" || return 1
+  state=$(agent_state "$name")
+  case "$state" in
+    done) event=settled ;;
+    blocked) event=input ;;
+    working)
+      printf '%s\n' "herdr-orchestrator: $name is still working" >&2
+      return 1
+      ;;
+    *)
+      printf '%s\n' "herdr-orchestrator: $name has unsafe state ${state:-unknown}" >&2
+      return 1
+      ;;
+  esac
+  env \
+    HERDR_MONITOR_ENABLED=1 \
+    HERDR_MONITOR_RENDER_ONLY=1 \
+    HERDR_MONITOR_AGENT="$name" \
+    HERDR_MONITOR_LABEL="$name" \
+    "$script_dir/herdr-hook-notify.sh" "$event" </dev/null
+}
+
+refresh_registry_generation() {
+  local name="$1"
+  local receipt_file="$2"
+  local generation="$3"
+  local registry_file="$registry_dir/$name.json"
+  local registry_name registry_receipt temp_file
+  [[ -e "$registry_file" ]] || return 0
+  registry_name=$(jq -r '.name // empty' "$registry_file" 2>/dev/null || true)
+  registry_receipt=$(jq -r '.receipt_file // empty' "$registry_file" 2>/dev/null || true)
+  [[ "$registry_name" == "$name" && "$registry_receipt" == "$receipt_file" ]] ||
+    return 1
+  temp_file=$(mktemp "${registry_file}.tmp.XXXXXXXX") || return 1
+  if ! jq --arg generation "$generation" \
+    '.generation = $generation' "$registry_file" > "$temp_file"; then
+    rm -f "$temp_file"
+    return 1
+  fi
+  if ! mv -f "$temp_file" "$registry_file"; then
+    rm -f "$temp_file"
+    return 1
+  fi
+}
+
+close_registry_file=""
+close_registry_dir=""
+close_receipt_file=""
+close_workspace_id=""
+close_tab_id=""
+close_agent_pane=""
+close_monitor_pane=""
+close_generation=""
+close_already_closed=false
+resource_state=""
+resource_json=""
+
+resolve_close_lifecycle() {
+  local name="$1"
+  local root candidate candidate_count=0 valid_event_count=0
+  local registry_name registry_workspace registry_receipt
+
+  root="${HERDR_RECEIPT_ROOT:-${HOME}/.herdr-orchestrator}"
+  root="${root%/}"
+  [[ -n "$root" && -d "$root" ]] || {
+    printf '%s\n' "herdr-orchestrator: no registered lifecycle for $name" >&2
+    return 1
+  }
+
+  while IFS= read -r candidate; do
+    [[ "${candidate##*/}" == "$name.json" ]] || continue
+    close_registry_file="$candidate"
+    candidate_count=$((candidate_count + 1))
+  done < <(find "$root" -mindepth 2 -maxdepth 2 -type f -name '*.json' -print)
+
+  if (( candidate_count == 0 )); then
+    while IFS= read -r candidate; do
+      [[ "${candidate##*/}" == "$name.event" ]] || continue
+      if herdr_receipt_read "$candidate" 2>/dev/null; then
+        close_receipt_file="$candidate"
+        valid_event_count=$((valid_event_count + 1))
+      fi
+    done < <(find "$root" -mindepth 2 -maxdepth 2 -type f -name '*.event' -print)
+    if (( valid_event_count == 1 )) &&
+      herdr_receipt_read "$close_receipt_file" &&
+      [[ "$receipt_terminal" == "closed" ]]; then
+      close_already_closed=true
+      return 0
+    fi
+    printf '%s\n' \
+      "herdr-orchestrator: registered lifecycle is missing or ambiguous: $name" >&2
+    return 1
+  fi
+  if (( candidate_count != 1 )); then
+    printf '%s\n' \
+      "herdr-orchestrator: multiple registered lifecycles found: $name" >&2
+    return 1
+  fi
+
+  close_registry_dir=$(dirname -- "$close_registry_file")
+  close_workspace_id="${close_registry_dir##*/}"
+  close_receipt_file="$close_registry_dir/$name.event"
+  registry_name=$(jq -r '.name // empty' "$close_registry_file" 2>/dev/null || true)
+  registry_workspace=$(jq -r '.workspace_id // empty' "$close_registry_file" 2>/dev/null || true)
+  registry_receipt=$(jq -r '.receipt_file // empty' "$close_registry_file" 2>/dev/null || true)
+  close_tab_id=$(jq -r '.tab_id // empty' "$close_registry_file" 2>/dev/null || true)
+  close_agent_pane=$(jq -r '.agent_pane // empty' "$close_registry_file" 2>/dev/null || true)
+  close_monitor_pane=$(jq -r '.monitor_pane // empty' "$close_registry_file" 2>/dev/null || true)
+  close_generation=$(jq -r '.generation // empty' "$close_registry_file" 2>/dev/null || true)
+  if [[ "$registry_name" != "$name" ||
+    "$registry_workspace" != "$close_workspace_id" ||
+    "$registry_receipt" != "$close_receipt_file" ||
+    -z "$close_tab_id" ||
+    -z "$close_agent_pane" ||
+    -z "$close_monitor_pane" ]]; then
+    printf '%s\n' \
+      "herdr-orchestrator: registered lifecycle is malformed: $name" >&2
+    return 1
+  fi
+}
+
+probe_resource() {
+  local kind="$1"
+  local identifier="$2"
+  local output actual error_code
+  resource_state=unknown
+  resource_json=""
+  if output=$(herdr "$kind" get "$identifier" 2>&1); then
+    if [[ "$kind" == "tab" ]]; then
+      actual=$(printf '%s\n' "$output" |
+        jq -r '.result.tab.tab_id // empty' 2>/dev/null || true)
+    else
+      actual=$(printf '%s\n' "$output" |
+        jq -r '.result.pane.pane_id // empty' 2>/dev/null || true)
+    fi
+    if [[ "$actual" == "$identifier" ]]; then
+      resource_state=present
+      resource_json="$output"
+    fi
+    return 0
+  fi
+  error_code=$(printf '%s\n' "$output" |
+    jq -Rr 'fromjson? | .error.code? // empty' 2>/dev/null |
+    awk 'NF { value=$0 } END { print value }')
+  if [[ "$error_code" == "${kind}_not_found" ]]; then
+    resource_state=absent
+  fi
+}
+
+validate_registered_resources() {
+  local tab_workspace pane_tab
+  local tab_state agent_pane_state monitor_pane_state
+
+  probe_resource tab "$close_tab_id"
+  tab_state="$resource_state"
+  if [[ "$tab_state" == "present" ]]; then
+    tab_workspace=$(printf '%s\n' "$resource_json" |
+      jq -r '.result.tab.workspace_id // empty')
+    [[ "$tab_workspace" == "$close_workspace_id" ]] ||
+      return 1
+  fi
+
+  probe_resource pane "$close_agent_pane"
+  agent_pane_state="$resource_state"
+  if [[ "$agent_pane_state" == "present" ]]; then
+    pane_tab=$(printf '%s\n' "$resource_json" |
+      jq -r '.result.pane.tab_id // empty')
+    [[ "$pane_tab" == "$close_tab_id" ]] || return 1
+  fi
+
+  probe_resource pane "$close_monitor_pane"
+  monitor_pane_state="$resource_state"
+  if [[ "$monitor_pane_state" == "present" ]]; then
+    pane_tab=$(printf '%s\n' "$resource_json" |
+      jq -r '.result.pane.tab_id // empty')
+    [[ "$pane_tab" == "$close_tab_id" ]] || return 1
+  fi
+
+  [[ "$tab_state" != "unknown" &&
+    "$agent_pane_state" != "unknown" &&
+    "$monitor_pane_state" != "unknown" ]] || return 1
+
+  if [[ "$tab_state" == "absent" ]]; then
+    [[ "$agent_pane_state" == "absent" &&
+      "$monitor_pane_state" == "absent" ]]
+    return
+  fi
+  [[ "$agent_pane_state" == "present" ||
+    "$monitor_pane_state" == "present" ]]
+}
+
+registered_resources_absent() {
+  probe_resource tab "$close_tab_id"
+  [[ "$resource_state" == "absent" ]] || return 1
+  probe_resource pane "$close_agent_pane"
+  [[ "$resource_state" == "absent" ]] || return 1
+  probe_resource pane "$close_monitor_pane"
+  [[ "$resource_state" == "absent" ]]
+}
+
+close_locked_error() {
+  local message="$1"
+  herdr_receipt_lock_release
+  printf '%s\n' "herdr-orchestrator: $message" >&2
+  exit 1
+}
+
+command_name="${1:-}"
+[[ -n "$command_name" ]] || usage
+shift
+
+case "$command_name" in
+  start)
+    (( $# > 0 )) || usage
+    start_result=$("$script_dir/herdr-worker.sh" "$@")
+    name=$(printf '%s\n' "$start_result" | jq -r '.name // empty')
+    workspace_id=$(printf '%s\n' "$start_result" | jq -r '.workspace_id // empty')
+    [[ -n "$name" && -n "$workspace_id" ]] || {
+      printf '%s\n' "$start_result" >&2
+      exit 1
+    }
+    resolve_agent_paths "$name" "$workspace_id"
+    compact_result=$(printf '%s\n' "$start_result" | jq -c '.')
+    printf '%s\n' "$compact_result" > "$registry_dir/$name.json"
+    printf '%s\n' "$compact_result"
+    ;;
+  inspect)
+    (( $# > 0 )) || usage
+    {
+      for name in "$@"; do
+        resolve_agent_paths "$name"
+        info=$(agent_info "$name")
+        herdr_state=$(printf '%s\n' "$info" |
+          jq -r '.result.agent.agent_status // empty')
+        effective_state=$(resolved_state "$name" "$info" "$HERDR_RECEIPT_FILE")
+        receipt_status=$(receipt_state "$HERDR_RECEIPT_FILE" 2>/dev/null || true)
+        if [[ "$herdr_state" == "working" ]]; then
+          state_source=herdr
+        elif [[ -n "$receipt_status" ]]; then
+          state_source=monitor-receipt
+        else
+          state_source=herdr
+        fi
+        notification_delivery=""
+        if herdr_receipt_read "$HERDR_RECEIPT_FILE" 2>/dev/null; then
+          notification_delivery="$receipt_outcome"
+        fi
+        printf '%s\n' "$info" |
+          jq -c --arg status "$effective_state" --arg herdr_status "$herdr_state" \
+            --arg status_source "$state_source" --arg delivered "$notification_delivery" \
+            '{name:.result.agent.name,kind:.result.agent.agent,status:$status,herdr_status:$herdr_status,status_source:$status_source,notification_delivery:($delivered | if . == "" then null else . end),cwd:.result.agent.cwd,session_id:.result.agent.agent_session.value,tab_id:.result.agent.tab_id,pane_id:.result.agent.pane_id}'
+      done
+    } | jq -sc '.'
+    ;;
+  result)
+    (( $# == 1 )) || usage
+    render_result "$1"
+    ;;
+  followup)
+    if (( $# != 3 )) || [[ "${2:-}" != "--prompt-file" || ! -r "${3:-}" ]]; then
+      usage
+    fi
+    name="$1"
+    resolve_agent_paths "$name"
+    state=$(agent_state "$name")
+    [[ "$state" == "done" || "$state" == "error" ]] || {
+      printf '%s\n' "herdr-orchestrator: followup refused: $name state=${state:-unknown}" >&2
+      exit 1
+    }
+    receipt_file="$HERDR_RECEIPT_FILE"
+    herdr_receipt_lock_acquire "$receipt_file" || {
+      printf '%s\n' "herdr-orchestrator: followup could not lock receipt: $name" >&2
+      exit 1
+    }
+    info=$(agent_info "$name")
+    state=$(resolved_state "$name" "$info" "$receipt_file")
+    if [[ "$state" != "done" && "$state" != "error" ]]; then
+      herdr_receipt_lock_release
+      printf '%s\n' "herdr-orchestrator: followup state changed: $name state=${state:-unknown}" >&2
+      exit 1
+    fi
+    completion_generation=$(herdr_new_generation)
+    if ! herdr_receipt_rearm_locked \
+      "$receipt_file" followup "$completion_generation"; then
+      herdr_receipt_lock_release
+      exit 1
+    fi
+    if ! refresh_registry_generation \
+      "$name" "$receipt_file" "$completion_generation"; then
+      herdr_receipt_lock_release
+      printf '%s\n' \
+        "herdr-orchestrator: followup registry generation could not be updated: $name" >&2
+      exit 1
+    fi
+    herdr_receipt_lock_release
+    followup_task=$(herdr_append_completion_instruction \
+      "$(< "$3")" "$receipt_file" "$completion_generation")
+    if ! deliver_prompt "$name" "$followup_task" "$completion_generation"; then
+      exit 1
+    fi
+    jq -nc --arg name "$name" '{name:$name,prompt_delivered:true}'
+    ;;
+  close)
+    (( $# == 1 )) || usage
+    name="$1"
+    resolve_close_lifecycle "$name"
+    if [[ "$close_already_closed" == "true" ]]; then
+      jq -nc --arg name "$name" \
+        '{name:$name,closed:true,already_closed:true}'
+      exit 0
+    fi
+    receipt_file="$close_receipt_file"
+    herdr_receipt_lock_acquire "$receipt_file" || {
+      printf '%s\n' "herdr-orchestrator: close could not lock receipt: $name" >&2
+      exit 1
+    }
+
+    herdr_receipt_read "$receipt_file" ||
+      close_locked_error "close receipt is unreadable: $name"
+    if [[ -z "$receipt_settled_fingerprint" ||
+      -z "$receipt_generation" ]]; then
+      close_locked_error "close refused without completion proof: $name"
+    fi
+    if [[ -n "$close_generation" &&
+      "$close_generation" != "$receipt_generation" ]]; then
+      close_locked_error "registered lifecycle generation changed: $name"
+    fi
+    if [[ -z "$close_generation" ]]; then
+      printf '%s\n' \
+        "herdr-orchestrator: closing legacy registry without generation: $name" >&2
+    fi
+
+    info=$(agent_info "$name" 2>/dev/null || true)
+    if [[ -n "$info" ]]; then
+      live_name=$(printf '%s\n' "$info" |
+        jq -r '.result.agent.name // empty')
+      live_state=$(printf '%s\n' "$info" |
+        jq -r '.result.agent.agent_status // empty')
+      live_workspace=$(printf '%s\n' "$info" |
+        jq -r '.result.agent.workspace_id // empty')
+      live_tab=$(printf '%s\n' "$info" |
+        jq -r '.result.agent.tab_id // empty')
+      live_pane=$(printf '%s\n' "$info" |
+        jq -r '.result.agent.pane_id // empty')
+      if [[ -n "$live_name" && "$live_name" != "$name" ]]; then
+        close_locked_error "live agent does not match registry: $name"
+      fi
+      if [[ "$live_state" == "working" || "$live_state" == "blocked" ]]; then
+        close_locked_error "close refused: $name state=$live_state"
+      fi
+      if [[ -n "$live_workspace" &&
+        "$live_workspace" != "$close_workspace_id" ]]; then
+        close_locked_error "live workspace does not match registry: $name"
+      fi
+      if [[ -n "$live_tab" && "$live_tab" != "$close_tab_id" ]]; then
+        close_locked_error "live tab does not match registry: $name"
+      fi
+      if [[ -n "$live_pane" && "$live_pane" != "$close_agent_pane" ]]; then
+        close_locked_error "live agent pane does not match registry: $name"
+      fi
+    fi
+
+    rendered_result=$(env \
+      HERDR_MONITOR_ENABLED=1 \
+      HERDR_MONITOR_RENDER_ONLY=1 \
+      HERDR_MONITOR_AGENT="$name" \
+      HERDR_MONITOR_LABEL="$name" \
+      HERDR_MONITOR_RECEIPT="$receipt_file" \
+      "$script_dir/herdr-hook-notify.sh" settled </dev/null) ||
+      close_locked_error "completed result could not be rendered: $name"
+
+    validate_registered_resources ||
+      close_locked_error "registered tab or panes could not be validated: $name"
+    probe_resource tab "$close_tab_id"
+    case "$resource_state" in
+      present)
+        if [[ "$receipt_terminal" == "closed" ]]; then
+          close_locked_error "closed receipt still has a live tab: $name"
+        fi
+        herdr tab close "$close_tab_id" >/dev/null ||
+          close_locked_error "registered tab close failed: $name"
+        herdr agent wait "$name" --until unknown \
+          --timeout "${HERDR_CLOSE_WAIT_TIMEOUT_MS:-5000}" >/dev/null 2>&1 || true
+        registered_resources_absent ||
+          close_locked_error "registered tab or panes remained after close: $name"
+        ;;
+      absent)
+        registered_resources_absent ||
+          close_locked_error "registered panes remained without their tab: $name"
+        ;;
+      *)
+        close_locked_error "registered tab state became unreadable: $name"
+        ;;
+    esac
+
+    if ! herdr_receipt_write \
+      "$receipt_file" "$receipt_cycle" settled closed closed \
+      "$receipt_delivered_event" "$receipt_delivered_fingerprint" \
+      "$receipt_settled_fingerprint" closed "$receipt_generation" close; then
+      close_locked_error "closed tombstone could not be written: $name"
+    fi
+    if ! rm -f "$close_registry_file"; then
+      close_locked_error "verified registry could not be removed: $name"
+    fi
+    herdr_receipt_lock_release
+    printf '%s\n' "$rendered_result"
+    jq -nc --arg name "$name" '{name:$name,closed:true}'
+    ;;
+  *) usage ;;
+esac

@@ -1,0 +1,5 @@
+{
+  "name": "herdr-native-monitor-claude",
+  "version": "1.0.0",
+  "description": "Forwards native Claude lifecycle events to the registered Herdr orchestrator."
+}

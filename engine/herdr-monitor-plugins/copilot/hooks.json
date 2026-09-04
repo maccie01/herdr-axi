@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "hooks": {
+    "agentStop": [
+      {
+        "type": "command",
+        "bash": "bash \"$HERDR_MONITOR_HOOK_SCRIPT\" settled",
+        "timeoutSec": 15
+      }
+    ],
+    "notification": [
+      {
+        "type": "command",
+        "matcher": "permission_prompt|elicitation_dialog",
+        "bash": "bash \"$HERDR_MONITOR_HOOK_SCRIPT\" input",
+        "timeoutSec": 15
+      }
+    ],
+    "errorOccurred": [
+      {
+        "type": "command",
+        "bash": "bash \"$HERDR_MONITOR_HOOK_SCRIPT\" error",
+        "timeoutSec": 15
+      }
+    ]
+  }
+}

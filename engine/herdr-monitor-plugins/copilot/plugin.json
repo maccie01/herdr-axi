@@ -1,0 +1,6 @@
+{
+  "name": "herdr-native-monitor-copilot",
+  "version": "1.0.0",
+  "description": "Forwards native Copilot lifecycle events to the registered Herdr orchestrator.",
+  "hooks": "hooks.json"
+}
