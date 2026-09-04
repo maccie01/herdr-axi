@@ -1,0 +1,12 @@
+{
+  "name": "herdr-axi",
+  "version": "0.1.0",
+  "description": "Agent-ergonomic CLI for herdr fleet supervision and orchestration",
+  "type": "module",
+  "bin": { "herdr-axi": "bin/herdr-axi.mjs" },
+  "files": ["bin", "src", "engine"],
+  "engines": { "node": ">=20" },
+  "dependencies": { "axi-sdk-js": "^0.1.11" },
+  "license": "MIT",
+  "keywords": ["axi", "agent", "cli", "herdr", "orchestration", "toon"]
+}
