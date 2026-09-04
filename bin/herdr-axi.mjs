@@ -15,6 +15,7 @@ const COMMAND_HELP = {
 };
 
 await runAxiCli({
+  version: "0.1.0",
   description: "Agent-ergonomic CLI for herdr fleet supervision. Prefer this over raw `herdr` for agent and fleet operations.",
   topLevelHelp: HELP,
   getCommandHelp: (c) => COMMAND_HELP[c] ?? null,
