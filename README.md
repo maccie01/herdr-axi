@@ -229,6 +229,13 @@ Worker tabs use readable `<task-id> · <kind>` labels, updated on worker reuse.
 Internal unique agent IDs remain unchanged. Cosmetic rename failures are reported
 separately and never turn acknowledged work into uncertain delivery.
 
+The monitor separates `agent` readiness, `task` status and `proof`. A valid current
+receipt keeps `task: review` across `agent: done` → `idle`; managed acceptance shows
+`task: accepted`. Without a completion receipt, idle/done is `awaiting-proof`, not
+success. Local metadata refreshes during waits (about 5s), without extra Herdr calls.
+This display applies to newly started monitors; existing monitor processes are not
+automatically restarted.
+
 An ambiguous submission remains `uncertain`; inspect it before `run recover
 <pane-or-task-id>`. Recovery never blindly resends an uncertain prompt. A crashed
 launcher can be recovered after its process exits. If the recorded tab and all
