@@ -46,7 +46,7 @@ herdr-axi read w1:pP --full --raw     # available history with layout preserved
 herdr-axi dispatch w1:pP "run tests"   # submit and wait until settled
 herdr-axi dispatch w1:pP --keys enter # explicit UI input after inspecting a dialog
 herdr-axi wait w1:pP --until idle      # block on a state transition
-herdr-axi watch                        # bash supervision engine (receipts, lifecycle)
+herdr-axi watch                        # selected run: bounded wait for changes
 ```
 
 **Agents are addressed by pane id** (`w1:pP`), not by name. Names are terminal
@@ -135,11 +135,171 @@ Measured UTF-8 output bytes on fixed fake-backend inputs (not token counts):
 
 ¹ Measured when compact formatting was opt-in; it is now the default.
 
-## Engine
+## Owned, phased orchestration
+
+Initialize once from the orchestrator's pane, then keep `HERDR_AXI_RUN` in its
+shell environment. The directory is a private run record, not a project-global
+singleton; two orchestrators in the same workspace can use different runs.
+
+```sh
+herdr-axi run init --project /path/to/project
+export HERDR_AXI_RUN=<returned-external-run-directory>
+herdr-axi run queue parser --role implementer --cwd /path/to/worktree \
+  --area src/parser --prompt-file /path/to/parser-task.txt
+herdr-axi run next
+herdr-axi watch
+herdr-axi run inbox
+herdr-axi read <returned-pane-id>
+herdr-axi run accept <returned-pane-id> --evidence "review and test results"
+herdr-axi run phase integrate
+```
+
+`init` resolves the caller via `HERDR_PANE_ID` or `herdr pane current --current`.
+An optional `--owner` must match that caller. Focus is never used. Run mutations
+verify owner identity; reads/waits/keys resolve only owned workers. Pane, tab,
+workspace, backend name, terminal and available session IDs prevent accidentally
+operating on a replaced occupant. The owner and its tab are excluded from control.
+`agents --all` / `fleet --all` are explicit global listings, not permission to
+dispatch outside the run. Without a selected run, the original manual fleet
+commands remain available; initialize a run before orchestrating.
+
+| Phase | Default simultaneous assignments |
+| --- | ---: |
+| explore | 4 |
+| build | 3 |
+| integrate | 2 |
+| verify | 2 |
+| fix | 1 |
+
+Adjust with `run phase <phase> --cap N` (1–16). These are explicit workload
+choices, not an automatic estimate of project maturity. Start wide only for
+independent, bounded assignments; narrow as integration and fixes converge.
+Tiny tasks are usually faster locally. Put scope, acceptance criteria and required
+checks in each prompt. `--area` is one write subtree relative to `--cwd`. Writers
+serialize across the entire canonical Git worktree, even for disjoint areas or
+different subdirectories. Cross-run writer leases enforce the same rule. Use
+separate worktrees for parallel edits. Read-only verifiers can overlap; final
+verification should depend on the writer's acceptance (`--after`). Existing
+unmanaged agents in the same workspace/worktree conservatively block new writers.
+The area is scheduling metadata and a worker instruction, not a filesystem sandbox.
+
+`next` atomically reserves capacity, then starts eligible workers concurrently.
+Startup, blocked/unknown/lost work and finished-but-unaccepted results occupy slots.
+`--after task-id,task-id` requires explicit acceptance of those dependencies.
+Independent tasks can advance without a global batch barrier. Queued tasks keep
+their phase; return to that phase or cancel/requeue explicitly. Runs hold at most
+128 task records; status previews at most eight queued IDs when no work is active.
+
+Accepted workers are reused by kind, cwd and role/model policy. The pool also has a cap: close unused
+accepted workers when a different kind needs their slot. Narrowing a phase retires
+surplus accepted workers, but refuses to narrow below outstanding work. It never
+kills work to satisfy a cap. `run revise <pane> --prompt-file <fix-task>` rejects a
+finished result and gives its bounded fix to the same worker, keeping the slot.
+Native subagents are disabled unless a role explicitly allows bounded read-only
+leaf reviewers. They consume a separate reservation budget, not primary review
+slots; parents integrate results. No recursive delegation or extra Herdr tabs.
+Managed worker environments reject nested `run init`. Native child limits and
+read-only role access are instructions, not runtime-enforced resource/sandbox limits.
+If a runtime cannot select the exact child model/effort, report unavailable rather
+than substituting. Raw/native tools can bypass these conventions;
+the wrapper is an orchestration guardrail, not a security boundary.
+
+Completion hooks write a generation-bound inbox instead of typing into the owner.
+`run inbox` pulls only the latest assistant result (at most 600 characters/worker)
+and reconciles late proofs when hooks preceded idle/session detection. Events stay
+visible until acceptance. `watch` returns on a change or actionable state, or after
+30 seconds with `changed:false`; it does not claim the task completed. Repeat only
+while work remains. Empty finished runs report `complete:true`.
+
+Managed prompts go through `queue`/`next` or `revise`, preserving receipt generations
+and budgets. `dispatch --keys` remains available for inspected dialogs. Startup
+trust dialogs remain open; inspect with `read --raw`, explicitly answer only an
+authorized dialog, then `run recover <task-id>` resumes that same startup. No
+dialog is automatically approved. Startup acknowledges a post-submit transition
+within 15 seconds instead of waiting for the whole task to finish.
+
+An ambiguous submission remains `uncertain`; inspect it before `run recover
+<pane-or-task-id>`. Recovery never blindly resends an uncertain prompt. A crashed
+launcher can be recovered after its process exits. If the recorded tab and all
+recorded panes are verified absent, recovery requeues the task; `next` is still a
+separate action. If a lost worker's tab remains, inspect it and explicitly clean
+up only its recorded resources first. Missing registry or unreadable resource
+identity fails closed. `run unlock` releases only a dead process's short transaction
+lock; an interrupted unlock itself requires inspecting `run.unlock` manually.
+
+`run close <pane>` requires acceptance and the matching generation's completion
+proof. The engine verifies tab/pane identity, refuses extra unregistered panes,
+closes the recorded tab, then verifies disappearance. Workspace-wide close and
+name-based public control are deliberately absent. A saved run may contain prompts
+and review evidence; keep its directory private.
+
+### Project policy, context and clean history
+
+Track one `.herdr-axi.json` at the Git worktree root. `run init --project PATH`
+loads it once; `run config` shows the effective snapshot. Changes apply to new
+runs, never silently change an active worker. This repository includes an example
+policy: Codex Sol/high orchestrator, Copilot Sol/high implementer, Claude Opus 5/high
+verifier, optional one native verifier per implementer. Model strings pass through
+to the selected CLI; availability/authentication remains runtime-specific. The
+orchestrator setting describes how to launch an owner; it cannot change an
+already-running owner's model. `--kind` remains an explicit legacy worker option.
+
+| Config key | Meaning / default |
+| --- | --- |
+| `roles.<name>` | `kind`, `model`, `effort`, `access: read\|write` |
+| `roles.<name>.subagents` | Optional `[{role, max, when}]`; read-only leaf roles only |
+| `roles.<name>.contextWindowTokens` | Optional known input-window size; never guessed |
+| `nativeSubagentLimit` | Maximum reserved native children across pending tasks; 4 |
+| `phases` | Primary caps: explore 4, build 3, integrate 2, verify 2, fix 1 |
+| `agentRatio` | Original agent pane share, 0.75; lower monitor pane 0.25 |
+| `context` | `warnPercent: 70`, `criticalPercent: 85` |
+| `retention` | `detailDays: 30`, `summaryDays: 180` |
+
+Context warnings use Codex's explicit `Context N% left` footer or the latest
+Claude/Copilot input-token count divided by a configured window. No cost, weekly
+quota, or cumulative token totals. Missing telemetry is `contextUnknown`, never
+healthy zero. Probes: at most two owned panes per status call, 1s each, 15s shared
+cache; no background daemon or per-poll full transcript scan. Native transcripts
+are bounded to their last 128KB and require matching available session metadata.
+Warnings advise a safe checkpoint/review/replacement, never interrupt or kill work.
+
+Run state defaults outside Git: `~/.local/state/herdr-axi/projects/<hash>/runs/<id>`.
+Override the private store with `HERDR_AXI_STATE_HOME`; use `--dir` only for an
+explicit external location. Prompts, generation receipts, revisions and decisions
+stay there. Workers receive concise TOON output instructions, no repository plans,
+progress logs or state documents unless explicitly requested as deliverables.
+
+`run history` returns at most eight task summaries and eight lifecycle events;
+`--task ID` adds bounded prompt/revision detail; `--all` lists the project's latest
+eight managed runs. Acceptance retains evidence, latest result and available Git
+HEAD (not a claim that uncommitted changes were committed).
+Archived history works outside Herdr too; select the external run directory with
+`HERDR_AXI_RUN`. No live orchestrator or worker process required.
+
+After acceptance and closing all workers, `run finish` compresses full run detail,
+keeps a compact summary and removes known runtime files. Unknown files are retained.
+Finished runs become read-only. Automatic collection on init/finish (or `run gc`)
+expires only managed completed archives: details after 30 days, summaries after
+180 days; configure longer retention when needed. Expired detail is not recoverable
+without a backup. Active runs, locks, foreign files and explicit `--dir` records are
+never age-deleted. This is task provenance, not a permanent transcript/audit vault.
+Writer leases deliberately fail closed after an unrecorded crash: inspect the run
+and actual workers before manual lease recovery; never erase locks to force progress.
+
+Worker tabs receive the package's CLI directory on `PATH` plus `HERDR_AXI_BIN`
+as an absolute fallback. Global npm installation still exposes `herdr-axi` from
+any directory; custom shell startup files must not discard that PATH. No global
+Claude/Codex/Copilot instruction files are modified.
+
+The old `watch <engine args>` passthrough is replaced by bounded run monitoring.
+The Bash scripts remain lower-level implementation/compatibility surfaces; use
+`run` for ownership, budgets, phased scheduling and safe pane-ID commands.
+
+## Engine internals
 
 `engine/` holds the bash supervision layer — orchestrator, worker, lifecycle
 monitor, hook notifier, and receipt library — with its own test suite
-(`engine/test-herdr-monitor.sh`, 30 cases). The CLI is a front-end; the engine
+(`engine/test-herdr-monitor.sh`). The CLI is a front-end; the engine
 remains the source of truth for receipts, generation binding, and close
 verification.
 

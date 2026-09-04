@@ -111,6 +111,7 @@ case "$group:$action" in
   agent:get)
     [[ ! -e "$case_dir/agent-get-fail" ]] || exit 1
     name="${1:-worker}"
+    [[ "$name" != "pane-1" ]] || name=worker
     status=$(status_for "$name")
     kind=$(read_value "$case_dir/kind" copilot)
     workspace=$(read_value "$case_dir/workspace" ws)
@@ -245,10 +246,16 @@ case "$group:$action" in
     fi
     ;;
   agent:start)
-    if [[ ! -e "$case_dir/pane-ready" ]]; then
+    if [[ -e "$case_dir/start-blocked" ]]; then
+      printf '%s\n' blocked > "$case_dir/status"
+      jq -nc '{error:{code:"agent_not_ready"}}'
+      exit 1
+    fi
+    if [[ -e "$case_dir/pane-wait-fail" ]]; then
       jq -nc '{error:{code:"agent_pane_busy"}}'
       exit 1
     fi
+    sleep "$(read_value "$case_dir/pane-ready-delay" 0)"
     busy_count=$(read_value "$case_dir/start-busy-count" 0)
     if (( busy_count > 0 )); then
       printf '%s\n' "$((busy_count - 1))" > "$case_dir/start-busy-count"
@@ -282,7 +289,11 @@ case "$group:$action" in
       jq -nc '{error:{code:"tab_not_found"}}'
       exit 1
     }
-    jq -nc '{result:{tab:{tab_id:"tab-1",workspace_id:"ws",pane_count:2}}}'
+    pane_count=0
+    for pane_file in pane-1-alive monitor-1-alive extra-pane; do
+      [[ ! -e "$case_dir/$pane_file" ]] || pane_count=$((pane_count + 1))
+    done
+    jq -nc --argjson count "$pane_count" '{result:{tab:{tab_id:"tab-1",workspace_id:"ws",pane_count:$count}}}'
     ;;
   tab:close)
     [[ ! -e "$case_dir/tab-close-fail" ]] || exit 1
@@ -1378,8 +1389,8 @@ test_prompt_delivery_for_all_agent_kinds() (
       --orchestrator-agent orch >/dev/null
     assert_eq 1 "$(call_count 'agent send-keys worker enter')" \
       "$kind explicit Enter count"
-    assert_eq 1 "$(call_count 'pane wait-output pane-1')" \
-      "$kind pane readiness count"
+    assert_eq 0 "$(call_count 'pane wait-output pane-1')" \
+      "$kind has no prompt-glyph dependency"
     assert_file_present "$FAKE_HERDR_CASE/tab-alive" \
       "$kind successful worker tab"
     assert_file_present "$FAKE_HERDR_CASE/monitor-command" \
@@ -1414,12 +1425,14 @@ test_prompt_delivery_for_all_agent_kinds() (
       --orchestrator-agent orch >/dev/null 2>&1; then
       fail "$failure_mode prompt unexpectedly succeeded"
     fi
-    assert_file_absent "$FAKE_HERDR_CASE/tab-alive" \
-      "$failure_mode prompt rollback"
-    assert_eq 1 "$(call_count 'tab close tab-1')" \
+    assert_file_present "$FAKE_HERDR_CASE/tab-alive" \
+      "$failure_mode uncertain prompt preserves work"
+    assert_eq 0 "$(call_count 'tab close tab-1')" \
       "$failure_mode tab close count"
-    assert_file_absent "$FAKE_HERDR_CASE/monitor-command" \
-      "$failure_mode unregistered monitor"
+    assert_file_present "$FAKE_HERDR_CASE/monitor-command" \
+      "$failure_mode retained monitor"
+    assert_file_present "$HERDR_RECEIPT_ROOT/ws/worker.json" \
+      "$failure_mode retained ownership"
   done
 )
 
@@ -1435,8 +1448,8 @@ test_event_bounded_pane_readiness() (
     --prompt-file "$worker_prompt" \
     --workspace ws \
     --orchestrator-agent orch >/dev/null
-  assert_eq 1 "$(call_count 'pane wait-output pane-1')" \
-    "initial pane readiness boundary"
+  assert_eq 0 "$(call_count 'pane wait-output pane-1')" \
+    "native readiness without prompt-glyph guessing"
   assert_eq 1 "$(call_count 'agent start worker')" \
     "start after delayed readiness"
 
@@ -1452,12 +1465,13 @@ test_event_bounded_pane_readiness() (
     --prompt-file "$worker_prompt" \
     --workspace ws \
     --orchestrator-agent orch >/dev/null
-  assert_eq 3 "$(call_count 'pane wait-output pane-1')" \
-    "event boundary before each start attempt"
+  assert_eq 0 "$(call_count 'pane wait-output pane-1')" \
+    "native readiness owns retries"
   assert_eq 3 "$(call_count 'agent start worker')" \
     "preserved start attempt count"
 
   setup_case pane-failure
+  export HERDR_START_READY_TIMEOUT_SECONDS=1
   : > "$FAKE_HERDR_CASE/pane-wait-fail"
   worker_prompt="$FAKE_HERDR_CASE/worker.txt"
   printf '%s\n' "never start" > "$worker_prompt"
@@ -1470,13 +1484,12 @@ test_event_bounded_pane_readiness() (
     --orchestrator-agent orch >/dev/null 2>&1; then
     fail "worker started without pane readiness"
   fi
-  assert_eq 0 "$(call_count 'agent start worker')" \
-    "start attempts before pane readiness"
+  (( $(call_count 'agent start worker') > 0 )) || fail "missing native availability probe"
   assert_file_absent "$FAKE_HERDR_CASE/tab-alive" \
     "pane readiness rollback"
 
   setup_case start-retry-failure
-  printf '%s\n' 3 > "$FAKE_HERDR_CASE/start-busy-count"
+  printf '%s\n' 100 > "$FAKE_HERDR_CASE/start-busy-count"
   worker_prompt="$FAKE_HERDR_CASE/worker.txt"
   printf '%s\n' "never registers" > "$worker_prompt"
   if bash "$worker_script" \
@@ -1486,12 +1499,11 @@ test_event_bounded_pane_readiness() (
     --prompt-file "$worker_prompt" \
     --workspace ws \
     --orchestrator-agent orch >/dev/null 2>&1; then
-    fail "worker succeeded after three busy start attempts"
+    fail "worker succeeded with a permanently busy pane"
   fi
-  assert_eq 3 "$(call_count 'agent start worker')" \
-    "failed start attempt count"
-  assert_eq 3 "$(call_count 'pane wait-output pane-1')" \
-    "failed start readiness count"
+  (( $(call_count 'agent start worker') <= 8 )) || fail "unbounded startup retries"
+  assert_eq 0 "$(call_count 'pane wait-output pane-1')" \
+    "failed native start has no glyph wait"
   assert_file_absent "$FAKE_HERDR_CASE/tab-alive" \
     "failed start rollback"
   assert_file_absent "$FAKE_HERDR_CASE/monitor-command" \
@@ -1682,7 +1694,134 @@ test_signal_cleanup_fixture() (
   done
 )
 
+test_monitor_survives_quiet_intervals() (
+  for status in working idle unknown; do
+    setup_case "quiet-$status"
+    printf '%s\n' "$status" > "$FAKE_HERDR_CASE/status"
+    HERDR_MONITOR_CHANGE_WAIT_TICKS=2 \
+      bash "$monitor_script" worker worker orch "$HERDR_MONITOR_RECEIPT" "$hook_script" &
+    monitor_pid=$!
+    sleep 1.5
+    kill -0 "$monitor_pid" 2>/dev/null || fail "$status monitor exited on a quiet interval"
+    kill "$monitor_pid" 2>/dev/null || true
+    wait "$monitor_pid" 2>/dev/null || true
+    assert_no_fake_waiters "quiet $status cleanup"
+  done
+)
+
+test_managed_inbox_never_prompts_owner() (
+  setup_case managed-inbox
+  write_complete_transcript
+  HERDR_MONITOR_INBOX=1 run_hook settled "$(payload)"
+  assert_eq 0 "$(file_value "$FAKE_HERDR_CASE/prompt-attempts")" "inbox owner interruptions"
+  assert_file_present "${HERDR_MONITOR_RECEIPT}.inbox" "durable inbox"
+  assert_eq settled "$(jq -r '.event' "${HERDR_MONITOR_RECEIPT}.inbox")" "inbox event"
+  assert_eq "$(receipt_read_field 10)" "$(jq -r '.generation' "${HERDR_MONITOR_RECEIPT}.inbox")" "inbox generation"
+  [[ "$(jq '.summary | length' "${HERDR_MONITOR_RECEIPT}.inbox")" -le 600 ]] || fail "unbounded inbox"
+  assert_eq delivered "$(receipt_read_field 4)" "inbox receipt completion"
+)
+
+test_prompt_ack_and_no_nested_agents() (
+  setup_case prompt-ack
+  worker_prompt="$FAKE_HERDR_CASE/worker.txt"
+  printf '%s\n' "bounded task" > "$worker_prompt"
+  bash "$worker_script" --name worker --kind codex --cwd "$FAKE_HERDR_CASE" \
+    --prompt-file "$worker_prompt" --workspace ws --orchestrator-agent orch >/dev/null
+  rg -q -- '--wait --until working --until blocked --until idle --until done --timeout 15000' "$FAKE_HERDR_CASE/calls" || fail "startup waits for settlement"
+  rg -q 'Do not start subagents' "$FAKE_HERDR_CASE/visible" || fail "nested workers not prohibited"
+  rg -q -- '--ratio 0.75' "$FAKE_HERDR_CASE/calls" || fail "worker layout not 75/25"
+  rg -q 'concise TOON' "$FAKE_HERDR_CASE/visible" || fail "TOON contract missing"
+  rg -q -- '--approve-for-me' "$FAKE_HERDR_CASE/calls" || fail "Codex review policy missing"
+  if rg -q -- '--sandbox' "$FAKE_HERDR_CASE/calls"; then fail "incompatible Codex flags"; fi
+  assert_file_present "$HERDR_RECEIPT_ROOT/ws/worker.json" "startup ownership registry"
+)
+
+test_idle_completion_is_collected() (
+  setup_case idle-completion
+  write_complete_transcript
+  printf '%s\n' idle > "$FAKE_HERDR_CASE/status"
+  HERDR_MONITOR_INBOX=1 HERDR_MONITOR_CHANGE_WAIT_TICKS=2 \
+    bash "$monitor_script" worker worker orch "$HERDR_MONITOR_RECEIPT" "$hook_script" &
+  monitor_pid=$!
+  wait_for_file "${HERDR_MONITOR_RECEIPT}.inbox" || fail "idle completion was never collected"
+  assert_eq delivered "$(receipt_read_field 4)" "idle completion receipt"
+  kill "$monitor_pid" 2>/dev/null || true
+  wait "$monitor_pid" 2>/dev/null || true
+  assert_no_fake_waiters "idle completion cleanup"
+)
+
+test_blocked_startup_resumes_owned_pane() (
+  setup_case resume-startup
+  : > "$FAKE_HERDR_CASE/start-blocked"
+  worker_prompt="$FAKE_HERDR_CASE/worker.txt"
+  printf '%s\n' "resume this assignment" > "$worker_prompt"
+  if bash "$worker_script" --name worker --kind copilot --cwd "$FAKE_HERDR_CASE" \
+    --prompt-file "$worker_prompt" --workspace ws --orchestrator-agent orch >/dev/null 2>&1; then
+    fail "blocked startup claimed success"
+  fi
+  assert_file_present "$FAKE_HERDR_CASE/tab-alive" "retained startup dialog"
+  assert_eq 0 "$(file_value "$FAKE_HERDR_CASE/worker-prompts")" "no prompt before startup approval"
+  printf '%s\n' idle > "$FAKE_HERDR_CASE/status"
+  bash "$worker_script" --resume --name worker --kind copilot --cwd "$FAKE_HERDR_CASE" \
+    --prompt-file "$worker_prompt" --workspace ws --orchestrator-agent orch >/dev/null
+  assert_eq 1 "$(call_count 'tab create')" "resume reused tab"
+  assert_eq 1 "$(call_count 'agent start worker')" "resume reused agent"
+  assert_eq 1 "$(file_value "$FAKE_HERDR_CASE/worker-prompts")" "resume delivered once"
+)
+
+test_close_owner_tab_is_refused() (
+  setup_case close-owner-tab
+  write_complete_transcript
+  run_hook settled "$(payload)"
+  write_worker_registry worker ws
+  if HERDR_AXI_OWNER_TAB=tab-1 bash "$orchestrator_script" close worker >/dev/null 2>&1; then
+    fail "closed owner tab"
+  fi
+  assert_eq 0 "$(call_count 'tab close tab-1')" "self close calls"
+  : > "$FAKE_HERDR_CASE/extra-pane"
+  if bash "$orchestrator_script" close worker >/dev/null 2>&1; then
+    fail "closed a tab containing an unregistered pane"
+  fi
+  assert_eq 0 "$(call_count 'tab close tab-1')" "foreign pane close calls"
+)
+
+test_claude_report_survives_receipt_ack_but_not_new_task() (
+  setup_case claude-report
+  printf '%s\n' claude > "$FAKE_HERDR_CASE/kind"
+  transcript="$HOME/.claude/projects/session-1.jsonl"
+  printf '%s\n' \
+    '{"type":"user","message":{"content":"current task"}}' \
+    '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"task: current\nchecks: PASS"}]}}' \
+    '{"type":"user","message":{"content":[{"type":"tool_result","content":"receipt written"}]}}' \
+    '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Receipt written; see above."}]}}' > "$transcript"
+  result=$(HERDR_MONITOR_RENDER_ONLY=1 bash "$hook_script" settled '{}')
+  [[ "$result" == *"checks: PASS"* ]] || fail "structured result lost behind receipt acknowledgement"
+  printf '%s\n' \
+    '{"type":"user","message":{"content":[{"type":"text","text":"new task"}]}}' \
+    '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"New task result"}]}}' >> "$transcript"
+  result=$(HERDR_MONITOR_RENDER_ONLY=1 bash "$hook_script" settled '{}')
+  [[ "$result" == *"New task result"* && "$result" != *"checks: PASS"* ]] || fail "old task report leaked into new task"
+)
+
+test_compact_completion_command_handles_quoted_paths() (
+  setup_case compact-proof
+  source "$receipt_script"
+  proof_receipt="$TMPDIR/space and 'quote.event"
+  command=$(herdr_append_completion_instruction task "$proof_receipt" testgen | tail -n 1)
+  bash -c "$command"
+  assert_eq testgen "$(< "$proof_receipt.proof.testgen")" "compact proof content"
+  assert_file_absent "$proof_receipt.proof.testgen.tmp" "atomic temporary proof"
+)
+
 tests=(
+  test_claude_report_survives_receipt_ack_but_not_new_task
+  test_compact_completion_command_handles_quoted_paths
+  test_idle_completion_is_collected
+  test_blocked_startup_resumes_owned_pane
+  test_monitor_survives_quiet_intervals
+  test_managed_inbox_never_prompts_owner
+  test_prompt_ack_and_no_nested_agents
+  test_close_owner_tab_is_refused
   test_concurrent_settled_once
   test_missing_transcripts_and_stale_copilot
   test_structural_completion_proof_for_all_agents

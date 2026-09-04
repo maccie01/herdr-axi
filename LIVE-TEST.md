@@ -77,3 +77,105 @@ scratch-folder trust, the displayed scratch write/sleep approval, and test-agent
 - No live `watch` orchestration or server termination; existing engine behavior
   validated through its isolated suite.
 - No npm publication, remote push, or edits to global agent instruction files.
+
+## Follow-up: owned, phased orchestration
+
+Scratch root: `/private/tmp/herdr-axi-phases.hR3i0I`; active test record `run2/`.
+Owner resolved with `herdr pane current --current`: `w1B:p2`, tab `w1B:t2`.
+
+| Kind | Successful pane / tab | Evidence | Cleanup |
+| --- | --- | --- | --- |
+| Claude | `w1B:pC` / `w1B:tC` | Branch `axi-phase-test`; exact `hello\n`, 6 bytes | Accepted; retired when phase narrowed to fix |
+| Copilot | `w1B:pE` / `w1B:tE` | Same branch and exact bytes | Accepted; retired when phase narrowed to fix |
+| Codex | `w1B:pH` / `w1B:tF` | Same initial result; reused for exact `hello\nworld\n`, 12 bytes | Accepted; verified close |
+
+All file contents verified independently with `od`; branches checked with Git.
+The reused Codex worker rejected a concurrent prompt with `AGENT_BUSY` and its
+idle wait returned `reached: done`. Three workers narrowed to one, without a new
+tab for the follow-up. Final run: `complete:true`, zero occupied/queued/parked.
+Final workspace topology: original `w1B:t1` and owner `w1B:t2` only.
+Monitor panes `w1B:pF`, `w1B:pG`, `w1B:pJ` closed with their worker tabs.
+
+Live failures and repairs:
+
+- Themed shell prompts failed the engine's `$#%>` readiness regex: replaced by
+  native agent-start availability checks and bounded busy retries.
+- Codex 0.153.2 rejected `--approve-for-me` with `--sandbox`: removed the redundant
+  sandbox flag; automatic review still selects workspace-write.
+- All fresh scratch folders needed trust approval: retained startup dialogs,
+  inspected through `read --raw`, explicitly answered only for our directories,
+  then resumed the same owned agents without creating replacement tabs.
+- Hooks sometimes ran before final idle/session metadata: generation proofs
+  existed but receipts were suppressed. Added idle collection and pull-based
+  late-proof reconciliation. Initial Claude/Copilot receipts were manually
+  collected in inbox-only diagnostic mode; Codex and its follow-up were collected
+  through `run inbox`. Neither path typed into the owner.
+- Old three-message summaries mixed previous and current assignments: reduced
+  native transcript summaries to the latest assistant result.
+
+Failed-start recorded tabs `w1B:t9`, `w1B:tA`, `w1B:tB`, `w1B:tD` were rolled back
+and verified absent before retry. The initial three glyph-check failures preceded
+early registry persistence; those pre-agent tabs were rolled back too. Ownership
+is now recorded immediately after tab creation, before agent startup.
+
+Final automated checks: **30/30 JavaScript**, **36/36 Bash**, `git diff --check`.
+New coverage includes concurrent slot reservation, overlapping write areas,
+accepted dependencies, worker reuse, revision generations, phase retirement,
+startup recovery, ambiguous submission, lost workers, lock recovery, owner-tab
+protection, extra unregistered panes, inbox isolation and persistent quiet waits.
+No runtime dependency added. Package dry-run included both new run modules;
+used a scratch npm cache after the sandbox rejected the default cache write.
+Global CLI resolved from `/private/tmp` with the new run help available.
+
+Limits: no large-real-fleet throughput benchmark or full production workload.
+Exact races and stale identities remain deterministic fake-backend tests. Mid-wait
+death was live-tested in the earlier pass above, not repeated during this run.
+Write-area and no-subagent rules are orchestration guardrails, not OS enforcement.
+Run selection requires `HERDR_AXI_RUN`; manual unscoped commands retain their
+original global behavior. Missing ownership records and unknown identities fail
+closed rather than guessing cleanup targets.
+
+Local review surfaces are ignored under `.lavish/`; durable validation evidence stays here.
+
+## Project policy, native reviewers and clean state (same live pass)
+
+Scratch project: `/private/tmp/herdr-axi-config.sz3ESI/project`, branch
+`axi-config-test`. Runtime store outside Git, under the scratch root's `state/`.
+
+| Check | Evidence |
+| --- | --- |
+| 75/25 split | Layout-only `w1B:pM` / `w1B:pN`: 41 / 12 usable rows; tab `w1B:tH` closed |
+| Configured implementer | Copilot Sol/high, `w1B:pP`, tab `w1B:tJ`, monitor `w1B:pR` |
+| Native reviewer | Actual Copilot `task` call: `model=claude-opus-5`, `reasoning_effort=high`, `agent_type=general-purpose`; no extra Herdr tab |
+| Worktree collision | Second writer targeting a different file remained queued; cancelled after test |
+| Parallel read-only verifier | Claude Opus 5/high, `w1B:pQ`, tab `w1B:tK`, monitor `w1B:pS`; later revised for final byte/hash verification |
+| No doc clutter | Only expected `.herdr-axi.json` and `hello.txt` in Git status; no plans/state/report files |
+| Final Codex check | Sol/high, `w1B:pT`, tab `w1B:tM`; branch, six-byte file, shortened proof verified |
+| Context warning | Native `Context 95% left` → 5% used, critical under test-only 1%/2% thresholds; weekly 81% ignored |
+| Lifecycle cleanup | All owned worker/monitor tabs closed; original `w1B:t1` and owner `w1B:t2` remained |
+| Run cleanup | `run finish`: 10 generated runtime files removed; only `run.json` and `detail.json.gz` remained |
+| Retrospective | Archived run listed by `history --all`; task prompts, revisions, reviews and available results preserved |
+
+Additional live bug: Claude sometimes emits its structured result before the
+proof command, then a short receipt acknowledgement afterward. Latest-message-only
+summaries lost the actual result. The hook now prefers the structured report within
+the current user turn; a regression rejects previous-task leakage. Oversized inbox
+results disclose truncation; detailed result capture remains private and bounded.
+
+Configuration validates unknown keys, roles, read-only leaf delegation, native
+budgets, phase caps, layout, context and retention. Run records snapshot the policy;
+the existing orchestrator is never restarted or silently switched to a model.
+Worktree writer leases span runs; accepted results release leases. Crash ambiguity
+fails closed. Worker PATH includes the packaged CLI shim, with an absolute fallback.
+
+Final suites: **36 JavaScript**, **38 Bash** behavioral checks. New coverage:
+same-worktree writers versus verifiers, model/effort delivery, shared writer leases,
+native budgets/config rejection, nested-owner rejection, bounded cached context
+probes, warning wakeup, archive immutability, known-file pruning and aged retention
+(active/locked/foreign/symlink data preserved). No new runtime dependencies.
+
+Limits: native child/read-only contracts are agent instructions, not OS enforcement.
+Claude/Copilot percentages require configured known context windows; absent data
+remains unknown. No large-fleet throughput or multi-month real-time retention test.
+The retention checks use deterministic aged fixtures. No global agent instruction
+files changed; no npm publish, remote push, or unrelated pane input/closure.

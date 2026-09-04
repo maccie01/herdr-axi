@@ -2,6 +2,7 @@
 // and translate herdr's wire shapes into AxiError at this boundary.
 import { spawnSync } from "node:child_process";
 import { AxiError } from "axi-sdk-js";
+import { ownedRows, isSelf } from "./run-state.mjs";
 
 export const STATES = ["working", "blocked", "idle", "done", "unknown"];
 
@@ -69,10 +70,10 @@ function suggestFor(code, pane) {
 }
 
 // Minimal schema (AXI #2): 4 fields per agent, not the 15 herdr returns.
-export function listAgents() {
+export function listAgents(options = {}) {
   const result = runHerdr(["agent", "list"]);
   const rows = result?.agents ?? [];
-  return rows.map(projectAgent);
+  return ownedRows(rows.map(projectAgent), options);
 }
 
 export function projectAgent(a) {
@@ -83,11 +84,16 @@ export function projectAgent(a) {
     pane: a.pane_id,
     cwd: a.cwd,
     workspace: a.workspace_id,
+    tab: a.tab_id,
+    terminal: a.terminal_id,
+    session: a.agent_session?.value,
+    backendName: a.name,
     focused: !!a.focused,
   };
 }
 
 export function findAgent(name) {
+  if (isSelf(name)) throw new AxiError("refusing to target the orchestrator itself", "SELF_TARGET", ["herdr-axi fleet"]);
   const agents = listAgents();
   const hit = agents.find((a) => a.pane === name);
   if (!hit) {
