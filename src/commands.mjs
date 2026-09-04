@@ -34,17 +34,14 @@ function positiveInt(value, flag) {
 // Suggestions always address agents by pane id: names are terminal titles that
 // contain spaces, so a name-based suggestion is a command the agent cannot run.
 const nextSteps = (f) => {
-  const s = [];
-  if (f.blocked.length) s.push(`blocked, needs input: herdr-axi read ${f.blocked[0].pane}`);
-  if (f.working.length) s.push(`wait for one: herdr-axi wait ${f.working[0].pane} --until idle`);
-  if (f.idle.length) s.push(`give work: herdr-axi dispatch ${f.idle[0].pane} "<task>"`);
-  if (f.done.length) s.push(`review completed turn: herdr-axi read ${f.done[0].pane}`);
-  if (f.unknown.length) s.push(`inspect unclassified agent: herdr-axi read ${f.unknown[0].pane}`);
-  if (!f.total) s.push("no agents live - startup usage: herdr agent start --help");
-  return s;
+  for (const state of ["blocked", "unknown", "done"])
+    if (f[state].length) return [`herdr-axi read ${f[state][0].pane}`];
+  if (f.working.length) return [`herdr-axi wait ${f.working[0].pane} --until idle`];
+  if (f.idle.length) return [`herdr-axi dispatch ${f.idle[0].pane} "<task>"`];
+  return ["herdr agent start --help"];
 };
 
-const brief = (rows) => rows.map((a) => `${a.pane} ${a.name.slice(0, 48)}`);
+const brief = (rows) => rows.map((a) => a.pane);
 
 export function home() {
   const f = fleet();
@@ -77,20 +74,33 @@ export function fleetCmd() {
 }
 
 export function read(args) {
-  const o = parseArgs(args, { lines: "string", full: "boolean" });
+  const o = parseArgs(args, { lines: "string", chars: "string", full: "boolean", compact: "boolean" });
   const name = o._[0];
   if (!name) throw new AxiError("read needs a pane ID", "MISSING_ARG", ["herdr-axi read --help"]);
   const a = findAgent(name);
   const lines = o.full ? 2000 : positiveInt(o.lines ?? 60, "lines");
+  const chars = o.chars !== undefined ? positiveInt(o.chars, "chars") : (o.full ? Infinity : 8000);
   const text = runHerdr(["agent", "read", a.pane, "--source", o.full ? "recent-unwrapped" : "visible", "--lines", String(lines + 1)], { timeoutMs: 20000, text: true });
   const all = text.split("\n");
   // Truncate with a size hint and an escape hatch (AXI #3).
   const shown = all.slice(-lines);
+  let output = shown.join("\n");
+  if (o.compact) {
+    // Opt-in: border-only diagram rows and terminal padding are layout, too.
+    output = output.split("\n")
+      .map((line) => line.trimEnd().replace(/[ \t]+([│┃])$/, " $1"))
+      .filter((line) => !/^[ \t]*[\u2500-\u259f][\s\u2500-\u259f]*$/u.test(line))
+      .join("\n").replace(/\n[ \t]*\n(?:[ \t]*\n)+/g, "\n\n").replace(/^\n+/, "");
+  }
+  const characters = Array.from(output);
+  const clipped = characters.length > chars;
+  output = characters.slice(-chars).join("");
   return {
-    agent: a.name, state: a.state, pane: a.pane,
-    output: shown.join("\n") || "(no visible output)",
-    ...(all.length > shown.length ? { truncated: o.full ? "Earlier output omitted (2000-line cap). Ask the agent to write a file for a complete transcript." : "Earlier visible lines hidden - rerun with --full" } : {}),
-    help: a.state === "blocked" ? ["Key dispatch usage: herdr-axi dispatch --help"] : [],
+    pane: a.pane, state: a.state,
+    output: output || "(no visible output)",
+    ...(all.length > shown.length || clipped ? { truncated: [all.length > shown.length ? `${lines}-line cap` : "", clipped ? `${chars}-character cap` : ""].filter(Boolean).join(", ") } : {}),
+    ...(o.compact ? { compact: true } : {}),
+    ...(all.length > shown.length || clipped ? { help: [o.full && all.length > shown.length ? "History limit; ask the agent to write a file." : `herdr-axi read ${a.pane} --full`] } : a.state === "blocked" ? { help: ["herdr-axi dispatch --help"] } : {}),
   };
 }
 
@@ -104,7 +114,7 @@ export function wait(args) {
   const timeout = positiveInt(o["timeout-ms"] ?? 300000, "timeout-ms");
   const result = runHerdr(["agent", "wait", a.pane, "--until", until, ...(until === "idle" ? ["--until", "done"] : []), "--timeout", String(timeout)], { timeoutMs: timeout + 5000 });
   const after = result?.agent ? projectAgent(result.agent) : findAgent(a.pane);
-  return { agent: after.name, pane: a.pane, state: after.state, requested: until, reached: after.state, help: nextSteps(fleet([after])) };
+  return { pane: a.pane, requested: until, reached: after.state, help: nextSteps(fleet([after])) };
 }
 
 export function dispatch(args) {
@@ -115,7 +125,7 @@ export function dispatch(args) {
   const a = findAgent(name);
   const timeout = positiveInt(o["timeout-ms"] ?? 300000, "timeout-ms");
   if (a.state === "working")
-    throw new AxiError(`${a.name} is already working`, "AGENT_BUSY",
+    throw new AxiError(`${a.pane} is already working`, "AGENT_BUSY",
       [`wait first: herdr-axi wait ${a.pane} --until idle`, "or pick another: herdr-axi agents --state idle"]);
   if (o.keys) {
     runHerdr(["agent", "send-keys", a.pane, ...rest]);
@@ -124,10 +134,9 @@ export function dispatch(args) {
   // Herdr's prompt wait observes a post-submission transition; a separate wait
   // can match the stale idle state before the prompt starts executing.
   const result = runHerdr(["agent", "prompt", a.pane, task, ...(o["no-wait"] ? [] : ["--wait", "--timeout", String(timeout)])], { timeoutMs: o["no-wait"] ? 30000 : timeout + 5000 });
-  if (o["no-wait"]) return { dispatched: a.name, pane: a.pane, task, note: "Submission only; an immediate standalone wait can match the pre-start state.", help: [`check progress: herdr-axi read ${a.pane}`] };
+  if (o["no-wait"]) return { pane: a.pane, submitted: true, note: "Submission only; immediate waits may match pre-start idle.", help: [`herdr-axi read ${a.pane}`] };
   const after = result?.agent ? projectAgent(result.agent) : findAgent(a.pane);
-  return { dispatched: a.name, pane: a.pane, task, state: after.state,
-    help: after.state === "blocked" ? [`it needs input: herdr-axi read ${after.pane}`] : [`see output: herdr-axi read ${after.pane}`] };
+  return { pane: a.pane, submitted: true, state: after.state, help: [`herdr-axi read ${after.pane}`] };
 }
 
 // The tested bash engine stays the engine; this only routes to it.

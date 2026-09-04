@@ -26,6 +26,7 @@ if (process.argv[2] === "agent") {
     if (scenario === "invalid-json") { console.log("not JSON"); process.exit(0); }
     if (["working", "blocked", "unknown", "done"].includes(scenario)) agent.agent_status = scenario;
     if (scenario === "empty") emit({ agents: [] });
+    else if (scenario === "mixed") emit({ agents: ["done", "unknown", "idle", "working", "blocked"].map((state, i) => ({ ...agent, pane_id: `w1:p${i}`, agent_status: state })) });
     else if (scenario === "many") emit({ agents: Array.from({ length: 13 }, (_, i) => ({ ...agent, pane_id: `w1:p${i}` })) });
     else emit({ agents: [agent] });
   } else if (args[1] === "read") {
@@ -33,6 +34,11 @@ if (process.argv[2] === "agent") {
     if (scenario === "read-active") fail("read_failed", "alternate-screen history can only be captured by scrolling while idle");
     if (scenario === "empty-output") process.exit(0);
     if (scenario === "json-output") { console.log('{"error":{"message":"agent output, not a protocol error"}}'); process.exit(0); }
+    if (scenario === "chrome") {
+      console.log(Array.from({ length: 8 }, (_, i) => ["─".repeat(180), `│ Step ${i + 1}: keep this text${" ".repeat(150)}│`, "", "", "  indented code", "│" + "─".repeat(178) + "│"].join("\n")).join("\n"));
+      process.exit(0);
+    }
+    if (scenario === "long-line") { console.log("😀".repeat(12000) + "END"); process.exit(0); }
     const count = Number(args[args.indexOf("--lines") + 1]);
     console.log(Array.from({ length: count }, (_, i) => `line-${i + 1}`).join("\n"));
   } else if (args[1] === "prompt") {
@@ -133,6 +139,58 @@ if (process.argv[2] === "agent") {
     const r = run(["dispatch", pane, "--keys", "down", "enter"], "blocked");
     assert.equal(r.status, 0, r.output);
     assert.deepEqual(r.calls.at(-1), ["agent", "send-keys", pane, "down", "enter"]);
+  });
+
+  test("dispatch sends the complete task without echoing it into context", () => {
+    const task = "long task ".repeat(1000);
+    for (const flags of [["--no-wait"], ["--timeout-ms", "1000"]]) {
+      const r = run(["dispatch", pane, task, ...flags]);
+      assert.equal(r.status, 0, r.output);
+      assert.equal(r.calls.at(-1)[3], task.trim());
+      assert.match(r.output, /submitted: true/);
+      assert.doesNotMatch(r.output, /long task/);
+      assert(Buffer.byteLength(r.output) < 250);
+    }
+  });
+
+  test("fleet keeps all IDs and counts without repeating titles", () => {
+    for (const args of [[], ["fleet"]]) {
+      const r = run(args, "many");
+      assert.equal(r.status, 0, r.output);
+      for (let i = 0; i < 13; i++) assert(r.output.includes(`w1:p${i}`));
+      assert.doesNotMatch(r.output, /Title with spaces/);
+      assert.match(r.output, /help\[1\]/);
+    }
+    const r = run(["agents"], "many");
+    assert.match(r.output, /Title with spaces/);
+    const mixed = run(["fleet"], "mixed");
+    assert.match(mixed.output, /help\[1\]: "herdr-axi read w1:p4"/);
+    for (let i = 0; i < 5; i++) assert(mixed.output.includes(`w1:p${i}`));
+  });
+
+  test("compact reads remove layout noise while preserving text and indentation", () => {
+    const raw = run(["read", pane, "--full"], "chrome");
+    const compact = run(["read", pane, "--compact"], "chrome");
+    assert.equal(compact.status, 0, compact.output);
+    assert.match(raw.output, /─{8}/);
+    assert.doesNotMatch(compact.output, /─{8}/);
+    for (let i = 1; i <= 8; i++) assert(compact.output.includes(`Step ${i}: keep this text`));
+    assert.match(compact.output, /  indented code/);
+    assert.match(compact.output, /compact: true/);
+    assert(Buffer.byteLength(compact.output) < Buffer.byteLength(raw.output) / 5);
+  });
+
+  test("character caps bound long lines without splitting Unicode characters", () => {
+    const r = run(["read", pane, "--chars", "8"], "long-line");
+    assert.equal(r.status, 0, r.output);
+    assert.match(r.output, /😀😀😀😀😀END/);
+    assert.match(r.output, /8-character cap/);
+    assert.match(r.output, /herdr-axi read w1:pTEST --full/);
+    assert.doesNotMatch(r.output, /�/);
+    assert.match(run(["read", pane], "long-line").output, /8000-character cap/);
+    const full = run(["read", pane, "--full"], "long-line");
+    assert.doesNotMatch(full.output, /truncated:/);
+    assert.equal(run(["read", pane, "--chars", "NaN"]).status, 1);
   });
 
   test("read honors HERDR_BIN, retains the tail, and announces truncation", () => {
