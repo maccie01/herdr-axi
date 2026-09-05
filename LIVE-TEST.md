@@ -298,3 +298,25 @@ Ponytail scope: existing watch and receipt paths reused; no new daemon, schedule
 dependencies or persistent observation files. Production runs/agents untouched.
 Validation: `npm test` 59/59; Bash monitor suite 41/41; added notification-contract
 help assertions separately rerun green. Node syntax and `git diff --check` clean.
+
+## Delegation discovery overhead (5 September 2026)
+
+Two regressions reproduced before the fix: `run queue --help` returned every run
+action; `init` returned neither worker-role choices nor queue syntax. Step-specific
+help now avoids that round trip: queue help 3350 → 385 UTF-8 bytes; run overview
+908 bytes. Full help/config remain explicit. Missing-run and accidental `start`
+errors lead to setup/queue instead of another status error or a broad help chain.
+
+Read-only live probe: globally linked `fleet`, exit 0, 55 ms, 370 output bytes.
+Reported silent output not reproduced; empty fake-backend JSON returns an explicit
+error. No live workers started, prompted or closed; no cached agent instructions
+changed. Help/output tests do not prove an LLM will follow the workflow. Managed
+push notification remains outstanding.
+
+Validation: full JS suite 63/63, then four focused tests passed after final help
+adjustments, including one new custom-role overflow regression (64 distinct tests
+covered). Standalone Bash suite 41/41; Node syntax, README links/example syntax and
+`git diff --check` passed. Sandbox runs failed process/receipt identity checks.
+An unsandboxed parallel Bash run also failed `idle completion cleanup` (surviving
+fake waiter); the isolated rerun passed. That intermittent cleanup failure remains
+unresolved; no engine changes in this pass.

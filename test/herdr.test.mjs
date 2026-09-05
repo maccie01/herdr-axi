@@ -23,6 +23,7 @@ if (process.argv[2] === "agent") {
     process.exit(1);
   };
   if (args[1] === "list") {
+    if (scenario === "empty-json") process.exit(0);
     if (scenario === "invalid-json") { console.log("not JSON"); process.exit(0); }
     if (["working", "blocked", "unknown", "done"].includes(scenario)) agent.agent_status = scenario;
     if (scenario === "empty") emit({ agents: [] });
@@ -296,6 +297,68 @@ if (process.argv[2] === "agent") {
     assert.equal(run(["constructor"]).status, 2);
     assert.equal(run(["toString", "--help"]).status, 2);
     assert.equal(run(["read", pane, "--typo"]).status, 1);
+  });
+
+  test("delegation help is step-specific, bounded and never contacts Herdr", () => {
+    const queue = run(["run", "queue", "--help"]);
+    assert.equal(queue.status, 0, queue.output);
+    assert.match(queue.output, /--role/);
+    assert.match(queue.output, /--cwd/);
+    assert.match(queue.output, /--area/);
+    assert.match(queue.output, /--prompt-file/);
+    assert.doesNotMatch(queue.output, /run gc|run unlock|run history/);
+    assert(Buffer.byteLength(queue.output) < 800);
+    const guide = run(["run", "--help"]), full = run(["run", "--help", "--full"]);
+    assert(Buffer.byteLength(guide.output) < Buffer.byteLength(full.output) / 2);
+    assert.match(full.output, /run recover/);
+    assert.match(full.output, /run gc/);
+    assert.match(guide.output, /continue independent work/i);
+    assert.match(run(["run", "config", "--help"]).output, /--full/);
+    for (const r of [queue, guide, full, run(["run", "inbox", "--help"])]) {
+      assert.equal(r.status, 0, r.output);
+      assert.equal(r.calls.length, 0);
+    }
+    for (const action of ["init", "config", "queue", "next", "status", "inbox", "accept", "revise", "phase", "close", "cancel", "recover", "leases", "unlock", "finish", "history", "gc"]) {
+      const r = run(["run", action, "--help"]);
+      assert.equal(r.status, 0, r.output);
+      assert(r.stdout.startsWith(`herdr-axi run ${action}`));
+      assert.equal(r.calls.length, 0);
+    }
+    const wrong = run(["start", "--help"]);
+    assert.equal(wrong.status, 2);
+    assert.match(wrong.output, /herdr-axi run init/);
+    assert.match(wrong.output, /herdr-axi run queue --help/);
+    assert.equal(wrong.calls.length, 0);
+    const typo = run(["run", "nexxt", "--help"]);
+    assert.notEqual(typo.status, 0, "unknown run action must not show successful generic help");
+    assert.equal(typo.calls.length, 0);
+  });
+
+  test("empty backend responses are explicit errors, not silent CLI success", () => {
+    for (const args of [[], ["fleet"], ["agents"]]) {
+      const r = run(args, "empty-json");
+      assert.equal(r.status, 1, r.output);
+      assert.match(r.output, /HERDR_CLI_ERROR/);
+      assert.match(r.output, /invalid JSON/);
+      assert.equal(r.calls.length, 1);
+    }
+  });
+
+  test("missing-run and discovery hints lead to init, not foreign panes or another status error", () => {
+    for (const args of [[], ["fleet"], ["agents"]]) {
+      const r = run(args, "mixed");
+      assert.equal(r.status, 0, r.output);
+      assert.match(r.output, /herdr-axi run init --help/);
+      assert.doesNotMatch(r.output, /herdr-axi read|herdr-axi wait|herdr-axi run --help/);
+    }
+    for (const args of [["run", "status"], ["run", "config"]]) {
+      const r = run(args);
+      assert.equal(r.status, 1, r.output);
+      assert.match(r.output, /RUN_REQUIRED/);
+      assert.match(r.output, /herdr-axi run init/);
+      assert.doesNotMatch(r.output, /herdr-axi run status/);
+      assert.equal(r.calls.length, 0);
+    }
   });
 
   test("contradictory and misleading flags fail before touching the backend", () => {

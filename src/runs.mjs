@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { runHerdr, listAgents, requireHerdrEnv, projectAgent } from "./herdr.mjs";
 import { PHASES, runError, runDir, loadRun, changeRun, pending, limit, receipt, registeredWorker, ownedWorkers, takeRunWarnings } from "./run-state.mjs";
-import { projectConfig, worktree, nativeSlots, writerLease, leasePath, leaseStatus, hash, DEFAULT_CONFIG } from "./project.mjs";
+import { projectConfig, worktree, nativeSlots, workerRoleSummary, writerLease, leasePath, leaseStatus, hash, DEFAULT_CONFIG } from "./project.mjs";
 import { projectRuns, projectHistory, history, finishRun, collectArchives } from "./archive.mjs";
 import { contextStatus } from "./context.mjs";
 
@@ -226,12 +226,22 @@ async function executeRunCommand(action, o) {
     const run = { schema: 1, id: randomUUID().slice(0, 8), ...project, storage: o.dir ? "explicit" : "managed", createdAt: new Date().toISOString(), workspace: a.workspace_id, owner: { pane: ownerPane, tab: a.tab_id, terminal: a.terminal_id, session: a.agent_session?.value }, phase: "explore", limits: { ...project.config.phases }, tasks: [], workers: [] };
     try { fs.writeFileSync(path.join(dir, "run.json"), JSON.stringify(run) + "\n", { flag: "wx", mode: 0o600 }); }
     catch (e) { if (e.code === "EEXIST") throw runError("Run already exists; select it, do not overwrite it"); throw e; }
-    return { run: dir, owner: ownerPane, workspace: run.workspace, project: project.project, config: project.configFile || "defaults", cleanup: collectArchives(project.project), help: [`export HERDR_AXI_RUN='${dir.replaceAll("'", "'\\''")}'`, "herdr-axi run --help"] };
+    const roles = workerRoleSummary(run.config);
+    return { run: dir, owner: ownerPane, workspace: run.workspace, project: project.project, config: project.configFile || "defaults", phase: run.phase, capacity: limit(run), ...roles, cleanup: collectArchives(project.project),
+      queue: "herdr-axi run queue TASK --role ROLE --cwd WORKTREE --area AREA --prompt-file FILE",
+      note: "Replace queue placeholders; bounded external prompt. Roles/policy already loaded, no config/fleet/layout preflight. Then herdr-axi run next.",
+      help: [`export HERDR_AXI_RUN='${dir.replaceAll("'", "'\\''")}'`, ...(roles.moreRoles ? ["herdr-axi run config --full"] : [])] };
   }
   const run = loadRun();
   if (!run) throw runError("Initialize/select a run first", "RUN_REQUIRED");
   if (action === "status") return runStatus();
-  if (action === "config") return { project: run.project, source: run.configFile || "defaults", config: run.config ?? DEFAULT_CONFIG, note: "Snapshot at init. Orchestrator model is a launch contract; the current owner is never restarted. Native child limits/read-only access are agent instructions, not an OS security boundary." };
+  if (action === "config") {
+    const config = run.config ?? DEFAULT_CONFIG;
+    return { project: run.project, source: run.configFile || "defaults",
+      ...(o.full ? { config } : { ...workerRoleSummary(config), phase: run.phase, capacity: limit(run), nativeSubagentLimit: config.nativeSubagentLimit, sharedReadWorktree: config.sharedReadWorktree }),
+      note: "Init snapshot; read-only/native child limits are instructions, not a sandbox. Owner model is a launch contract, never changed here.",
+      help: [o.full ? "herdr-axi run queue --help" : "herdr-axi run config --full"] };
+  }
   if (action === "history") {
     if (o.all && o.task) throw runError("history --all and --task conflict");
     return o.all ? projectHistory(run.project || worktree(process.cwd())) : history(run, o.task);
