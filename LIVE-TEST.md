@@ -273,3 +273,28 @@ Final validation: `npm test` 57/57; `bash engine/test-herdr-monitor.sh` 41/41
 in one standalone run and both simultaneous runs. Four intentional mutations
 rejected. Bash/Node syntax and `git diff --check` clean. Temporary mutation copy
 removed; no live-agent cleanup required because none were started in this pass.
+
+## Empty-inbox polling loop (5 September 2026)
+
+Reproduced the reported `inbox → read working pane → inbox` guidance against the
+fake backend. Empty working inboxes now return pending counts and independent-work
+guidance, without suggesting another read/inbox. Existing reports lead to review
+and acceptance/revision; working reads identify themselves as diagnostics, not results.
+Quiet watch timeouts remain under 400 bytes and use `reason:timeout`; actionable
+states use `reason:attention/state-change`. Historical telemetry changes do not
+wake watch; new warning levels and generation-bound completion still do.
+
+Notification boundary, not a completed push integration: current managed hooks
+write inboxes only. Installed `herdr notification show --help` exposes a UI toast,
+not a target-agent context callback. Codex's documented `notify` is an outgoing
+command receiving Codex events ([official configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)).
+No universal incoming-agent wakeup was established by these checks. Help now requires
+one harness-native tracked background watch with confirmed completion delivery
+before promising notification. No detached processes, UI-toast substitution, or
+input injection into live orchestrators. A provider-specific wakeup integration
+remains outstanding; it was not installed or live-verified in this pass.
+
+Ponytail scope: existing watch and receipt paths reused; no new daemon, scheduler,
+dependencies or persistent observation files. Production runs/agents untouched.
+Validation: `npm test` 59/59; Bash monitor suite 41/41; added notification-contract
+help assertions separately rerun green. Node syntax and `git diff --check` clean.

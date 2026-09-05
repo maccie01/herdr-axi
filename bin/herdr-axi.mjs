@@ -6,6 +6,9 @@ const HELP = `Run \`herdr-axi <command>\` - commands: agents, fleet, read, dispa
 Bare \`herdr-axi\`: fleet state + next action. Target pane IDs (w1:pP), never titles.
 Starting/delegating agents: herdr-axi run init --project <path>; export returned HERDR_AXI_RUN.
 Then run queue -> run next -> watch -> run inbox -> run accept/revise. Details: herdr-axi run --help.
+While workers run: continue independent work. Arm ONE watch using a harness-native background job with completion notification, if supported.
+Do not duplicate an active watch. A detached shell/PID/UI toast is not agent notification. Without callback support, block only when dependent.
+Inbox is for results/attention, read for a specific diagnosis. Do not repeat status after inbox; it already includes needed state.
 Do not create worker panes or call raw herdr agent start/prompt. run next owns startup, layout and limits.
 Selected runs scope fleet/read/wait to owned workers; self is excluded. --all lists globally.
 Without a selected run: global discovery, not ownership. Never assign work to an arbitrary listed idle agent.
@@ -22,7 +25,7 @@ const COMMAND_HELP = {
   read: "herdr-axi read <pane> [--raw] [--full] [--lines N] [--chars N]\n  Default: compact text; 60 visible lines, 8000 characters.\n  --raw preserves layout (diagrams, tables, approval menus); limits still apply.\n  --full reads history, still compact unless --raw; 2000-line cap, no default character cap. May require a settled agent.\n  --lines and --chars override defaults; --full never exceeds 2000 lines.\n  --compact remains a compatibility alias for the default; cannot combine with --raw.",
   dispatch: 'herdr-axi dispatch <pane> "<task>" [--no-wait] [--timeout-ms N]\n  Submit and wait for a post-submission settled state. Refuses a working agent.\n  --no-wait confirms submission only; a separate wait may match pre-start idle.\nherdr-axi dispatch <pane> --keys <key> [<key>...]\n  Send explicit UI keys (e.g. down enter) and return immediately. Inspect the dialog before answering; never automatically approve it.',
   wait: "herdr-axi wait <pane> --until <state> [--timeout-ms N]\n  Wait for a state (default idle, also matches background done). Reports actual reached state. Unknown is not completion. Settled state does not prove background work has finished.",
-  watch: "herdr-axi watch [--timeout-ms N]\n  Selected run: wait up to 30s for a fleet change; return actionable states immediately. No prompt injection. Repeat when changed:false.",
+  watch: "herdr-axi watch [--timeout-ms N]\n  Selected run: one blocking wait, up to 30s. No prompt injection.\n  Notification workflow: one watch --timeout-ms 1800000 in a harness-native tracked background job with completion delivery; then continue your own work.\n  Keep its job handle; never start a duplicate. A returned PID/session ID alone does not prove notification delivery.\n  Without callback support, do independent work first; block only when worker results are needed. No nohup, shell &, or fake notification promises.\n  reason:timeout = no relevant change, compact response; continue independent work or wait again if dependent.\n  reason:attention/state-change = act on the result/help, not another polling loop.\n  Telemetry timestamp/percentage churn alone does not wake watch; new warning levels do.",
   run: `herdr-axi run init [--project <path>] [--dir <external-run-dir>] [--owner <pane>]
   Required workflow for agent delegation. Never manually split a worker pane or call raw agent start/prompt/close.
   Load project-root .herdr-axi.json; snapshot roles/models/effort, caps, layout, context, retention.
@@ -39,6 +42,7 @@ herdr-axi run next
   Pending/unknown/unreviewed work occupies slots. Native leaf reviewers have a separate bounded budget.
 herdr-axi run status | inbox
   Owned fleet only, context warnings, summaries <=600 chars/worker. Collection/ownership errors remain visible.
+  Inbox already includes needed status. Empty while working: independent work or watch, not repeated inbox/read.
 herdr-axi run accept <pane> --evidence "review and checks" [--result-file FILE]
   Current generation proof + settlement + saved result + explicit review. No silent report loss.
   Missing/corrupt inbox: retry inbox, or supply a reviewed replacement (1..3500 chars); recorded as coordinator-replacement.

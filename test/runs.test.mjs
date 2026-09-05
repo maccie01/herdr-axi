@@ -353,6 +353,59 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
     } finally { f.clean(); }
   });
 
+  test("quiet inbox and working reads guide independent work or one watch, not a read/inbox loop", () => {
+    const f = fixture();
+    try {
+      f.queue("a"); f.ok(["run", "next"]); const w = f.state().workers[0];
+      f.ok(["run", "status"]); // Prime bounded context probes.
+      const before = f.calls().filter((c) => c.action === "read").length;
+      for (let i = 0; i < 3; i++) {
+        const output = f.ok(["run", "inbox"]);
+        assert.match(output, /events: \[\]/); assert.match(output, /pending: 1/);
+        assert.match(output, /Continue independent work/); assert.match(output, /help\[1\]: herdr-axi watch/);
+        assert.doesNotMatch(output, /herdr-axi read|herdr-axi run inbox|tasks\[|contextUnknown/);
+        assert(Buffer.byteLength(output) < 400, output);
+      }
+      assert.equal(f.calls().filter((c) => c.action === "read").length, before, "empty inbox must not fetch terminal progress");
+      const read = f.ok(["read", w.pane]);
+      assert.match(read, /herdr-axi watch/); assert.match(read, /Still working; not a result/);
+      f.complete(w);
+      const result = f.ok(["run", "inbox"]);
+      assert.match(result, /checks passed/); assert.match(result, /herdr-axi run accept/);
+      assert.doesNotMatch(result, /help.*herdr-axi run inbox/);
+    } finally { f.clean(); }
+  });
+
+  test("watch ignores historical telemetry churn, emits compact timeout, and wakes for new warnings or proof", async () => {
+    const f = fixture(); let watching;
+    try {
+      f.queue("a"); f.ok(["run", "next"]); const w = f.state().workers[0];
+      const file = path.join(f.env.HERDR_AXI_RUN, "context.json");
+      const cache = (percent, stale) => fs.writeFileSync(file, JSON.stringify({ [w.pane]: { generation: w.generation, percent, at: Date.now() - (stale ? 200000 : 0), attemptedAt: Date.now(), source: "native-context" } }));
+      for (const event of ["telemetry", "warning", "proof"]) {
+        cache(20, event === "telemetry");
+        const before = f.calls().filter((c) => c.action === "list").length;
+        watching = f.asyncRun(["watch", "--timeout-ms", "600"]);
+        const deadline = Date.now() + 5000;
+        while (f.calls().filter((c) => c.action === "list").length === before && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+        await new Promise((r) => setTimeout(r, 100));
+        if (event === "proof") f.complete(w); else cache(event === "warning" ? 92 : 25, event === "telemetry");
+        const result = await watching;
+        assert.equal(result.status, 0, result.output);
+        if (event === "telemetry") {
+          assert.match(result.output, /changed: false/); assert.match(result.output, /reason: timeout/);
+          assert.doesNotMatch(result.output, /tasks\[|contextLastKnown|contextStale/);
+          assert(Buffer.byteLength(result.output) < 400, result.output);
+        } else {
+          assert.match(result.output, /changed: true/);
+          assert.match(result.output, event === "warning" ? /critical/ : /review/);
+        }
+      }
+      const immediate = f.ok(["watch", "--timeout-ms", "600"]);
+      assert.match(immediate, /reason: attention/); assert.match(immediate, /review/);
+    } finally { if (watching) await watching; f.clean(); }
+  });
+
   test("identity drift degrades status and blocks control, without blocking unrelated tasks", () => {
     const f = fixture();
     try {
