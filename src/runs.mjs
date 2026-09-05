@@ -171,20 +171,26 @@ export function runStatus() {
     parked,
     ...(!tasks.length && queued.length ? { backlog: queued.slice(0, 8).map((t) => ({ task: t.id, phase: t.phase, after: t.deps })), ...(queued.length > 8 ? { more: queued.length - 8 } : {}) } : {}),
     ...(!tasks.length && !queued.length && !parked.length ? { complete: true } : {}),
-    help: [blocked ? `herdr-axi read ${blocked.pane} --raw` : ready ? `herdr-axi run recover ${ready.pane}` : parkedAttention[0]?.help ?? (tasks.some((t) => !["working", "starting"].includes(t.state)) ? "herdr-axi run inbox" : queued.length && tasks.length < limit(run) ? "herdr-axi run next" : tasks.length ? "herdr-axi watch" : parked.length ? `herdr-axi run close ${parked[0]}` : run.tasks.length ? "herdr-axi run finish" : "herdr-axi run --help")] };
+    help: [blocked ? `herdr-axi read ${blocked.pane} --raw` : ready ? `herdr-axi run recover ${ready.pane}` : parkedAttention[0]?.help ?? (tasks.some((t) => !["working", "starting"].includes(t.state)) ? "herdr-axi run inbox" : context?.warnings.length ? `herdr-axi read ${context.warnings[0].pane}` : queued.length && tasks.length < limit(run) ? "herdr-axi run next" : tasks.length ? "herdr-axi watch" : parked.length ? `herdr-axi run close ${parked[0]}` : run.tasks.length ? "herdr-axi run finish" : "herdr-axi run --help")] };
 }
+
+// Compare actionable state, not telemetry timestamps/percentages or display text.
+const watchKey = (s) => JSON.stringify({ phase: s.phase, capacity: s.capacity, occupied: s.occupied, queued: s.queued, tasks: s.tasks, parked: s.parked, parkedAttention: s.parkedAttention, ownershipIssues: s.ownershipIssues, finished: s.finished, contextError: s.contextError, contextWarnings: s.contextWarnings?.map(({ pane, level }) => ({ pane, level })) });
+const needsAttention = (s) => s.contextWarnings?.length || s.contextError || s.ownershipIssues?.length || s.parkedAttention?.length || s.tasks?.some((t) => !["working", "starting"].includes(t.state));
+const waitingNote = "Continue independent work. Use one notification-backed background watch if supported; otherwise wait only when dependent. No inbox/read polling.";
 
 export async function watchRun(timeout = 30000) {
   const first = runStatus();
-  const actionable = (s) => s.contextWarnings?.length || s.parkedAttention?.length || s.tasks.some((t) => !["working", "starting"].includes(t.state));
-  if (!first.tasks.length || actionable(first)) return { changed: false, ...first };
+  if (!first.tasks?.length || needsAttention(first)) return { changed: false, reason: "attention", ...first };
+  const key = watchKey(first);
+  let latest = first;
   const start = Date.now();
   while (Date.now() - start < timeout) {
     await delay(Math.min(2000, timeout - (Date.now() - start)));
-    const next = runStatus();
-    if (JSON.stringify(first) !== JSON.stringify(next)) return { changed: true, ...next };
+    latest = runStatus();
+    if (key !== watchKey(latest)) return { changed: true, reason: "state-change", ...latest };
   }
-  return { changed: false, ...first };
+  return { changed: false, reason: "timeout", pending: latest.occupied, note: waitingNote, help: latest.help };
 }
 
 // A bounded queue and a reusable worker pool, not a background scheduler.
@@ -271,8 +277,15 @@ async function executeRunCommand(action, o) {
         if (notice.startsWith(`${w.generation}\t`) || notice.startsWith("-\t")) errors.push({ pane: w.pane, error: notice.split("\t").slice(1).join("\t").trim().slice(0, 300) });
       } catch (e) { if (e.code !== "ENOENT") errors.push({ pane: w.pane, error: e.message.slice(0, 300) }); }
     }
-    const first = status.tasks.find((t) => t.state === "blocked") ?? status.tasks.find((t) => t.pane !== "pending");
-    return { ...status, events, ...(errors.length ? { errors: errors.slice(0, 8), ...(errors.length > 8 ? { moreErrors: errors.length - 8 } : {}), note: "Collection/report errors require repair before acceptance; inspect the indicated pane and retry inbox." } : {}), help: [errors.length ? `herdr-axi read ${errors[0].pane} --raw` : first ? `herdr-axi read ${first.pane}${first.state === "blocked" ? " --raw" : ""}` : "herdr-axi run status", "herdr-axi run inbox"] };
+    if (!events.length && !errors.length && status.occupied && !needsAttention(status))
+      return { events: [], pending: status.occupied, queued: status.queued, note: waitingNote, help: status.help };
+    const first = status.tasks.find((t) => t.state === "blocked") ?? status.tasks.find((t) => !["working", "starting"].includes(t.state) && t.pane !== "pending");
+    const report = events.find((e) => e.pane === first?.pane);
+    const help = errors.length ? [`herdr-axi read ${errors[0].pane} --raw`, "herdr-axi run --help"]
+      : first?.state === "review" && report ? [report.truncated ? `herdr-axi read ${first.pane}` : `herdr-axi run accept ${first.pane} --evidence "<verified checks>"`]
+      : ["lost", "unverified"].includes(first?.state) ? ["herdr-axi agents --all", "herdr-axi run --help"]
+      : first ? [`herdr-axi read ${first.pane} --raw`] : status.help;
+    return { ...status, events, ...(errors.length ? { errors: errors.slice(0, 8), ...(errors.length > 8 ? { moreErrors: errors.length - 8 } : {}), note: "Collection/report error: inspect and repair before acceptance; do not repeatedly fetch the same error." } : report ? { note: "Review result/checks, then accept or revise. Read only if evidence is insufficient; do not re-fetch the same report." } : {}), help };
   }
   ownerCheck(run);
   if (action === "finish") return { ...finishRun(), cleanup: collectArchives(run.project) };
@@ -417,7 +430,7 @@ async function executeRunCommand(action, o) {
       return { selected, deferred };
     });
     const started = await Promise.all(selection.selected.map((t) => launch(t, run)));
-    return { started, ...(selection.deferred.length ? { deferred: selection.deferred.slice(0, 8), ...(selection.deferred.length > 8 ? { more: selection.deferred.length - 8 } : {}) } : {}), help: started.find((t) => t.help)?.help ?? [started.length ? "herdr-axi watch" : selection.deferred.find((t) => t.help)?.help ?? "herdr-axi run status"], ...(!started.length ? { note: "No eligible task; inspect deferred reasons or queued phases." } : {}) };
+    return { started, ...(selection.deferred.length ? { deferred: selection.deferred.slice(0, 8), ...(selection.deferred.length > 8 ? { more: selection.deferred.length - 8 } : {}) } : {}), help: started.find((t) => t.help)?.help ?? [started.length ? "herdr-axi watch" : selection.deferred.find((t) => t.help)?.help ?? "herdr-axi run status"], note: !started.length ? "No eligible task; inspect deferred reasons or queued phases." : started.every((t) => t.state === "running") ? waitingNote : "Handle startup/delivery issues first; other workers may still be running." };
   }
   const pane = o._[0];
   const worker = run.workers.find((w) => w.pane === pane && !w.closed);

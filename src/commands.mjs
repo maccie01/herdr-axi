@@ -122,11 +122,14 @@ export function read(args) {
       : `herdr-axi read ${a.pane} --full${rawFlag}`);
   else if (!o.raw && !output && text.trim()) help.push(`herdr-axi read ${a.pane} --raw${o.full ? " --full" : ""}`);
   else if (a.state === "blocked") help.push(o.raw ? "herdr-axi dispatch --help" : `herdr-axi read ${a.pane} --raw`);
+  const managedWorking = a.state === "working" && !!loadRun();
+  if (managedWorking) help.unshift("herdr-axi watch");
   return {
     pane: a.pane, state: a.state,
     output: output || (!o.raw && text.trim() ? "(layout-only output; use --raw)" : "(no visible output)"),
     ...(all.length > shown.length || clipped ? { truncated: [all.length > shown.length ? `${lines}-line cap` : "", clipped ? `${chars}-character cap` : ""].filter(Boolean).join(", ") } : {}),
     ...(o.raw ? { raw: true } : {}),
+    ...(managedWorking ? { note: "Still working; not a result. Continue independent work or watch; expand output only for a specific diagnostic question." } : {}),
     ...(help.length ? { help } : {}),
   };
 }

@@ -324,6 +324,12 @@ if (process.argv[2] === "agent") {
       assert(r.output.endsWith("\n"));
     }
     assert.match(run(["--help"]).output, /pane IDs.*never titles/);
+    const watchHelp = run(["watch", "--help"]);
+    assert.equal(watchHelp.calls.length, 0);
+    assert.match(watchHelp.output, /tracked background job with completion delivery/);
+    assert.match(watchHelp.output, /never start a duplicate/);
+    assert.match(watchHelp.output, /Without callback support, do independent work first/);
+    assert.doesNotMatch(watchHelp.output, /Repeat when changed:false/);
   });
 
   test("discovery and help direct delegation through managed runs, never arbitrary idle dispatch or raw startup", () => {

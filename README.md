@@ -223,8 +223,25 @@ Completion hooks write a generation-bound inbox instead of typing into the owner
 `run inbox` pulls only the latest assistant result (at most 600 characters/worker)
 and reconciles late proofs when hooks preceded idle/session detection. Events stay
 visible until acceptance. `watch` returns on a change or actionable state, or after
-30 seconds with `changed:false`; it does not claim the task completed. Repeat only
-while work remains. Empty finished runs report `complete:true`.
+30 seconds with `changed:false, reason:timeout`; it does not claim the task completed.
+Quiet timeouts and empty working inboxes return compact pending counts, not another
+fleet dump. Continue independent work; don't alternate inbox/read/status to check progress.
+`reason:attention` and `reason:state-change` require acting on the reported condition.
+Telemetry timestamp/percentage changes alone do not wake watch; task changes and
+new warning levels do. Empty finished runs report `complete:true`.
+
+For **continue working + notification**, launch exactly one
+`herdr-axi watch --timeout-ms 1800000` through a harness-native tracked background
+job that delivers its completion back to the same agent. Retain that job handle;
+do not start another watcher or poll its output while doing independent work.
+Handle the delivered event, then re-arm only if more work remains. If the harness
+doesn't provide a verified completion callback, work independently first and use
+a blocking watch only when the result becomes a dependency.
+
+Herdr-axi itself does not arm that harness callback: managed receipts are durable
+inbox records, not pushes into the orchestrator conversation. A shell PID, `nohup`,
+an untracked `&` job, or a Herdr UI toast is not a guaranteed agent wakeup. Never
+promise automatic notification without a confirmed delivery mechanism.
 
 Managed prompts go through `queue`/`next` or `revise`, preserving receipt generations
 and budgets. `dispatch --keys` remains available for inspected dialogs. Startup
