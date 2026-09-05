@@ -36,6 +36,17 @@ its launch environment corrected; a global install cannot override that PATH.
 
 ## Use
 
+Delegating work? Start with `herdr-axi run init --project PATH`, export the returned
+`HERDR_AXI_RUN`, then `run queue → run next → watch → run inbox → run accept/revise`.
+See `herdr-axi run --help`. `run next` creates worker tabs and monitor panes with
+ownership, project policy, worktree reservations and phase limits. Do not manually
+split worker panes or switch to raw `herdr agent start/prompt/close` after discovery.
+Without a selected run, fleet output is **global discovery, not ownership**;
+an idle listed agent is not permission to assign it work.
+
+The commands below also support explicitly authorized existing agents. Managed
+task prompts use `run queue/next/revise`, not `dispatch`:
+
 ```sh
 herdr-axi                              # live fleet state — no args needed
 herdr-axi agents --state blocked       # filter by state or --kind
@@ -180,9 +191,11 @@ serialize across the entire canonical Git worktree, even for disjoint areas or
 different subdirectories. Cross-run writer leases enforce the same rule. Use
 separate worktrees for parallel work. By default read-only roles also reserve
 their worktree: an instruction is not a sandbox. `sharedReadWorktree: true` opts
-into instruction-only verifier overlap, accepting the risk of accidental writes; final
+into instruction-only verifier overlap within the same owner run, accepting the risk of accidental writes; final
 verification should depend on the writer's acceptance (`--after`). Existing
-unmanaged agents in the same workspace/worktree conservatively block new writers.
+unmanaged agents in visible workspaces conservatively block new writers in their worktree.
+Every participant, including shared readers, holds a reservation. Other runs cannot
+share that reservation regardless of their configuration; separate worktrees remain parallel.
 The area is scheduling metadata and a worker instruction, not a filesystem sandbox.
 
 `next` atomically reserves capacity, then starts eligible workers concurrently.
@@ -228,11 +241,17 @@ recover the same worker. A trust dialog is detected, not automatically accepted.
 Worker tabs use readable `<task-id> · <kind>` labels, updated on worker reuse.
 Internal unique agent IDs remain unchanged. Cosmetic rename failures are reported
 separately and never turn acknowledged work into uncertain delivery.
+The task is durably published before cosmetics; identity check and rename each
+have a 750ms timeout and use the newly verified session.
 
 The monitor separates `agent` readiness, `task` status and `proof`. A valid current
 receipt keeps `task: review` across `agent: done` → `idle`; managed acceptance shows
 `task: accepted`. Without a completion receipt, idle/done is `awaiting-proof`, not
 success. Local metadata refreshes during waits (about 5s), without extra Herdr calls.
+Display reads only the receipt and a tiny atomic `.task` hint written after run
+transactions, never full `run.json`. Invalid hints preserve local proof and show
+`coordinator: unavailable`. Lost-event delivery retries three times; exhausted
+retries exit nonzero and leave a generation-bound diagnostic for `run inbox`.
 This display applies to newly started monitors; existing monitor processes are not
 automatically restarted.
 
@@ -247,6 +266,9 @@ lock; an interrupted unlock itself requires inspecting `run.unlock` manually.
 Status degrades identity drift to `lost` and keeps its slot reserved; unrelated
 workers remain observable. Control never adopts a replacement session automatically.
 Inbox collection errors are isolated per worker and bounded to eight diagnostics.
+Unverifiable startup registries remain visible with diagnostic pane IDs, not control
+authority. Live launchers without an agent row remain `starting`; parked non-ready
+workers appear under `parkedAttention` with a read command instead of a retry loop.
 
 Failed queue transactions roll back acquired leases; an interrupted reservation
 can be reclaimed only by its same queued task. Lease release follows durable state
@@ -254,6 +276,11 @@ publication. `run recover <accepted-or-cancelled-task>` repairs a leftover lease
 without touching panes. Worker publication retries a busy transaction for up to
 five seconds, never rerunning startup or prompting. Persistent failures return
 `delivery:record_pending` and recovery instructions; the registry remains discoverable.
+Post-commit failures return `committed:true` plus `maintenance`, not a failed business
+transaction. `run leases` lists exact files under
+`${HERDR_AXI_STATE_HOME:-~/.local/state/herdr-axi}/writers/<worktree-hash>.json`.
+Recovery of accepted/cancelled leases also works offline on archived runs. Malformed
+ownership is never guessed or automatically deleted; inspect the listed file first.
 
 `run close <pane>` requires acceptance and the matching generation's completion
 proof. The engine verifies tab/pane identity, refuses extra unregistered panes,
@@ -278,7 +305,7 @@ already-running owner's model. `--kind` remains an explicit legacy worker option
 | `roles.<name>.subagents` | Optional `[{role, max, when}]`; read-only leaf roles only |
 | `roles.<name>.contextWindowTokens` | Optional known input-window size; never guessed |
 | `nativeSubagentLimit` | Maximum reserved native children across pending tasks; 4 |
-| `sharedReadWorktree` | `false`; explicit instruction-only read/write overlap opt-in |
+| `sharedReadWorktree` | `false`; instruction-only read/write overlap within one owner run |
 | `phases` | Primary caps: explore 4, build 3, integrate 2, verify 2, fix 1 |
 | `agentRatio` | Original agent pane share, 0.75; lower monitor pane 0.25 |
 | `context` | `warnPercent: 70`, `criticalPercent: 85` |
@@ -291,9 +318,11 @@ healthy zero. Probes: at most two terminal reads per status call, 1s each, 15s s
 cache; local transcript tails do not consume that backend budget. No background
 daemon or per-poll full transcript scan. Native transcripts
 are bounded to their last 128KB and require matching available session metadata.
-After 120s, readings count as unknown/stale. Previous warnings remain visible with
-`stale:true` and `ageSeconds`; `contextStale` exposes coverage lag in large/slowly
-polled fleets. No stale value is presented as a fresh health measurement.
+Failed probes preserve the last valid measurement. Unverified identities keep their
+cache entries but cannot be probed. Failed/unverified/older-than-120s measurements
+appear under `contextLastKnown` with `observedAt`, counted once in `contextStale`.
+No valid measurement means `contextUnknown`. Only fresh `contextWarnings` wake
+watch immediately; historical warnings remain evidence, not permanent wake triggers.
 Warnings advise a safe checkpoint/review/replacement, never interrupt or kill work.
 
 Run state defaults outside Git: `~/.local/state/herdr-axi/projects/<hash>/runs/<id>`.
@@ -306,16 +335,24 @@ progress logs or state documents unless explicitly requested as deliverables.
 `--task ID` adds bounded prompt/revision detail; `--all` lists the project's latest
 eight managed runs. Acceptance retains evidence, latest result and available Git
 HEAD (not a claim that uncommitted changes were committed).
+Acceptance requires a readable current-generation report. Missing/corrupt reports
+block acceptance: retry `run inbox`; if the original is unrecoverable, preserve an
+explicitly reviewed replacement with `accept --result-file FILE` (1..3500 characters).
+Replacements are marked `resultSource: coordinator-replacement`; proof and settlement
+are still required, and the replacement is retained in archived detail.
 Archived history works outside Herdr too; select the external run directory with
 `HERDR_AXI_RUN`. No live orchestrator or worker process required.
 
 After acceptance and closing all workers, `run finish` compresses full run detail,
-keeps a compact summary and removes known runtime files. Unknown files are retained.
-Finished runs become read-only. Automatic collection on init/finish (or `run gc`)
+keeps a compact summary and removes known runtime files. Owned residual leases are
+released before archiving; unverifiable leases block finish. Raw owned inboxes are
+also preserved in compressed detail, including legacy reports. Unknown files are retained.
+Finished runs become read-only except explicit terminal-task lease repair. Automatic collection on init/finish (or `run gc`)
 expires only managed completed archives: details after 30 days, summaries after
 180 days; configure longer retention when needed. Expired detail is not recoverable
 without a backup. Active runs, locks, foreign files and explicit `--dir` records are
-never age-deleted. This is task provenance, not a permanent transcript/audit vault.
+never age-deleted. Runs with owned or unverifiable leases retain their recovery
+provenance. This is task provenance, not a permanent transcript/audit vault.
 Writer leases deliberately fail closed after an unrecorded crash: inspect the run
 and actual workers before manual lease recovery; never erase locks to force progress.
 

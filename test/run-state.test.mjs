@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
-import { changeRun, PHASES, loadRun } from "../src/run-state.mjs";
+import { changeRun, PHASES, loadRun, takeRunWarnings } from "../src/run-state.mjs";
 import { writerLease } from "../src/project.mjs";
 
 test("lease rollback, crash reclaim and release only after durable publication", () => {
@@ -40,6 +40,15 @@ test("lease rollback, crash reclaim and release only after durable publication",
       });
     });
     assert.equal(fs.readdirSync(path.join(dir, "state/writers")).length, 0);
+    const result = changeRun((r, { afterCommit }) => {
+      r.tasks[0].evidence = "durable";
+      afterCommit.push(() => { throw Object.assign(Error("release unavailable"), { code: "EIO" }); });
+      return { accepted: true };
+    });
+    assert.deepEqual(result, { accepted: true }, "postcommit failure must not report a failed transaction");
+    assert.equal(loadRun().tasks[0].evidence, "durable");
+    assert.deepEqual(takeRunWarnings(), [{ code: "EIO", error: "release unavailable" }]);
+    assert.deepEqual(takeRunWarnings(), []);
   } finally {
     for (const [key, value] of Object.entries(previous)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
     fs.rmSync(dir, { recursive: true, force: true });

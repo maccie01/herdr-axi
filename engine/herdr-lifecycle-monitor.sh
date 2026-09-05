@@ -50,13 +50,12 @@ state() {
     jq -r '.result.agent.agent_status // empty' 2>/dev/null
 }
 
-# Display only: receipt/run reads, no backend polls or lifecycle mutations.
+# Display only: small receipt/hint reads, no backend polls or lifecycle mutations.
 # Agent readiness and coordinator acceptance are independent states.
 display_status() {
   local agent_state="${1:-unknown}" task_state proof_state=missing snapshot
-  local generation="" registered_generation="" saved_state="" saved_generation=""
-  local registry="${receipt_file%.event}.json"
-  local run_file="${receipt_file%/receipts/*}/run.json"
+  local generation="" saved_schema="" saved_state="" saved_generation="" coordinator=""
+  local task_file="${receipt_file%.event}.task"
   case "$agent_state" in
     done|idle) task_state=awaiting-proof ;;
     working) task_state=running ;;
@@ -66,26 +65,22 @@ display_status() {
     generation="$receipt_generation"
     proof_state=pending
     if [[ "$receipt_settled_fingerprint" == "generation:$generation" ]]; then proof_state=complete; fi
-    if [[ -e "$registry" ]]; then
-      registered_generation=$(jq -er '.generation // empty' "$registry" 2>/dev/null) || registered_generation=""
-      [[ "$generation" == "$registered_generation" ]] || proof_state=pending
-    fi
   fi
-  if [[ -e "$run_file" ]]; then
-    # Managed receipts live at RUN/receipts/WORKSPACE/NAME.event. Read only the
-    # latest assignment bound to this worker; never infer acceptance from idle.
-    snapshot=$(jq -er --arg name "$agent_name" --arg receipt "$receipt_file" '
-      . as $run | [.tasks[] | select(.name == $name)] | last as $task |
-      [$run.workers[] | select(.name == $name and .receipt == $receipt and .pane == $task.pane)] | last as $worker |
-      select($task != null) | [$task.state, ($worker.generation // "-")] | @tsv
-    ' "$run_file" 2>/dev/null) || snapshot=$'unknown\t-'
-    IFS=$'\t' read -r saved_state saved_generation <<< "$snapshot"
-    [[ "$generation" == "$saved_generation" ]] || proof_state=pending
-    case "$saved_state" in running|accepted) ;; *) proof_state=pending ;; esac
-    if [[ "$saved_state" != "running" ]]; then task_state="$saved_state"; fi
+  if [[ -e "$task_file" ]]; then
+    # Tiny post-commit display hint; shell read only, no jq or run-file scan.
+    # Bad metadata cannot erase an independently valid local completion receipt.
+    if IFS=$'\t' read -r saved_schema saved_state saved_generation < "$task_file" 2>/dev/null &&
+      [[ "$saved_schema" == "herdr-task/1" && "$saved_state" =~ ^(starting|running|uncertain|accepted|cancelled)$ && "$saved_generation" =~ ^[a-zA-Z0-9-]+$ ]]; then
+      [[ "$generation" == "$saved_generation" ]] || proof_state=pending
+      case "$saved_state" in running|accepted) ;; *) proof_state=pending ;; esac
+      if [[ "$saved_state" != "running" ]]; then task_state="$saved_state"; fi
+    else
+      coordinator=unavailable
+    fi
   fi
   if [[ "$proof_state" == "complete" && "$task_state" == "awaiting-proof" ]]; then task_state=review; fi
   snapshot=$(printf 'agent: %s\ntask: %s\nproof: %s' "$agent_state" "$task_state" "$proof_state")
+  [[ -z "$coordinator" ]] || snapshot+=$'\ncoordinator: unavailable'
   if [[ "$snapshot" != "$displayed_state" ]]; then
     printf '%s\n\n' "$snapshot"
     displayed_state="$snapshot"
@@ -212,6 +207,7 @@ wait_for_any_transition() {
 notify() {
   local event_kind="$1"
   local result_file outcome reason worker_before orchestrator_before worker_after
+  local lost_attempts=0
   notify_reason=""
   while true; do
     result_file=$(mktemp "${TMPDIR:-/tmp}/herdr-monitor-result.XXXXXX") || return 1
@@ -235,12 +231,19 @@ notify() {
     case "$outcome" in
       delivered) return 0 ;;
       suppressed)
+        [[ "$event_kind" != "lost" ]] || return 0
         notify_reason="$reason"
         return 10
         ;;
       error|"")
-        # Lost is terminal: there can be no worker transition to recover on.
-        [[ "$event_kind" != "lost" ]] || return 1
+        # A lost worker cannot transition, but its hook may only be temporarily
+        # locked. Retry delivery finitely, without waiting for a nonexistent pane.
+        if [[ "$event_kind" == "lost" ]]; then
+          lost_attempts=$((lost_attempts + 1))
+          (( lost_attempts < 3 )) || return 1
+          backoff
+          continue
+        fi
         worker_before=$(state "$agent_name" || true)
         orchestrator_before=$(state "$orchestrator_agent" || true)
         if ! wait_for_any_transition "$worker_before" "$orchestrator_before"; then
@@ -254,6 +257,20 @@ notify() {
       *) return 1 ;;
     esac
   done
+}
+
+report_lost() {
+  display_status lost
+  retry_delay=1
+  if notify lost; then return 0; fi
+  herdr_receipt_read "$receipt_file" || true
+  local notice="Lost notification failed after 3 attempts; inspect receipt/hook availability"
+  local temporary="${receipt_file}.monitor-error.$$"
+  if mkdir -p "$(dirname -- "$receipt_file")" && printf '%s\t%s\n' "${receipt_generation:--}" "$notice" > "$temporary"; then
+    mv -f "$temporary" "${receipt_file}.monitor-error" || true
+  fi
+  printf '%s\n' "$notice" >&2
+  return 1
 }
 
 wait_worker_transition() {
@@ -321,9 +338,7 @@ apply_pending_rearm() {
 
 while true; do
   current_state=$(state "$agent_name") || {
-    display_status lost
-    notify lost || true
-    exit 0
+    if report_lost; then exit 0; else exit 1; fi
   }
   if [[ "$current_state" == "working" && "$pending_rearm" == "true" ]]; then
     apply_pending_rearm || exit 0
@@ -379,8 +394,7 @@ while true; do
       ;;
     *)
       wait_worker_transition "$current_state" || {
-        notify lost || true
-        exit 0
+        if report_lost; then exit 0; else exit 1; fi
       }
       ;;
   esac

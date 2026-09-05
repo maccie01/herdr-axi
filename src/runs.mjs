@@ -4,9 +4,9 @@ import { randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
-import { runHerdr, listAgents, requireHerdrEnv } from "./herdr.mjs";
-import { PHASES, runError, runDir, loadRun, changeRun, pending, limit, receipt, registeredWorker, ownedWorkers } from "./run-state.mjs";
-import { projectConfig, worktree, nativeSlots, writerLease, hash, DEFAULT_CONFIG } from "./project.mjs";
+import { runHerdr, listAgents, requireHerdrEnv, projectAgent } from "./herdr.mjs";
+import { PHASES, runError, runDir, loadRun, changeRun, pending, limit, receipt, registeredWorker, ownedWorkers, takeRunWarnings } from "./run-state.mjs";
+import { projectConfig, worktree, nativeSlots, writerLease, leasePath, leaseStatus, hash, DEFAULT_CONFIG } from "./project.mjs";
 import { projectRuns, projectHistory, history, finishRun, collectArchives } from "./archive.mjs";
 import { contextStatus } from "./context.mjs";
 
@@ -15,6 +15,10 @@ const idOK = (id) => /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,39}$/.test(id ?? "");
 const liveAgent = (pane) => runHerdr(["agent", "get", pane]).agent;
 const callerPane = () => process.env.HERDR_PANE_ID || runHerdr(["pane", "current", "--current"]).pane?.pane_id;
 const overlaps = (a, b) => a === b || a.startsWith(b + path.sep) || b.startsWith(a + path.sep);
+const launcherAlive = (pid) => {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code !== "ESRCH"; }
+};
 
 export function ownerCheck(run) {
   if (!run) throw runError("Initialize/select a run first", "RUN_REQUIRED");
@@ -81,6 +85,7 @@ function taskFile(task, run) {
   const delegation = delegates.length ? `Native subagents only; optional, bounded leaf reviews; no recursion or Herdr tabs. Contracts: ${JSON.stringify(delegates)}. Exact configured model/effort when supported; otherwise report unavailable, do not substitute or spawn a separate agent. Parent integrates findings; no separate plans/reports.` : "Do not start subagents.";
   fs.writeFileSync(file, `${task.prompt}\n\nTask: ${task.id}\nRole: ${task.role || task.kind}; access: ${task.access || "write"}\n${task.access === "read" ? "Read-only project: no source, documentation, Git or test-output writes; a writer may be active. Report snapshot/commit; recheck after writer acceptance for final verification." : `Write scope: ${task.area}`}
 No commits, pushes, follow-up assignments or Herdr workers. ${delegation}
+Do not call raw herdr agent start/prompt or split worker panes; the coordinator owns startup through herdr-axi run queue/next.
 No repository state files, scratch plans, progress logs or duplicate reports. Documentation only if explicitly requested as a deliverable. Private runtime records: ${runDir()}.
 Output: concise TOON; fragments, no narrative. Fields: task, state, files, checks, decisions (why), blockers. Exact commands/results; no invented passes. Coordinator acceptance required.\n`, { mode: 0o600 });
   return file;
@@ -97,15 +102,6 @@ async function launch(task, run) {
   } catch (e) { error = e; }
   let worker;
   try { worker = workerRecord(run, task); } catch (e) { error ??= e; }
-  // Cosmetic failure must never turn an acknowledged task into uncertain
-  // delivery (or make recovery mistake an old generation for the new task).
-  if (!error && task.pane && worker) {
-    try {
-      const expected = run.workers.find((w) => w.pane === task.pane) ?? worker;
-      if (!safeWorker(run, expected, listAgents({ all: true }))) throw runError("Cannot relabel an absent worker", "WORKER_CHANGED");
-      runHerdr(["tab", "rename", worker.tab, label]);
-    } catch (e) { labelError = e.message.slice(0, 300); }
-  }
   try {
     await publishRun((r) => {
       const t = r.tasks.find((t) => t.id === task.id);
@@ -119,6 +115,15 @@ async function launch(task, run) {
   } catch (e) {
     return { task: task.id, ...(worker ? { pane: worker.pane } : {}), state: "uncertain", delivery: "record_pending", error: e.message.slice(0, 600), note: "Worker registry retained. Inspect, then recover; do not resend the prompt.", help: [`herdr-axi run recover ${task.id}`] };
   }
+  // Publish first. Cosmetics get a small, separate budget and use the newly
+  // verified identity, not the previous assignment's session.
+  if (!error && task.pane && worker) {
+    try {
+      const fresh = projectAgent(runHerdr(["agent", "get", worker.pane], { timeoutMs: 750 }).agent);
+      if (!safeWorker(run, worker, [fresh])) throw runError("Cannot relabel an absent worker", "WORKER_CHANGED");
+      runHerdr(["tab", "rename", worker.tab, label], { timeoutMs: 750 });
+    } catch (e) { labelError = e.message.slice(0, 300); }
+  }
   const startup = error && worker?.stage === "created";
   const blocked = startup && error.message.includes("agent_not_ready");
   return { task: task.id, ...(worker ? { pane: worker.pane } : {}), state: blocked ? "blocked" : error ? "uncertain" : "running", ...(error ? { error: error.message.slice(0, 600) } : {}), ...(labelError ? { labelError } : {}),
@@ -130,22 +135,28 @@ export function runStatus() {
   if (!run) throw runError("Select a run with HERDR_AXI_RUN", "RUN_REQUIRED");
   if (run.finishedAt) return { finished: run.finishedAt, complete: true, help: ["herdr-axi run history"] };
   const rows = listAgents({ all: true });
-  const workers = ownedWorkers(run, { observe: true });
+  const issues = [];
+  const workers = ownedWorkers(run, { issues });
   const tasks = pending(run).map((t) => {
     const w = workers.find((w) => (t.pane ? w.pane === t.pane : w.name === t.name) && !w.closed);
     const a = w ? safeWorker(run, w, rows, { observe: true }) : null;
     let current;
     try { current = !w || w.stage === "created" ? registeredWorker(run, t) : null; }
-    catch { return { task: t.id, pane: w?.pane ?? t.pane ?? "pending", state: "lost", error: "Unreadable worker registry; inspect run receipts" }; }
+    catch (e) { return { task: t.id, pane: w?.pane ?? t.pane ?? rows.find((a) => a.backendName === t.name && a.workspace === run.workspace)?.pane ?? "pending", state: "unverified", error: e.message.slice(0, 300) }; }
     const stage = w?.stage === "created"
       ? (current?.pane === w.pane && current?.tab === w.tab ? current.stage : undefined) : w?.stage;
-    const state = w && !a ? "lost" : a?.state === "blocked" ? "blocked" : t.state === "starting" ? "starting" : a?.state ?? t.state;
+    const state = a?.state === "blocked" ? "blocked" : t.state === "starting" && launcherAlive(t.launcher) ? "starting" : w && !a ? "lost" : a?.state ?? (t.state === "starting" ? "uncertain" : t.state);
     const complete = t.state === "running" && w && receipt(w)?.complete && ["idle", "done"].includes(state);
     return { task: t.id, pane: w?.pane ?? t.pane ?? "pending", state: complete ? "review" : state, ...(stage === "created" ? { delivery: "not_submitted" } : t.state === "uncertain" ? { delivery: "uncertain" } : {}) };
   });
   const queued = run.tasks.filter((t) => t.state === "queued");
   const parked = run.workers.filter((w) => !w.closed && !pending(run).some((t) => t.pane === w.pane)).map((w) => w.pane);
-  const context = run.config ? contextStatus(run, workers.filter((w) => !w.closed && safeWorker(run, w, rows, { observe: true })), rows) : null;
+  const parkedAttention = run.workers.filter((w) => parked.includes(w.pane)).flatMap((w) => {
+    const live = safeWorker(run, w, rows, { observe: true });
+    return live && ["idle", "done"].includes(live.state) ? [] : [{ pane: w.pane, state: live?.state ?? "unverified", help: live ? `herdr-axi read ${w.pane} --raw` : `env HERDR_AXI_RUN= herdr-axi read ${w.pane} --raw` }];
+  });
+  const verified = rows.filter((a) => workers.some((w) => w.pane === a.pane && !w.closed && safeWorker(run, w, rows, { observe: true })));
+  const context = run.config ? contextStatus(run, workers, verified) : null;
   const blocked = tasks.find((t) => t.state === "blocked");
   const ready = tasks.find((t) => t.delivery === "not_submitted" && ["idle", "done"].includes(t.state));
   return { phase: run.phase, capacity: limit(run), occupied: tasks.length, queued: queued.length, tasks,
@@ -153,15 +164,19 @@ export function runStatus() {
     ...(context?.warnings.length ? { contextWarnings: context.warnings, contextAction: "Checkpoint at a safe boundary; review, then replace/compact the accepted worker. Never interrupt unfinished work automatically." } : {}),
     ...(context?.unknown ? { contextUnknown: context.unknown } : {}),
     ...(context?.stale ? { contextStale: context.stale } : {}),
+    ...(context?.lastKnown.length ? { contextLastKnown: context.lastKnown } : {}),
+    ...(context?.error ? { contextError: context.error } : {}),
+    ...(parkedAttention.length ? { parkedAttention } : {}),
+    ...(issues.length ? { ownershipIssues: issues.slice(0, 8) } : {}),
     parked,
     ...(!tasks.length && queued.length ? { backlog: queued.slice(0, 8).map((t) => ({ task: t.id, phase: t.phase, after: t.deps })), ...(queued.length > 8 ? { more: queued.length - 8 } : {}) } : {}),
     ...(!tasks.length && !queued.length && !parked.length ? { complete: true } : {}),
-    help: [blocked ? `herdr-axi read ${blocked.pane} --raw` : ready ? `herdr-axi run recover ${ready.pane}` : tasks.some((t) => !["working", "starting"].includes(t.state)) ? "herdr-axi run inbox" : queued.length && tasks.length < limit(run) ? "herdr-axi run next" : tasks.length ? "herdr-axi watch" : parked.length ? `herdr-axi run close ${parked[0]}` : run.tasks.length ? "herdr-axi run finish" : "herdr-axi run --help"] };
+    help: [blocked ? `herdr-axi read ${blocked.pane} --raw` : ready ? `herdr-axi run recover ${ready.pane}` : parkedAttention[0]?.help ?? (tasks.some((t) => !["working", "starting"].includes(t.state)) ? "herdr-axi run inbox" : queued.length && tasks.length < limit(run) ? "herdr-axi run next" : tasks.length ? "herdr-axi watch" : parked.length ? `herdr-axi run close ${parked[0]}` : run.tasks.length ? "herdr-axi run finish" : "herdr-axi run --help")] };
 }
 
 export async function watchRun(timeout = 30000) {
   const first = runStatus();
-  const actionable = (s) => s.contextWarnings?.length || s.tasks.some((t) => !["working", "starting"].includes(t.state));
+  const actionable = (s) => s.contextWarnings?.length || s.parkedAttention?.length || s.tasks.some((t) => !["working", "starting"].includes(t.state));
   if (!first.tasks.length || actionable(first)) return { changed: false, ...first };
   const start = Date.now();
   while (Date.now() - start < timeout) {
@@ -175,7 +190,19 @@ export async function watchRun(timeout = 30000) {
 // A bounded queue and a reusable worker pool, not a background scheduler.
 // `next` reserves all available slots atomically, then starts them concurrently.
 export async function runCommand(action, o) {
-  if (!["status", "history", "config", "gc"].includes(action)) requireHerdrEnv();
+  let result;
+  try { result = await executeRunCommand(action, o); }
+  catch (e) {
+    const warnings = takeRunWarnings();
+    if (warnings.length) e.message += `; earlier changes committed; maintenance: ${warnings.slice(0, 8).map((w) => w.error).join("; ")}`;
+    throw e;
+  }
+  const warnings = takeRunWarnings();
+  return warnings.length ? { ...result, committed: true, maintenance: warnings.slice(0, 8), ...(warnings.length > 8 ? { moreMaintenance: warnings.length - 8 } : {}), help: ["herdr-axi run leases", ...(result.help ?? [])] } : result;
+}
+
+async function executeRunCommand(action, o) {
+  if (!["status", "history", "config", "gc", "leases", "recover"].includes(action)) requireHerdrEnv();
   if (action === "init") {
     if (process.env.HERDR_AXI_WORKER === "1") throw runError("Managed workers cannot become nested orchestrators", "NESTED_RUN");
     const caller = callerPane();
@@ -204,6 +231,21 @@ export async function runCommand(action, o) {
     return o.all ? projectHistory(run.project || worktree(process.cwd())) : history(run, o.task);
   }
   if (action === "gc") return collectArchives(run.project);
+  if (action === "leases") return leaseStatus(run);
+  if (action === "recover") {
+    const task = [...run.tasks].reverse().find((t) => t.id === o._[0] || t.pane === o._[0]);
+    if (task && ["accepted", "cancelled"].includes(task.state)) {
+      if (!run.finishedAt) { requireHerdrEnv(); ownerCheck(run); }
+      return changeRun((r, { afterCommit }) => {
+        const current = r.tasks.find((t) => t.id === task.id);
+        if (current.state !== task.state) throw runError("Task changed; retry");
+        const result = { task: task.id, leaseReleased: false, file: leasePath(current) };
+        afterCommit.push(() => { result.leaseReleased = writerLease(r, current, true); if (result.leaseReleased) result.releasedLease = task.id; });
+        return result;
+      }, { allowFinished: true });
+    }
+    requireHerdrEnv();
+  }
   if (run.finishedAt && action !== "finish") throw runError("Archived run is read-only; initialize a new run", "RUN_FINISHED");
   if (action === "inbox") {
     ownerCheck(run);
@@ -224,9 +266,13 @@ export async function runCommand(action, o) {
         const e = JSON.parse(fs.readFileSync(`${w.receipt}.inbox`, "utf8"));
         if (e.generation === w.generation) events.push({ task: t.id, pane: w.pane, event: e.event, summary: String(e.summary).slice(0, 600), ...(e.truncated ? { truncated: true } : {}) });
       } catch (e) { if (e.code !== "ENOENT") errors.push({ pane: w.pane, error: e.message.slice(0, 300) }); }
+      try {
+        const notice = fs.readFileSync(`${w.receipt}.monitor-error`, "utf8");
+        if (notice.startsWith(`${w.generation}\t`) || notice.startsWith("-\t")) errors.push({ pane: w.pane, error: notice.split("\t").slice(1).join("\t").trim().slice(0, 300) });
+      } catch (e) { if (e.code !== "ENOENT") errors.push({ pane: w.pane, error: e.message.slice(0, 300) }); }
     }
     const first = status.tasks.find((t) => t.state === "blocked") ?? status.tasks.find((t) => t.pane !== "pending");
-    return { ...status, events, ...(errors.length ? { errors: errors.slice(0, 8), ...(errors.length > 8 ? { moreErrors: errors.length - 8 } : {}) } : {}), help: [first ? `herdr-axi read ${first.pane}${first.state === "blocked" ? " --raw" : ""}` : "herdr-axi run status", "herdr-axi run --help"] };
+    return { ...status, events, ...(errors.length ? { errors: errors.slice(0, 8), ...(errors.length > 8 ? { moreErrors: errors.length - 8 } : {}), note: "Collection/report errors require repair before acceptance; inspect the indicated pane and retry inbox." } : {}), help: [errors.length ? `herdr-axi read ${errors[0].pane} --raw` : first ? `herdr-axi read ${first.pane}${first.state === "blocked" ? " --raw" : ""}` : "herdr-axi run status", "herdr-axi run inbox"] };
   }
   ownerCheck(run);
   if (action === "finish") return { ...finishRun(), cleanup: collectArchives(run.project) };
@@ -281,7 +327,7 @@ export async function runCommand(action, o) {
     const workers = updated.workers.filter((w) => !w.closed);
     const retire = workers.filter((w) => !pending(updated).some((t) => t.pane === w.pane)).slice(0, Math.max(0, workers.length - cap));
     const retired = await Promise.all(retire.map(async (w) => {
-      try { return await runCommand("close", { _: [w.pane] }); }
+      try { return await executeRunCommand("close", { _: [w.pane] }); }
       catch (e) { return { pane: w.pane, error: e.message.slice(0, 600) }; }
     }));
     return { phase, capacity: cap, ...(retired.length ? { retired } : {}), help: ["herdr-axi run status"] };
@@ -298,14 +344,6 @@ export async function runCommand(action, o) {
   const rows = listAgents({ all: true });
   if (action === "recover") {
     const t = [...run.tasks].reverse().find((t) => t.id === o._[0] || t.pane === o._[0]);
-    if (t && ["accepted", "cancelled"].includes(t.state)) {
-      changeRun((r, { afterCommit }) => {
-        const current = r.tasks.find((p) => p.id === t.id);
-        if (current.state !== t.state) throw runError("Task changed; retry");
-        afterCommit.push(() => writerLease(r, current, true));
-      });
-      return { releasedLease: t.id, note: "Only this completed task's reservation released; no pane input or prompt resend." };
-    }
     if (!t || !["starting", "uncertain", "running"].includes(t.state)) throw runError("Task is not active");
     if (t.state === "starting" && t.launcher) {
       try { process.kill(t.launcher, 0); throw runError("Launcher still running; wait for its result"); }
@@ -352,20 +390,21 @@ export async function runCommand(action, o) {
   }
   if (action === "next") {
     const sharedReaders = new Set(run.config?.sharedReadWorktree ? pending(run).filter((t) => t.access === "read").map((t) => t.pane) : []);
-    const otherTrees = rows.filter((a) => a.kind && a.cwd && !run.workers.some((w) => w.pane === a.pane && (["idle", "done"].includes(a.state) || sharedReaders.has(a.pane)) && safeWorker(run, w, rows, { observe: true })) && a.workspace === run.workspace).map((a) => { try { return worktree(a.cwd); } catch { return a.cwd; } });
+    const blockers = rows.filter((a) => a.kind && a.cwd && !run.workers.some((w) => w.pane === a.pane && (["idle", "done"].includes(a.state) || sharedReaders.has(a.pane)) && safeWorker(run, w, rows, { observe: true }))).map((a) => { let tree; try { tree = worktree(a.cwd); } catch { tree = a.cwd; } return { pane: a.pane, tree, shared: !!run.config?.sharedReadWorktree && pending(run).some((t) => t.pane === a.pane) && run.workers.some((w) => w.pane === a.pane && safeWorker(run, w, rows, { observe: true })) }; });
     const selection = changeRun((r, { rollback }) => {
       const selected = [], deferred = [];
-      const defer = (t, reason) => deferred.push({ task: t.id, reason });
+      const defer = (t, reason, detail = {}) => deferred.push({ task: t.id, reason, ...detail });
       for (const t of r.tasks.filter((t) => t.state === "queued" && t.phase === r.phase)) {
         if (pending(r).length >= limit(r)) { defer(t, "primary capacity"); continue; }
         if (t.deps.some((id) => r.tasks.find((d) => d.id === id)?.state !== "accepted")) { defer(t, "unaccepted dependency"); continue; }
         const exclusive = (task) => task.access !== "read" || !r.config?.sharedReadWorktree;
-        if (exclusive(t) && (otherTrees.includes(t.worktree) || pending(r).some((p) => exclusive(p) && ((p.worktree && p.worktree === t.worktree) || overlaps(p.area, t.area))))) { defer(t, "worktree busy"); continue; }
+        const blocker = blockers.find((a) => a.tree === t.worktree && (exclusive(t) || !a.shared));
+        if ((blocker && (exclusive(t) || !blocker.shared)) || (exclusive(t) && pending(r).some((p) => exclusive(p) && ((p.worktree && p.worktree === t.worktree) || overlaps(p.area, t.area))))) { defer(t, "worktree busy", blocker ? { pane: blocker.pane, help: `env HERDR_AXI_RUN= herdr-axi read ${blocker.pane} --raw` } : {}); continue; }
         if (pending(r).reduce((n, p) => n + (p.nativeSlots ?? 0), 0) + (t.nativeSlots ?? 0) > (r.config?.nativeSubagentLimit ?? 0)) { defer(t, "native capacity"); continue; }
         const reusable = r.workers.find((w) => !w.closed && !w.closing && w.kind === t.kind && w.cwd === t.cwd && w.policy === t.policy && !pending(r).some((p) => p.pane === w.pane) && ["idle", "done"].includes(safeWorker(r, w, rows, { observe: true })?.state));
         // Parked workers remain a bounded pool, even after a phase narrows.
         if (!reusable && r.workers.filter((w) => !w.closed).length + pending(r).filter((p) => !p.pane).length >= limit(r)) { defer(t, "parked pool full; close an unused accepted worker"); continue; }
-        if (!writerLease(r, t)) { defer(t, "worktree writer lease held; inspect before recovery"); continue; }
+        if (!writerLease(r, t)) { defer(t, "worktree lease held or unverified", { help: "herdr-axi run leases" }); continue; }
         rollback.push(() => writerLease(r, t, true));
         t.state = "starting";
         t.launcher = process.pid;
@@ -378,7 +417,7 @@ export async function runCommand(action, o) {
       return { selected, deferred };
     });
     const started = await Promise.all(selection.selected.map((t) => launch(t, run)));
-    return { started, ...(selection.deferred.length ? { deferred: selection.deferred.slice(0, 8), ...(selection.deferred.length > 8 ? { more: selection.deferred.length - 8 } : {}) } : {}), help: started.find((t) => t.help)?.help ?? [started.length ? "herdr-axi watch" : "herdr-axi run status"], ...(!started.length ? { note: "No eligible task; inspect deferred reasons or queued phases." } : {}) };
+    return { started, ...(selection.deferred.length ? { deferred: selection.deferred.slice(0, 8), ...(selection.deferred.length > 8 ? { more: selection.deferred.length - 8 } : {}) } : {}), help: started.find((t) => t.help)?.help ?? [started.length ? "herdr-axi watch" : selection.deferred.find((t) => t.help)?.help ?? "herdr-axi run status"], ...(!started.length ? { note: "No eligible task; inspect deferred reasons or queued phases." } : {}) };
   }
   const pane = o._[0];
   const worker = run.workers.find((w) => w.pane === pane && !w.closed);
@@ -387,11 +426,23 @@ export async function runCommand(action, o) {
   if (action === "accept") {
     if (!o.evidence?.trim()) throw runError("accept requires --evidence describing coordinator review and checks");
     if (!live || !["idle", "done"].includes(live.state) || !receipt(worker)?.complete) throw runError("Acceptance requires live settlement and this generation's completion receipt", "NOT_COMPLETE");
+    let report;
+    try {
+      if (o["result-file"]) {
+        const file = o["result-file"], stat = fs.statSync(file);
+        if (!stat.isFile() || stat.size > 14000) throw Error("Replacement report must be a regular file, at most 3500 characters");
+        const detail = fs.readFileSync(file, "utf8");
+        if (!detail.trim() || detail.length > 3500) throw Error("Replacement report must contain 1..3500 characters");
+        report = { generation: worker.generation, summary: detail.slice(0, 600), detail };
+      } else report = JSON.parse(fs.readFileSync(worker.receipt + ".inbox", "utf8"));
+      if (report?.generation !== worker.generation || typeof report.summary !== "string" || typeof (report.detail ?? report.summary) !== "string" || !(report.detail ?? report.summary).trim()) throw Error("missing/mismatched current report");
+    } catch (e) { throw runError(`Report unavailable at ${worker.receipt}.inbox: ${e.message}. Retry run inbox; if unrecoverable, explicitly preserve a reviewed replacement with accept --result-file FILE.`, "RESULT_UNAVAILABLE"); }
     changeRun((r, { afterCommit }) => {
       const t = r.tasks.find((t) => t.id === task.id);
       if (t.state !== "running" || r.workers.find((w) => w.pane === pane)?.generation !== worker.generation) throw runError("Task changed or delivery uncertain; inspect before accepting");
       t.state = "accepted"; t.evidence = o.evidence.slice(0, 1000);
-      try { const e = JSON.parse(fs.readFileSync(worker.receipt + ".inbox")); if (e.generation === worker.generation) { t.summary = String(e.summary).slice(0, 600); t.result = String(e.detail ?? e.summary).slice(0, 3500); } } catch { /* evidence remains mandatory */ }
+      t.summary = report.summary.slice(0, 600); t.result = String(report.detail ?? report.summary).slice(0, 3500);
+      if (o["result-file"]) t.resultSource = "coordinator-replacement";
       const commit = spawnSync("git", ["-C", t.cwd, "rev-parse", "HEAD"], { encoding: "utf8", timeout: 2000 });
       if (commit.status === 0) t.commit = commit.stdout.trim();
       afterCommit.push(() => writerLease(r, t, true));

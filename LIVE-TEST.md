@@ -226,3 +226,50 @@ were induced. No global instruction edits, push or publication.
 
 Validation: 47/47 JavaScript tests; two simultaneously started Bash suites,
 39/39 each after the waiter fix. Bash/Node syntax and `git diff --check` clean.
+
+## Second adversarial pass — baseline `2561a65` (5 September 2026)
+
+Fault injection only. No new provider agents; no production pane, tab, run or
+global instruction mutations. Prior live-provider observations above are not
+claimed as revalidation of this patch.
+
+| Review IDs | Verified failure / correction / regression |
+| --- | --- |
+| 1, 2, 8 | Post-commit exceptions misreported committed work; corrupt releases threw parser errors; archived lease repair absent. Separate committed maintenance diagnostics, typed `LEASE_UNVERIFIED`, exact-path `run leases`, offline terminal-task recovery, finish repair and GC provenance protection. Empty, partial, null and wrong-shaped leases tested; unknown owners never deleted. |
+| 3 | Non-ready parked workers caused opaque queue deferrals. `parkedAttention`, exact blocking pane and read help; unrelated work still advances. Accepted does not authorize closing/reusing a now-working or replaced session. |
+| 4 | Real startup has a registry before its native agent row. Fake tab-create now creates only a shell; explicit startup gate verifies `starting` and a genuinely waiting watch. |
+| 5, 13, 15 | Failed probes replaced evidence; candidate filtering erased unverified panes; stale warnings caused immediate watch returns. Separate attempt/measurement timestamps; retained last-known evidence; exclusive fresh/stale/unknown categories. Failed Codex/Claude/Copilot probes, generation changes, unverified candidates, 16-worker cadence and waiting watch tested. Two terminal probes/call retained. |
+| 6, 11 | Display reparsed full run.json; failed parsing downgraded valid local proof. Tiny atomic task hints after transactions, shell-only display reads. Corrupt coordinator JSON and malformed hints cannot erase receipt evidence; accepted/reused generations remain distinct. No claimed reproduction of the review's GB/hour estimate. |
+| 7 | Broad observational catch hid malformed registries and I/O failures. Bounded ownership diagnostics with pane IDs; candidates remain read-only diagnostic suggestions, never adopted control authority. Wrong receipt path and injected EIO tested. |
+| 9 | Terminal lost-hook failure exited successfully without delivery. Three attempts with bounded backoff, nonzero exhaustion and durable inbox diagnostic; transient lock-timeout succeeds on attempt three. |
+| 10 | Acceptance discarded unreadable reports. Missing/corrupt/wrong-generation reports now block acceptance. Explicit reviewed replacement file possible, provenance marked; completion proof still mandatory. Archive retains raw owned inboxes as well as task results. Qualification: compressed detail already existed before this pass; run.json was not literally the only archive. |
+| 12 | Opt-in readers bypassed the cross-run lease protocol. Every participant now registered; shared holders only within one owner run, serialized by its existing short lock. Other runs excluded regardless of config; visible foreign-workspace workers also block. No new global lock or cross-run sharing protocol; separate worktrees remain parallel. |
+| 14 | Cosmetic rename preceded durable publication and checked the old identity. Publication first, new verified session, 750ms per cosmetic backend call. Slow rename and session-rotation regressions verify this ordering. |
+
+Mutation checks in a disposable copy: post-commit throw, premature startup `lost`,
+failed-probe overwrite and constant retry delay each fail their targeted regression.
+The backoff test asserts requested delays `1,2,4,8,16,30,30`, not a loose attempt
+ceiling. The original checkout remained unmutated during these checks.
+
+Compatibility limits: existing monitor processes do not hot-reload; legacy active
+opt-in readers that never recorded leases cannot be retroactively registered
+without inspecting their owners. New runs use the corrected protocol. Trust
+approval and instruction-only verifier access remain explicit, not security sandboxes.
+
+### Agent guidance follow-up
+
+Screenshot reproduced a documentation escape route: top-level help explicitly
+suggested raw `herdr agent start --help` for startup/layout, while discovery could
+suggest dispatching an arbitrary idle pane. Removed both recommendations. Bare
+home, agents and global fleet now label `global-discovery; ownership not implied`
+and direct new delegation to `run init → queue → next`. Startup/layout belongs
+to `run next`; worker contracts forbid raw startup and manual worker-pane splits.
+Regression covers empty/idle discovery, help without backend reads, and no unsafe
+dispatch/start suggestions. Explicitly authorized unmanaged control remains available;
+the wrapper cannot prohibit direct use of another executable. No global instructions
+or existing agent sessions changed. Global CLI symlink resolves to this checkout.
+
+Final validation: `npm test` 57/57; `bash engine/test-herdr-monitor.sh` 41/41
+in one standalone run and both simultaneous runs. Four intentional mutations
+rejected. Bash/Node syntax and `git diff --check` clean. Temporary mutation copy
+removed; no live-agent cleanup required because none were started in this pass.

@@ -38,13 +38,13 @@ function tail(file) {
 export function contextStatus(run, workers, rows) {
   const file = path.join(runDir(), "context.json");
   let cache = {};
-  try { cache = JSON.parse(fs.readFileSync(file)); } catch { /* diagnostic cache only */ }
+  try { cache = JSON.parse(fs.readFileSync(file)); if (!cache || typeof cache !== "object" || Array.isArray(cache)) cache = {}; } catch { /* diagnostic cache only */ }
   const now = Date.now();
   // ponytail: at most two 1s backend probes/call; bounded local transcript tails
   // need no terminal round trip and do not compete for that budget.
-  const candidates = workers.filter((w) => !w.closed && rows.some((a) => a.pane === w.pane));
+  const candidates = workers.filter((w) => !w.closed);
   let probes = 0;
-  const due = candidates.filter((w) => !cache[w.pane] || cache[w.pane].generation !== w.generation || now - cache[w.pane].at >= 15000).sort((a, b) => (cache[a.pane]?.at ?? 0) - (cache[b.pane]?.at ?? 0)).filter((w) => w.kind !== "codex" || ++probes <= 2);
+  const due = candidates.filter((w) => rows.some((a) => a.pane === w.pane) && (!cache[w.pane] || cache[w.pane].generation !== w.generation || now - (cache[w.pane].attemptedAt ?? cache[w.pane].at) >= 15000)).sort((a, b) => (cache[a.pane]?.attemptedAt ?? cache[a.pane]?.at ?? 0) - (cache[b.pane]?.attemptedAt ?? cache[b.pane]?.at ?? 0)).filter((w) => w.kind !== "codex" || ++probes <= 2);
   for (const w of due) {
     let value = { source: "unknown" };
     try {
@@ -57,23 +57,34 @@ export function contextStatus(run, workers, rows) {
         value = contextValue(w.kind, tail(transcript), w.contextWindowTokens);
       }
     } catch { /* unavailable is unknown, never healthy */ }
-    cache[w.pane] = { ...value, at: now, generation: w.generation };
+    const previous = cache[w.pane]?.generation === w.generation ? cache[w.pane] : null;
+    const measured = Number.isFinite(value.percent) || Number.isFinite(value.tokens);
+    cache[w.pane] = measured
+      ? { ...value, at: now, attemptedAt: now, generation: w.generation }
+      : { ...(previous ?? { source: "unknown", generation: w.generation }), attemptedAt: now, unavailable: true };
   }
+  let error;
   if (due.length) {
     const temp = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(temp, JSON.stringify(Object.fromEntries(candidates.filter((w) => cache[w.pane]).map((w) => [w.pane, cache[w.pane]]))), { mode: 0o600 });
-    fs.renameSync(temp, file);
+    try {
+      fs.writeFileSync(temp, JSON.stringify(Object.fromEntries(candidates.filter((w) => cache[w.pane]).map((w) => [w.pane, cache[w.pane]]))), { mode: 0o600 });
+      fs.renameSync(temp, file);
+    } catch (e) { error = e.message.slice(0, 300); }
+    finally { try { fs.rmSync(temp, { force: true }); } catch { /* diagnostic only */ } }
   }
-  const warnings = [];
+  const warnings = [], lastKnown = [];
   let unknown = 0, stale = 0;
   for (const w of candidates) {
     const c = cache[w.pane];
-    if (!c || c.generation !== w.generation || c.percent === undefined) { unknown++; continue; }
-    const expired = now - c.at > 120000;
-    if (expired) { unknown++; stale++; }
-    // A slow poll/large fleet must not erase a previously observed warning.
-    // Retain the evidence with its age, never pretend it is a fresh reading.
-    if (c.percent >= run.config.context.warnPercent) warnings.push({ pane: w.pane, percent: c.percent, level: c.percent >= run.config.context.criticalPercent ? "critical" : "warning", source: c.source, ...(expired ? { stale: true, ageSeconds: Math.floor((now - c.at) / 1000) } : {}) });
+    if (!c || c.generation !== w.generation || !Number.isFinite(c.percent) || !Number.isFinite(c.at)) { unknown++; continue; }
+    if (c.unavailable || !rows.some((a) => a.pane === w.pane) || now - c.at > 120000) {
+      stale++;
+      lastKnown.push({ pane: w.pane, percent: c.percent, observedAt: c.at, source: c.source });
+      continue;
+    }
+    // Mutually exclusive fresh/stale/unknown categories. Historical evidence
+    // is retained, but never a permanent actionable warning that spins watch.
+    if (c.percent >= run.config.context.warnPercent) warnings.push({ pane: w.pane, percent: c.percent, level: c.percent >= run.config.context.criticalPercent ? "critical" : "warning", source: c.source });
   }
-  return { warnings, unknown, stale };
+  return { warnings, lastKnown, unknown, stale, ...(error ? { error } : {}) };
 }

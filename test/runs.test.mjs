@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import { gunzipSync } from "node:zlib";
 
 const self = fileURLToPath(import.meta.url);
 const cli = fileURLToPath(new URL("../bin/herdr-axi.mjs", import.meta.url));
@@ -25,9 +26,12 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
   const find = (id) => [owner, ...all()].find((a) => a.pane_id === id || a.name === id);
   const missing = (kind) => { console.error(JSON.stringify({ error: { code: `${kind}_not_found`, message: "not found" } })); process.exit(1); };
   if (group === "agent") {
-    if (action === "list") emit({ agents: [owner, ...all()] });
+    if (action === "list") emit({ agents: [owner, ...all().filter((a) => a.agent)] });
     else if (action === "get") emit({ agent: find(args[0]) ?? missing("agent") });
     else if (action === "start") {
+      const ready = path.join(dir, "startup-delay"), deadline = Date.now() + 10000;
+      while (fs.existsSync(ready) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+      assert(!fs.existsSync(ready), "startup fixture was not released");
       const a = find(args[args.indexOf("--pane") + 1]);
       a.name = args[0]; a.agent = args[args.indexOf("--kind") + 1]; a.agent_status = "idle";
       if (fs.existsSync(path.join(dir, "startup-blocked"))) {
@@ -42,6 +46,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       assert.equal(args[args.indexOf("--timeout") + 1], "15000");
       assert(args.includes("working"), "must acknowledge working rather than wait for settlement");
       const a = find(args[0]); a.agent_status = "working"; save(a);
+      if (fs.existsSync(path.join(dir, "session-rotate"))) { a.agent_session = { value: randomUUID() }; save(a); }
       if (fs.existsSync(path.join(dir, "prompt-uncertain"))) {
         console.error(JSON.stringify({ error: { code: "timeout", message: "acknowledgement lost" } })); process.exit(1);
       }
@@ -62,6 +67,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       emit({ tab: { tab_id: a.tab_id, workspace_id: a.workspace_id, pane_count: 2 } });
     } else if (action === "rename") {
       assert.notEqual(args[0], owner.tab_id);
+      if (fs.existsSync(path.join(dir, "rename-delay"))) await new Promise((r) => setTimeout(r, 5000));
       if (fs.existsSync(path.join(dir, "rename-fail"))) { console.error("rename unavailable"); process.exit(1); }
       const a = all().find((a) => a.tab_id === args[0]) ?? missing("tab");
       a.label = args.slice(1).join(" "); save(a); emit({ renamed: true });
@@ -438,7 +444,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
     } finally { f.clean(); }
   });
 
-  test("sixteen workers at 30s cadence retain aged warnings within the two-probe budget", () => {
+  test("sixteen workers retain historical evidence without stale actionable warnings or double counts", () => {
     const f = fixture();
     try {
       fs.writeFileSync(path.join(f.dir, "context-footer"), "Context 10% left");
@@ -449,13 +455,33 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
         const run = {config:{context:{warnPercent:70, criticalPercent:85}}};
         let result;
         for(let i=0;i<12;i++) { result = contextStatus(run,workers,workers); now += 30000; }
-        assert.equal(result.warnings.length,16);
+        assert.equal(result.warnings.length + result.lastKnown.length,16);
         assert(result.stale > 0);
-        assert(result.warnings.some(w => w.stale && w.ageSeconds > 120));`;
+        assert.equal(result.stale, result.lastKnown.length);
+        assert.equal(result.unknown,0);
+        assert(result.lastKnown.every(w => now - 30000 - w.observedAt > 120000));`;
       const before = f.calls().filter((c) => c.action === "read").length;
       const result = spawnSync(process.execPath, ["--input-type=module", "-e", source], { env: f.env, encoding: "utf8" });
       assert.equal(result.status, 0, result.stderr);
       assert.equal(f.calls().filter((c) => c.action === "read").length - before, 24);
+    } finally { f.clean(); }
+  });
+
+  test("read sharing never bypasses a visible foreign-workspace worker without a lease", () => {
+    const f = fixture();
+    try {
+      const r = f.state(); r.config.sharedReadWorktree = true; f.write(r);
+      const cwd = path.join(f.dir, "project"), pane = "wZZFOREIGN:pOTHER";
+      f.ok(["run", "queue", "writer", "--role", "implementer", "--cwd", cwd, "--area", ".", "--prompt-file", path.join(f.dir, "prompt")]);
+      f.ok(["run", "next"]);
+      fs.writeFileSync(path.join(f.dir, `${pane}.agent`), JSON.stringify({ ...owner, pane_id: pane, workspace_id: "wZZFOREIGN", tab_id: "wZZFOREIGN:tOTHER", name: "other-run", cwd }));
+      f.ok(["run", "queue", "read", "--role", "verifier", "--cwd", cwd, "--area", ".", "--prompt-file", path.join(f.dir, "prompt")]);
+      const result = f.ok(["run", "next"]);
+      assert.match(result, /worktree busy/); assert(result.includes(pane));
+      assert.equal(f.state().tasks[1].state, "queued");
+      assert.equal(f.calls().filter((c) => c.action === "start").length, 1);
+      assert.equal(f.calls().filter((c) => c.action === "prompt").length, 1);
+      assert(!f.calls().some((c) => ["send-keys", "close"].includes(c.action)));
     } finally { f.clean(); }
   });
 
@@ -489,6 +515,150 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
     } finally { f.clean(); }
   });
 
+  test("startup registry without a native agent remains starting until launch completes", async () => {
+    const f = fixture(); let launch;
+    try {
+      f.queue("a"); fs.writeFileSync(path.join(f.dir, "startup-delay"), "");
+      launch = f.asyncRun(["run", "next"]);
+      const deadline = Date.now() + 10000;
+      while (!f.calls().some((c) => c.action === "start") && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+      assert(f.calls().some((c) => c.action === "start"));
+      const status = f.ok(["run", "status"]);
+      assert.match(status, /starting/); assert.doesNotMatch(status, /lost/);
+      const started = Date.now(), watched = await f.asyncRun(["watch", "--timeout-ms", "350"]);
+      assert.equal(watched.status, 0, watched.output); assert.match(watched.output, /changed: false/);
+      assert(Date.now() - started >= 300, "watch must wait, not return a false lost event");
+      fs.unlinkSync(path.join(f.dir, "startup-delay"));
+      const done = await launch; assert.equal(done.status, 0, done.output);
+    } finally { fs.rmSync(path.join(f.dir, "startup-delay"), { force: true }); if (launch) await launch; f.clean(); }
+  });
+
+  test("unverified registry remains visible with a diagnostic pane, never control authority", () => {
+    const f = fixture();
+    try {
+      f.queue("a"); f.ok(["run", "next"]);
+      const r = f.state(), w = r.workers[0]; r.workers = []; f.write(r);
+      const registry = path.join(path.dirname(w.receipt), `${w.name}.json`);
+      const value = JSON.parse(fs.readFileSync(registry)); value.receipt_file = "/wrong/event";
+      fs.writeFileSync(registry, JSON.stringify(value));
+      const agents = f.ok(["agents"]);
+      assert.match(agents, /ownershipIssues/); assert(agents.includes(w.pane)); assert.doesNotMatch(agents, /0 matching agents/);
+      assert.match(f.ok(["run", "status"]), /unverified/);
+      assert.equal(f.execute(["dispatch", w.pane, "unsafe"]).status, 1);
+      const source = `import assert from 'node:assert/strict'; import fs from 'node:fs';
+        import {agents} from ${JSON.stringify(new URL("../src/commands.mjs", import.meta.url).href)};
+        const read=fs.readFileSync; fs.readFileSync=(file,...args)=>{if(file===${JSON.stringify(registry)}) throw Object.assign(Error('injected I/O failure'),{code:'EIO'}); return read(file,...args);};
+        const result=agents([]); assert.equal(result.ownershipIssues[0].pane,${JSON.stringify(w.pane)}); assert(result.ownershipIssues[0].error.includes('I/O failure'));`;
+      const result = spawnSync(process.execPath, ["--input-type=module", "-e", source], { env: f.env, encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+    } finally { f.clean(); }
+  });
+
+  test("failed and unverified context probes preserve evidence, never spin watch", () => {
+    const f = fixture();
+    try {
+      f.queue("a"); f.ok(["run", "next"]);
+      const w = f.state().workers[0], at = Date.now() - 200000;
+      const file = path.join(f.env.HERDR_AXI_RUN, "context.json");
+      fs.writeFileSync(file, JSON.stringify({ [w.pane]: { generation: w.generation, percent: 92, at, source: "native-context" } }));
+      const status = f.ok(["fleet"]);
+      assert.match(status, /contextLastKnown/); assert.match(status, /92/); assert.doesNotMatch(status, /contextWarnings|contextUnknown/);
+      assert.equal(JSON.parse(fs.readFileSync(file))[w.pane].percent, 92);
+      const start = Date.now(); assert.match(f.ok(["watch", "--timeout-ms", "350"]), /changed: false/);
+      assert(Date.now() - start >= 300);
+      const source = `import assert from 'node:assert/strict'; import fs from 'node:fs';
+        import {contextStatus} from ${JSON.stringify(new URL("../src/context.mjs", import.meta.url).href)};
+        const w=${JSON.stringify(w)}, run=${JSON.stringify(f.state())};
+        const other={pane:'wTEST:pOther',kind:'claude',generation:'other'};
+        let s=contextStatus(run,[w,other],[other]);
+        assert.equal(s.stale,1); assert.equal(s.unknown,1); assert.equal(s.lastKnown[0].percent,92);
+        assert.equal(JSON.parse(fs.readFileSync(${JSON.stringify(file)}))[w.pane].percent,92);
+        let now=Date.now(); Date.now=()=>now;
+        for(const kind of ['claude','copilot']) { now+=16000; s=contextStatus(run,[{...w,kind}],[w]); assert.equal(s.lastKnown[0].percent,92); }
+        s=contextStatus(run,[{...w,generation:'new'}],[w]); assert.equal(s.unknown,1); assert.equal(s.lastKnown.length,0);`;
+      const result = spawnSync(process.execPath, ["--input-type=module", "-e", source], { env: f.env, encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+    } finally { f.clean(); }
+  });
+
+  test("accept refuses a missing or corrupt result; postcommit lease failure is recoverable even archived", () => {
+    const f = fixture();
+    try {
+      f.queue("a"); f.ok(["run", "next"]);
+      const w = f.state().workers[0]; f.complete(w);
+      for (const payload of [null, "broken", JSON.stringify({ generation: "old", summary: "stale" })]) {
+        if (payload === null) fs.unlinkSync(`${w.receipt}.inbox`); else fs.writeFileSync(`${w.receipt}.inbox`, payload);
+        assert.match(f.execute(["run", "accept", w.pane, "--evidence", "checked"]).output, /RESULT_UNAVAILABLE/);
+        assert.equal(f.state().tasks[0].state, "running");
+      }
+      f.complete(w);
+      const leases = path.join(f.env.HERDR_AXI_STATE_HOME, "writers"), lease = path.join(leases, fs.readdirSync(leases)[0]);
+      const original = fs.readFileSync(lease); fs.writeFileSync(lease, "null");
+      const accepted = f.ok(["run", "accept", w.pane, "--evidence", "checked"]);
+      assert.match(accepted, /committed: true/); assert.match(accepted, /LEASE_UNVERIFIED/);
+      assert.equal(f.state().tasks[0].state, "accepted"); assert.equal(f.state().tasks[0].summary, "checks passed");
+      assert(f.ok(["run", "leases"]).includes(lease));
+      f.ok(["run", "close", w.pane]);
+      assert.match(f.execute(["run", "finish"]).output, /LEASE_UNVERIFIED/);
+      assert(!f.state().finishedAt, "failed release must leave finish retryable");
+      fs.writeFileSync(lease, original); f.ok(["run", "finish"]); assert(!fs.existsSync(lease));
+      const archived = JSON.parse(gunzipSync(fs.readFileSync(path.join(f.env.HERDR_AXI_RUN, "detail.json.gz"))));
+      assert.equal(JSON.parse(archived.inboxes[w.name]).summary, "checks passed");
+      fs.writeFileSync(lease, original); // Legacy archive with a leaked own lease.
+      const before = f.calls().length;
+      const recovered = f.execute(["run", "recover", "a"], { HERDR_ENV: "" });
+      assert.equal(recovered.status, 0, recovered.output); assert.match(recovered.output, /leaseReleased: true/);
+      assert(!fs.existsSync(lease)); assert.equal(f.calls().length, before, "archived repair is offline, exact ownership only");
+    } finally { f.clean(); }
+  });
+
+  test("explicit reviewed report replacement survives finish without weakening completion proof", () => {
+    const f = fixture();
+    try {
+      f.queue("a"); f.ok(["run", "next"]); const w = f.state().workers[0];
+      const file = path.join(f.dir, "replacement"); fs.writeFileSync(file, "task: a\nchecks: reviewed manually\nlimitations: original report lost\n");
+      const args = ["run", "accept", w.pane, "--evidence", "verified artifact", "--result-file", file];
+      assert.match(f.execute(args).output, /NOT_COMPLETE/);
+      f.complete(w); fs.unlinkSync(`${w.receipt}.inbox`);
+      f.ok(args); assert.equal(f.state().tasks[0].resultSource, "coordinator-replacement");
+      f.ok(["run", "close", w.pane]); f.ok(["run", "finish"]);
+      const history = f.ok(["run", "history", "--task", "a"]);
+      assert.match(history, /coordinator-replacement/); assert.match(history, /original report lost/);
+    } finally { f.clean(); }
+  });
+
+  test("reused tab cosmetics validate the new session, not the old generation", () => {
+    const f = fixture();
+    try {
+      f.queue("a", "shared"); f.ok(["run", "next"]);
+      const r = f.state(), w = r.workers[0]; w.session = "original"; f.write(r);
+      const file = path.join(f.dir, `${w.pane}.agent`), a = JSON.parse(fs.readFileSync(file));
+      a.agent_session = { value: "original" }; fs.writeFileSync(file, JSON.stringify(a));
+      f.complete(w); f.ok(["run", "accept", w.pane, "--evidence", "checked"]);
+      fs.writeFileSync(path.join(f.dir, "session-rotate"), ""); f.queue("b", "shared");
+      assert.doesNotMatch(f.ok(["run", "next"]), /labelError|uncertain/);
+      assert.notEqual(f.state().workers[0].session, "original");
+      assert.equal(JSON.parse(fs.readFileSync(file)).label, "b · codex");
+    } finally { f.clean(); }
+  });
+
+  test("slow tab cosmetics see an already published task and time out promptly", async () => {
+    const f = fixture(); let launch;
+    try {
+      f.queue("a", "shared"); f.ok(["run", "next"]);
+      const w = f.state().workers[0]; f.complete(w); f.ok(["run", "accept", w.pane, "--evidence", "checked"]);
+      f.queue("b", "shared"); fs.writeFileSync(path.join(f.dir, "rename-delay"), "");
+      launch = f.asyncRun(["run", "next"]);
+      const deadline = Date.now() + 10000;
+      while (!f.calls().some((c) => c.action === "rename") && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+      assert(f.calls().some((c) => c.action === "rename"));
+      assert.equal(f.state().tasks[1].state, "running");
+      const at = Date.now(), result = await launch;
+      assert.equal(result.status, 0, result.output); assert.match(result.output, /labelError/);
+      assert(Date.now() - at < 2000, "cosmetic timeout cannot hold publication hostage");
+    } finally { if (launch) await launch; f.clean(); }
+  });
+
   test("parked identity drift defers its worktree without aborting prior selections", () => {
     const f = fixture();
     try {
@@ -498,6 +668,8 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       f.queue("fresh"); f.queue("reuse", "old");
       const result = f.ok(["run", "next"]);
       assert.match(result, /worktree busy/);
+      assert(result.includes(w.pane)); assert.match(result, /herdr-axi read/);
+      assert.match(f.ok(["run", "status"]), /parkedAttention/);
       assert.equal(f.state().tasks[1].state, "running");
       assert.equal(f.state().tasks[2].state, "queued");
       assert.equal(fs.readdirSync(path.join(f.env.HERDR_AXI_STATE_HOME, "writers")).length, 1);

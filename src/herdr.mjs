@@ -104,7 +104,7 @@ export function findAgent(name) {
     throw new AxiError(`no agent in pane ${name}`, "UNKNOWN_AGENT",
       agents.length
         ? [`Live panes: ${shown}${ids.length > 8 ? ` (+${ids.length - 8} more)` : ""}`, "Full list: herdr-axi agents"]
-        : ["No agents are live. Startup usage: herdr agent start --help"]);
+        : ["No matching owned agent. Inspect: herdr-axi agents", "Delegation workflow: herdr-axi run --help"]);
   }
   return hit;
 }
