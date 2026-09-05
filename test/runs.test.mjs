@@ -53,7 +53,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       // Keep first startup in flight so concurrent `next` exercises reservations.
       await new Promise((resolve) => setTimeout(resolve, 150));
       emit({ agent: a });
-    } else if (action === "read") console.log(fs.existsSync(path.join(dir, "context-footer")) ? fs.readFileSync(path.join(dir, "context-footer"), "utf8") : "Worker result");
+    } else if (action === "read") console.log(fs.existsSync(path.join(dir, `screen-${args[0]}`)) ? fs.readFileSync(path.join(dir, `screen-${args[0]}`), "utf8") : fs.existsSync(path.join(dir, "context-footer")) ? fs.readFileSync(path.join(dir, "context-footer"), "utf8") : "Worker result");
     else if (action === "wait") emit({ agent: find(args[0]) ?? missing("agent") });
     else if (action === "send-keys") { const a = find(args[0]); a.agent_status = "idle"; save(a); emit({ sent: true }); }
     else throw Error(`unexpected agent ${action}`);
@@ -73,6 +73,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       a.label = args.slice(1).join(" "); save(a); emit({ renamed: true });
     } else if (action === "close") {
       assert.notEqual(args[0], owner.tab_id);
+      if (fs.existsSync(path.join(dir, "close-fail"))) { console.error("temporary close failure"); process.exit(1); }
       for (const a of all().filter((a) => a.tab_id === args[0])) fs.unlinkSync(path.join(dir, `${a.pane_id}.agent`));
       emit({ closed: true });
     } else throw Error(`unexpected tab ${action}`);
@@ -120,6 +121,154 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
     const initialized = ok(["run", "init", "--dir", env.HERDR_AXI_RUN, "--project", project]);
     return { dir, env, execute, ok, asyncRun, state, write, calls, queue, complete, initialized, clean: () => fs.rmSync(dir, { recursive: true, force: true }) };
   }
+
+  function exhaustedWorker(f) {
+    f.ok(["run", "phase", "explore", "--cap", "1"]);
+    f.ok(["run", "queue", "quota-task", "--role", "implementer", "--cwd", f.state().project, "--area", ".", "--prompt", "Finish the partial implementation; check its contents."]);
+    f.ok(["run", "next"]);
+    const w = f.state().workers[0], file = path.join(f.dir, `${w.pane}.agent`);
+    const a = JSON.parse(fs.readFileSync(file)); a.agent_status = "idle"; fs.writeFileSync(file, JSON.stringify(a));
+    fs.writeFileSync(path.join(f.dir, `screen-${w.pane}`), "● Partial implementation; checks pending\n✗ You have exceeded your monthly quota (Request ID: fixture)\n /commands · autopilot");
+    return w;
+  }
+
+  test("quota wakes fleet/inbox/watch and switches the same unfinished task without losing files or its lease", () => {
+    const f = fixture();
+    try {
+      const w = exhaustedWorker(f), original = f.state().tasks[0];
+      const partial = path.join(original.cwd, "partial.txt"); fs.writeFileSync(partial, "unfinished, untracked");
+      const leases = path.join(f.env.HERDR_AXI_STATE_HOME, "writers"), lease = path.join(leases, fs.readdirSync(leases)[0]), beforeLease = fs.readFileSync(lease);
+      for (const command of [["fleet"], ["run", "inbox"], ["watch", "--timeout-ms", "100"], ["read", w.pane]]) {
+        const output = f.ok(command); assert.match(output, /quota|QUOTA_EXHAUSTED/);
+        assert(output.includes(`herdr-axi run switch ${w.pane} --kind codex --model gpt-5.6-sol`));
+      }
+      const refused = f.execute(["run", "accept", w.pane, "--evidence", "partial only"]);
+      assert.equal(refused.status, 1); assert.match(refused.output, /QUOTA_EXHAUSTED/);
+      fs.writeFileSync(path.join(f.dir, `screen-${w.pane}`), "large terminal history ".repeat(8000) + "\n✗ You have exceeded your monthly quota (Request ID: fixture)");
+      const result = f.ok(["run", "switch", w.pane, "--kind", "codex", "--model", "gpt-5.6-sol", "--summary", "Implementation partial; build not verified."]);
+      assert.match(result, /state: queued/); assert.match(result, /herdr-axi run next/);
+      const moved = f.state().tasks[0];
+      for (const key of ["id", "prompt", "cwd", "worktree", "area", "deps", "phase", "access"]) assert.deepEqual(moved[key], original[key]);
+      assert.equal(moved.kind, "codex"); assert.equal(f.state().workers[0].closed, true);
+      assert.equal(moved.handoffs[0].state, "retired");
+      assert.match(moved.handoffs[0].output, /monthly quota/);
+      assert(moved.handoffs[0].output.length <= 32000);
+      assert.equal(moved.handoffs[0].capture.truncated, true);
+      assert.deepEqual(fs.readFileSync(lease), beforeLease);
+      assert.equal(fs.readFileSync(partial, "utf8"), "unfinished, untracked");
+      assert.notEqual(fs.readFileSync(w.receipt, "utf8").split("\t")[7], `generation:${w.generation}`, "handoff is not completion");
+      assert.equal(f.calls().filter((c) => c.action === "start").length, 1, "switch does not overspawn");
+      f.ok(["run", "next"]);
+      const replacement = f.state().workers.find((p) => !p.closed);
+      assert.equal(replacement.kind, "codex"); assert.notEqual(replacement.pane, w.pane);
+      const prompt = fs.readFileSync(path.join(f.env.HERDR_AXI_RUN, "task-quota-task.txt"), "utf8");
+      assert.match(prompt, /Provider handoff, unfinished task/); assert.match(prompt, /Implementation partial; build not verified/);
+      assert.match(prompt, /Finish the partial implementation/);
+      f.complete(replacement); f.ok(["run", "accept", replacement.pane, "--evidence", "replacement checked"]);
+      f.ok(["run", "close", replacement.pane]); f.ok(["run", "finish"]);
+      assert.match(f.ok(["run", "history", "--task", original.id]), /handoffs/);
+      const archive = JSON.parse(gunzipSync(fs.readFileSync(path.join(f.env.HERDR_AXI_RUN, "detail.json.gz"))));
+      assert.match(archive.tasks[0].handoffs[0].output, /monthly quota/);
+      assert.equal(fs.readFileSync(partial, "utf8"), "unfinished, untracked");
+    } finally { f.clean(); }
+  });
+
+  test("failed quota switch retains checkpoint and lease; explicit retry never duplicates a worker", () => {
+    const f = fixture();
+    try {
+      const w = exhaustedWorker(f);
+      fs.writeFileSync(path.join(f.dir, "close-fail"), "");
+      const result = f.execute(["run", "switch", w.pane, "--kind", "claude", "--model", "opus"]);
+      assert.equal(result.status, 1); assert.match(result.output, /SWITCH_PENDING/);
+      assert.equal(f.state().tasks[0].state, "switching");
+      assert.match(f.ok(["run", "inbox"]), /herdr-axi run switch quota-task/);
+      f.ok(["run", "next"]); assert.equal(f.calls().filter((c) => c.action === "start").length, 1);
+      assert.equal(f.execute(["run", "switch", "quota-task", "--kind", "codex", "--model", "different"]).status, 1);
+      fs.unlinkSync(path.join(f.dir, "close-fail"));
+      f.ok(["run", "switch", "quota-task"]);
+      assert.equal(f.state().tasks[0].kind, "claude");
+      assert.equal(f.state().tasks[0].handoffs.length, 1);
+      assert.equal(fs.readdirSync(path.join(f.env.HERDR_AXI_STATE_HOME, "writers")).length, 1);
+      f.ok(["run", "next"]); assert.equal(f.calls().filter((c) => c.action === "start").length, 2);
+    } finally { f.clean(); }
+  });
+
+  test("switch refuses foreign owner, active/unknown worker, access escalation and non-quota errors", () => {
+    const f = fixture();
+    try {
+      const w = exhaustedWorker(f), before = f.state();
+      const args = ["run", "switch", w.pane, "--kind", "codex", "--model", "gpt-5.6-sol"];
+      assert.equal(f.execute(args, { HERDR_PANE_ID: "wOTHER:pX" }).status, 1);
+      assert.equal(f.execute(["run", "switch", w.pane, "--role", "verifier"]).status, 1);
+      assert.equal(f.execute(["run", "switch", w.pane, "--kind", "copilot", "--model", "gpt-5.6-sol"]).status, 1);
+      const file = path.join(f.dir, `${w.pane}.agent`), a = JSON.parse(fs.readFileSync(file));
+      for (const state of ["working", "unknown"]) { a.agent_status = state; fs.writeFileSync(file, JSON.stringify(a)); assert.equal(f.execute(args).status, 1); }
+      a.agent_status = "idle"; fs.writeFileSync(file, JSON.stringify(a));
+      fs.writeFileSync(path.join(f.dir, `screen-${w.pane}`), "Rate limit exceeded; retry in 2 seconds");
+      assert.match(f.execute(args).output, /QUOTA_NOT_CONFIRMED/);
+      assert.deepEqual(f.state(), before);
+      assert(!f.calls().some((c) => c.action === "close"));
+    } finally { f.clean(); }
+  });
+
+  test("quota switch publication failures preserve checkpoints, never duplicate close, and allow safe cancellation", () => {
+    const f = fixture();
+    try {
+      const w = exhaustedWorker(f);
+      const source = `import fs from 'node:fs'; import assert from 'node:assert/strict';
+        import { runCommand } from ${JSON.stringify(new URL("../src/runs.mjs", import.meta.url).href)};
+        import { loadRun } from ${JSON.stringify(new URL("../src/run-state.mjs", import.meta.url).href)};
+        const rename = fs.renameSync;
+        const args = {_: [${JSON.stringify(w.pane)}], kind:'codex', model:'gpt-5.6-sol'};
+        fs.renameSync = (a,b) => { if (b.endsWith('/run.json')) throw Error('checkpoint failed'); return rename(a,b); };
+        await assert.rejects(runCommand('switch',args), /checkpoint failed/);
+        assert.equal(loadRun().tasks[0].state,'running');
+        assert(fs.existsSync(${JSON.stringify(path.join(f.dir, `${w.pane}.agent`))}));
+        fs.renameSync = (a,b) => { if (b.endsWith('/run.json') && JSON.parse(fs.readFileSync(a)).tasks[0].state === 'queued') throw Error('publication failed'); return rename(a,b); };
+        await assert.rejects(runCommand('switch',args), {code:'SWITCH_PENDING'});
+        assert.equal(loadRun().tasks[0].state,'switching');
+        assert(!fs.existsSync(${JSON.stringify(path.join(f.dir, `${w.pane}.agent`))}));
+        assert.match(loadRun().tasks[0].handoffs[0].output,/monthly quota/);
+        fs.renameSync = rename;
+        await runCommand('switch',{_:['quota-task']});
+        assert.equal(loadRun().tasks[0].state,'queued');`;
+      const result = spawnSync(process.execPath, ["--input-type=module", "-e", source], { env: f.env, encoding: "utf8", timeout: 20000 });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(f.calls().filter((c) => c.action === "close").length, 1);
+      f.ok(["run", "next"]);
+      const next = f.state().workers.find((w) => !w.closed), file = path.join(f.dir, `${next.pane}.agent`);
+      const a = JSON.parse(fs.readFileSync(file)); a.agent_status = "idle"; fs.writeFileSync(file, JSON.stringify(a));
+      fs.writeFileSync(path.join(f.dir, `screen-${next.pane}`), "Session limit reached");
+      fs.writeFileSync(path.join(f.dir, "close-fail"), "");
+      assert.equal(f.execute(["run", "switch", next.pane, "--kind", "claude", "--model", "opus"]).status, 1);
+      fs.writeFileSync(path.join(f.dir, `screen-${next.pane}`), "● Resumed after limit reset");
+      assert.match(f.execute(["run", "switch", "quota-task"]).output, /--cancel/);
+      f.ok(["run", "switch", "quota-task", "--cancel"]);
+      assert.equal(f.state().tasks[0].state, "running");
+      assert.equal(f.state().tasks[0].handoffs.at(-1).state, "cancelled");
+      assert(fs.existsSync(file));
+    } finally { f.clean(); }
+  });
+
+  test("one watch wakes for a newly reached quota; subsequent status reuses the bounded probe", async () => {
+    const f = fixture(); let watching;
+    try {
+      const w = exhaustedWorker(f), file = path.join(f.dir, `${w.pane}.agent`);
+      const a = JSON.parse(fs.readFileSync(file)); a.agent_status = "working"; fs.writeFileSync(file, JSON.stringify(a));
+      const before = f.calls().filter((c) => c.action === "list").length;
+      watching = f.asyncRun(["watch", "--timeout-ms", "8000"]);
+      const deadline = Date.now() + 3000;
+      while (f.calls().filter((c) => c.action === "list").length === before && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+      a.agent_status = "idle"; fs.writeFileSync(file, JSON.stringify(a));
+      const result = await watching;
+      assert.equal(result.status, 0, result.output);
+      assert.match(result.output, /reason: state-change/);
+      assert.match(result.output, /monthly/); assert.match(result.output, /herdr-axi run switch/);
+      const reads = f.calls().filter((c) => c.action === "read").length;
+      f.ok(["fleet"]);
+      assert.equal(f.calls().filter((c) => c.action === "read").length, reads);
+    } finally { if (watching) await watching; f.clean(); }
+  });
 
   test("init exposes worker choices and queue syntax; config is compact with explicit full detail", () => {
     const f = fixture();

@@ -3,8 +3,8 @@ import path from "node:path";
 import { AxiError } from "axi-sdk-js";
 
 export const PHASES = { explore: 4, build: 3, integrate: 2, verify: 2, fix: 1 };
-export const runError = (message, code = "RUN_ERROR") => new AxiError(message, code, code === "RUN_REQUIRED"
-  ? ["herdr-axi run init", "herdr-axi run init --help"] : ["herdr-axi run status", "herdr-axi run --help"]);
+export const runError = (message, code = "RUN_ERROR", help) => new AxiError(message, code, help ?? (code === "RUN_REQUIRED"
+  ? ["herdr-axi run init", "herdr-axi run init --help"] : ["herdr-axi run status", "herdr-axi run --help"]));
 export const runDir = () => process.env.HERDR_AXI_RUN ? path.resolve(process.env.HERDR_AXI_RUN) : null;
 const maintenance = [];
 export const takeRunWarnings = () => maintenance.splice(0);

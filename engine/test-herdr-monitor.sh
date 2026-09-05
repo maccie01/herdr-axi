@@ -1748,6 +1748,8 @@ test_monitor_separates_readiness_completion_and_acceptance() (
   # Coordinator-only changes must refresh without another agent transition.
   printf 'herdr-task/1\taccepted\t%s\n' "$generation" > "$task_file"
   expect_display idle accepted complete
+  printf 'herdr-task/1\tswitching\t%s\n' "$generation" > "$task_file"
+  expect_display idle switching pending
   # Reusing a pane must not label the old generation's receipt as new proof.
   printf 'herdr-task/1\tstarting\t%s\n' "$generation" > "$task_file"
   expect_display idle starting pending
@@ -1929,7 +1931,46 @@ test_compact_completion_command_handles_quoted_paths() (
   assert_file_absent "$proof_receipt.proof.testgen.tmp" "atomic temporary proof"
 )
 
+test_quota_handoff_requires_checkpoint_identity_and_paused_worker() (
+  setup_case quota-handoff
+  source "$receipt_script"
+  mkdir -p "$(dirname -- "$HERDR_MONITOR_RECEIPT")"
+  herdr_receipt_lock_acquire "$HERDR_MONITOR_RECEIPT"
+  herdr_receipt_rearm_locked "$HERDR_MONITOR_RECEIPT" handoff testgen
+  herdr_receipt_lock_release
+  write_worker_registry worker ws testgen
+  export HERDR_AXI_MANAGED_TASK=1
+  run_file="$FAKE_HERDR_CASE/run.json"
+  printf '%s\n' idle > "$FAKE_HERDR_CASE/status"
+  if bash "$orchestrator_script" close worker --handoff "$run_file" >/dev/null 2>&1; then
+    fail "handoff closed without durable checkpoint"
+  fi
+  jq -nc --arg receipt "$HERDR_MONITOR_RECEIPT" '{schema:1,workspace:"ws",owner:{pane:"owner",tab:"owner-tab"},tasks:[{name:"worker",pane:"pane-1",state:"switching",handoffs:[{from:{name:"worker",kind:"copilot",pane:"pane-1",tab:"tab-1",generation:"testgen",session:"session-1",receipt:$receipt},to:{kind:"codex"},quota:{code:"QUOTA_EXHAUSTED"},output:"saved partial work"}]}]}' > "$run_file"
+  printf '%s\n' working > "$FAKE_HERDR_CASE/status"
+  if bash "$orchestrator_script" close worker --handoff "$run_file" >/dev/null 2>&1; then
+    fail "handoff closed an active worker"
+  fi
+  printf '%s\n' idle > "$FAKE_HERDR_CASE/status"
+  printf '%s\n' changed-session > "$FAKE_HERDR_CASE/session"
+  if bash "$orchestrator_script" close worker --handoff "$run_file" >/dev/null 2>&1; then
+    fail "handoff closed a changed session"
+  fi
+  assert_file_present "$FAKE_HERDR_CASE/tab-alive" "failed checks preserve tab"
+  printf '%s\n' session-1 > "$FAKE_HERDR_CASE/session"
+  if bash "$orchestrator_script" close worker >/dev/null 2>&1; then
+    fail "normal close bypassed missing completion"
+  fi
+  bash "$orchestrator_script" close worker --handoff "$run_file" >/dev/null
+  assert_file_absent "$FAKE_HERDR_CASE/tab-alive" "handoff closes recorded tab"
+  assert_eq "" "$(receipt_read_field 8)" "handoff never fabricates completion"
+  assert_eq closed "$(receipt_read_field 9)" "handoff tombstone"
+  assert_eq handoff "$(receipt_read_field 11)" "handoff reason"
+  bash "$orchestrator_script" close worker --handoff "$run_file" >/dev/null
+  assert_eq 1 "$(call_count '^tab close')" "retry never closes twice"
+)
+
 tests=(
+  test_quota_handoff_requires_checkpoint_identity_and_paused_worker
   test_claude_report_survives_receipt_ack_but_not_new_task
   test_compact_completion_command_handles_quoted_paths
   test_idle_completion_is_collected
