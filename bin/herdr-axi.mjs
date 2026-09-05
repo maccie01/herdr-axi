@@ -58,6 +58,15 @@ const RUN_HELP = {
   Queued tasks keep their phase; return to it or cancel/requeue explicitly.`,
   close: `herdr-axi run close <pane>
   Accepted owned workers only; generation and topology checks. Never closes the owner tab.`,
+  switch: `herdr-axi run switch <pane-or-task-id> --kind claude|codex|copilot --model <model> [--effort high] [--summary "partial work / pending checks"]
+  Or --role <configured-worker-role>; same read/write access, different provider.
+  Quota/session limit only; live idle/done/blocked required. Check no tools/background jobs are still running.
+  Save original task + bounded terminal checkpoint + Git status; retire only the owned tab WITHOUT acceptance.
+  Preserve dirty/untracked files, dependencies, phase and worktree lease. No commits, stash, reset or new run.
+  Then run next. Model context is not restored; replacement inspects files and checkpoint, verifies remaining work.
+  Interrupted switch: repeat run switch <task-id> without flags. Checkpoint/lease retained, no duplicate startup.
+  Old worker resumed: run switch <task-id> --cancel, only while its original identity/resources still exist.
+  Detection is automatic in fleet/inbox/watch; provider/cost change requires this explicit command.`,
   cancel: `herdr-axi run cancel <task-id>
   Queued tasks only.`,
   recover: `herdr-axi run recover <pane-or-task-id>

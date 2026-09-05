@@ -14,6 +14,7 @@ export function history(run, taskId) {
   return { run: run.id, project: run.project, ...(run.finishedAt ? { finished: run.finishedAt } : {}),
     ...(taskId && tasks[0]?.resultSource ? { resultSource: tasks[0].resultSource } : {}),
     tasks: tasks.slice(-8).map((t) => ({ task: t.id, phase: t.phase, role: t.role || t.kind, state: t.state, cwd: t.cwd, area: t.area, ...(t.summary && !(taskId && t.result) ? { summary: t.summary } : {}), ...(t.evidence ? { evidence: t.evidence } : {}), ...(t.commit ? { commit: t.commit } : {}), ...(taskId ? { prompt: t.prompt?.slice(0, 4000) || "(detail expired)", ...(t.prompt?.length > 4000 ? { truncated: true } : {}), ...(t.result ? { result: t.result.slice(0, 3500) } : {}), revisions: (t.revisions ?? []).map((v) => ({ at: v.at, prompt: v.prompt.slice(0, 1000), summary: v.summary })) } : {}) })),
+    ...(taskId && tasks[0]?.handoffs?.length ? { handoffs: tasks[0].handoffs.map((h) => ({ at: h.at, from: h.from.kind, to: h.to.kind, model: h.to.model, quota: h.quota.scope, state: h.state, summary: h.summary.slice(0, 600), capture: h.capture })) } : {}),
     ...(tasks.length > 8 ? { more: tasks.length - 8 } : {}), events: (detail.events ?? []).filter((e) => !taskId || e.task === taskId).slice(-8),
     help: [tasks.length && !taskId ? `herdr-axi run history --task ${tasks.at(-1).id}` : "herdr-axi run history --all"] };
 }
@@ -51,7 +52,10 @@ export function finishRun() {
     }
     fs.writeFileSync(archive + ".tmp", gzipSync(JSON.stringify({ ...r, inboxes })), { mode: 0o600 });
     fs.renameSync(archive + ".tmp", archive);
-    for (const t of r.tasks) { delete t.prompt; delete t.revisions; delete t.result; }
+    for (const t of r.tasks) {
+      delete t.prompt; delete t.revisions; delete t.result;
+      if (t.handoffs) t.handoffs = t.handoffs.map(({ output, gitStatus, ...h }) => ({ ...h, summary: h.summary.slice(0, 600) }));
+    }
     r.events = (r.events ?? []).slice(-32);
     return { finished: r.finishedAt, archived: true, detailDays: (r.config ?? DEFAULT_CONFIG).retention.detailDays, summaryDays: (r.config ?? DEFAULT_CONFIG).retention.summaryDays };
   }, { allowFinished: true });

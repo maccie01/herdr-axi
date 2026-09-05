@@ -62,6 +62,27 @@ they do **not** push into the orchestrator conversation. A shell PID, detached `
 or Herdr toast does not guarantee an agent wakeup. `watch` defaults to 30 seconds;
 do not duplicate an active watcher.
 
+**Subscription/session exhausted:** `fleet`, `run inbox`, `watch` and visible `read`
+recognize explicit quota errors, including Copilot's monthly-quota message even
+when its terminal reports `idle`. A tracked `watch` returns attention plus switch
+commands; it does not require a completion hook. No automatic provider/billing change.
+
+```sh
+herdr-axi run switch w1:pP --kind codex --model gpt-5.6-sol --effort high \
+  --summary 'Partial implementation; build and review still pending.'
+herdr-axi run next
+```
+
+Alternatively select `--role <configured-backup-role>` with the same read/write
+access. Check that no tools/background jobs remain active. `switch` checkpoints
+the original task, bounded terminal history, session identity and Git status before
+retiring the old owned tab—**without accepting unfinished work**. Same task, dirty
+worktree, dependencies and lease; no WIP commit, stash, reset or new run. Replacement
+gets the checkpoint and verifies remaining work; full model context is not restored.
+Failed switch: `run switch <task-id>` resumes the saved target. If the original worker
+resumed, `run switch <task-id> --cancel` retains it; unavailable/changed identities
+fail closed. Four switches/task maximum. Ordinary rate-limit retries are not quota.
+
 When a result needs review (replace `w1:pP` with the returned worker pane):
 
 ```sh

@@ -341,3 +341,30 @@ alias bypass of state-directory exclusion; both paths are now canonicalized.
 JS suite: 69/69; standalone Bash monitor suite: 41/41. Global executable exposes the new commands. No new dependencies,
 daemon or runtime files in projects. LLM adherence and provider startup remain
 unverified in this pass; automatic end-hook-to-orchestrator wakeup remains open.
+
+## Subscription exhaustion and provider handoff (6 September 2026)
+
+Read-only live confirmation: the reported Copilot pane was `idle` while displaying
+`You have exceeded your monthly quota`. The updated global CLI now returns
+`QUOTA_EXHAUSTED`, monthly scope and concrete configured-model switch commands.
+No production pane was prompted, stopped or closed; no live provider replacement
+was performed. Session-limit wording is covered by fixtures, not a live exhausted
+Claude/Codex subscription.
+
+`run switch` preserves task/prompt/worktree/dependencies and retains its lease.
+Bounded private checkpoint before retirement: terminal tail (2000 lines / 32000
+characters maximum), Git status, session identity and optional coordinator notes.
+The old tab closes without completion/acceptance; `next` launches the replacement.
+Full model context and detached background jobs are not automatically recovered;
+the coordinator must check for active jobs and the replacement verifies the files.
+
+Validation: JS 75/75; standalone Bash 42/42. Includes large output, wrong owner,
+active/unknown workers, changed sessions, missing checkpoints, failures before and
+after tab closure, safe retry/cancellation, archive retention, retained dirty files
+and leases, and a watch started before quota exhaustion. Cached status does not
+repeat the quota read. An intermediate Bash run encountered a script-read syntax
+error during test-file editing; the final frozen-file full rerun passed.
+
+Existing context cache and close/queue paths reused; no dependency, daemon, project
+state document or automatic billing/provider switch. A tracked watch surfaces the
+quota to its caller; universal unsolicited orchestrator wakeup remains unimplemented.

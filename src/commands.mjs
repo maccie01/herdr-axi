@@ -3,6 +3,7 @@ import { listAgents, findAgent, fleet, runHerdr, requireHerdrEnv, projectAgent, 
 
 import { loadRun, runError } from "./run-state.mjs";
 import { runCommand, runStatus, watchRun, ownerCheck } from "./runs.mjs";
+import { quotaError, switchHelp } from "./quota.mjs";
 
 // Fail loud on unknown flags (AXI #6) - a typo must never silently no-op.
 function parseArgs(args, spec) {
@@ -125,8 +126,11 @@ export function read(args) {
   else if (a.state === "blocked") help.push(o.raw ? "herdr-axi dispatch --help" : `herdr-axi read ${a.pane} --raw`);
   const managedWorking = a.state === "working" && !!loadRun();
   if (managedWorking) help.unshift("herdr-axi watch");
+  const quota = !o.full && a.state !== "working" ? quotaError(text) : null;
+  if (quota) help.splice(0, help.length, ...switchHelp(loadRun(), a.pane, a.kind));
   return {
     pane: a.pane, state: a.state,
+    ...(quota ? { quota, note: "Provider capacity exhausted; idle is not completion. Switch the existing task, not a new run. Files remain in the same worktree; no WIP commit required." } : {}),
     output: output || (!o.raw && text.trim() ? "(layout-only output; use --raw)" : "(no visible output)"),
     ...(all.length > shown.length || clipped ? { truncated: [all.length > shown.length ? `${lines}-line cap` : "", clipped ? `${chars}-character cap` : ""].filter(Boolean).join(", ") } : {}),
     ...(o.raw ? { raw: true } : {}),
@@ -186,12 +190,13 @@ export function run(args) {
     init: { dir: "string", owner: "string", project: "string" }, status: {}, inbox: {}, next: {}, unlock: {}, leases: {}, config: { full: "boolean" }, history: { task: "string", all: "boolean" }, finish: {}, gc: {},
     queue: { kind: "string", role: "string", cwd: "string", area: "string", prompt: "string", "prompt-file": "string", after: "string" },
     move: { cwd: "string", area: "string" },
+    switch: { role: "string", kind: "string", model: "string", effort: "string", summary: "string", cancel: "boolean" },
     phase: { cap: "string" }, accept: { evidence: "string", "result-file": "string" }, revise: { prompt: "string", "prompt-file": "string" },
     cancel: {}, close: {}, recover: {},
   };
   if (!Object.hasOwn(specs, action)) throw runError(`Unknown run action: ${action}`);
   const o = parseArgs(rest, specs[action]);
-  const count = ["queue", "move", "phase", "accept", "revise", "cancel", "close", "recover"].includes(action) ? 1 : 0;
+  const count = ["queue", "move", "switch", "phase", "accept", "revise", "cancel", "close", "recover"].includes(action) ? 1 : 0;
   if (o._.length !== count) throw runError(`${action} takes ${count} positional argument(s)`);
   return runCommand(action, o).catch((e) => { throw e instanceof AxiError ? e : runError(e.message); });
 }

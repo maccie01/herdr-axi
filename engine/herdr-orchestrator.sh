@@ -428,8 +428,19 @@ case "$command_name" in
     jq -nc --arg name "$name" '{name:$name,prompt_delivered:true}'
     ;;
   close)
-    (( $# == 1 )) || usage
+    (( $# == 1 || $# == 3 )) || usage
     name="$1"
+    handoff_file=""
+    handoff_json=""
+    close_event=settled
+    close_reason=close
+    if (( $# == 3 )); then
+      [[ "$2" == "--handoff" && "${HERDR_AXI_MANAGED_TASK:-}" == "1" ]] || usage
+      handoff_file="$3"
+      [[ "$handoff_file" == "${HERDR_RECEIPT_ROOT%/receipts}/run.json" ]] || usage
+      close_event=lost
+      close_reason=handoff
+    fi
     resolve_close_lifecycle "$name"
     if [[ "$close_already_closed" == "true" ]]; then
       jq -nc --arg name "$name" \
@@ -444,7 +455,22 @@ case "$command_name" in
 
     herdr_receipt_read "$receipt_file" ||
       close_locked_error "close receipt is unreadable: $name"
-    if [[ -z "$receipt_settled_fingerprint" ||
+    if [[ -n "$handoff_file" ]]; then
+      [[ "$receipt_settled_fingerprint" != "generation:$receipt_generation" ]] ||
+        close_locked_error "worker completed; cancel switch and review before normal close: $name"
+      handoff_json=$(jq -ce --arg name "$name" --arg pane "$close_agent_pane" \
+        --arg tab "$close_tab_id" --arg generation "$close_generation" \
+        --arg workspace "$close_workspace_id" --arg receipt "$close_receipt_file" '
+        select(.schema == 1 and .workspace == $workspace and .owner.pane != $pane and .owner.tab != $tab) |
+        [.tasks[] | select(.state == "switching" and .pane == $pane and .name == $name) |
+          .handoffs[-1] | select(.from.pane == $pane and .from.tab == $tab and .from.name == $name and
+            .from.generation == $generation and .from.receipt == $receipt and .quota.code == "QUOTA_EXHAUSTED" and
+            (.output | type) == "string" and .to.kind != .from.kind)] |
+        if length == 1 then {from: (.[0].from | {terminal,session})} else error("missing checkpoint") end' "$handoff_file") ||
+        close_locked_error "handoff checkpoint missing or mismatched: $name"
+      [[ -n "$close_generation" && "$close_generation" == "$receipt_generation" ]] ||
+        close_locked_error "handoff requires the current registered generation: $name"
+    elif [[ -z "$receipt_settled_fingerprint" ||
       -z "$receipt_generation" ]]; then
       close_locked_error "close refused without completion proof: $name"
     fi
@@ -472,7 +498,17 @@ case "$command_name" in
       if [[ -n "$live_name" && "$live_name" != "$name" ]]; then
         close_locked_error "live agent does not match registry: $name"
       fi
-      if [[ "$live_state" == "working" || "$live_state" == "blocked" ]]; then
+      if [[ -n "$handoff_file" ]]; then
+        [[ "$live_name" == "$name" && "$live_workspace" == "$close_workspace_id" &&
+          "$live_tab" == "$close_tab_id" && "$live_pane" == "$close_agent_pane" ]] ||
+          close_locked_error "handoff live topology changed: $name"
+        [[ "$live_state" == "idle" || "$live_state" == "done" || "$live_state" == "blocked" ]] ||
+          close_locked_error "handoff refuses active/unknown worker: $name"
+        printf '%s\n' "$info" | jq -e --argjson checkpoint "$handoff_json" '
+          .result.agent | (.terminal_id == $checkpoint.from.terminal or $checkpoint.from.terminal == null) and
+          (.agent_session.value == $checkpoint.from.session or $checkpoint.from.session == null)' >/dev/null ||
+          close_locked_error "handoff worker identity changed: $name"
+      elif [[ "$live_state" == "working" || "$live_state" == "blocked" ]]; then
         close_locked_error "close refused: $name state=$live_state"
       fi
       if [[ -n "$live_workspace" &&
@@ -485,9 +521,13 @@ case "$command_name" in
       if [[ -n "$live_pane" && "$live_pane" != "$close_agent_pane" ]]; then
         close_locked_error "live agent pane does not match registry: $name"
       fi
+    elif [[ -n "$handoff_file" ]]; then
+      registered_resources_absent || close_locked_error "handoff worker cannot be verified: $name"
     fi
 
-    rendered_result=$(env \
+    rendered_result=""
+    if [[ -z "$handoff_file" ]]; then
+      rendered_result=$(env \
       HERDR_MONITOR_ENABLED=1 \
       HERDR_MONITOR_RENDER_ONLY=1 \
       HERDR_MONITOR_AGENT="$name" \
@@ -495,6 +535,7 @@ case "$command_name" in
       HERDR_MONITOR_RECEIPT="$receipt_file" \
       "$script_dir/herdr-hook-notify.sh" settled </dev/null) ||
       close_locked_error "completed result could not be rendered: $name"
+    fi
 
     validate_registered_resources ||
       close_locked_error "registered tab or panes could not be validated: $name"
@@ -521,9 +562,9 @@ case "$command_name" in
     esac
 
     if ! herdr_receipt_write \
-      "$receipt_file" "$receipt_cycle" settled closed closed \
+      "$receipt_file" "$receipt_cycle" "$close_event" closed closed \
       "$receipt_delivered_event" "$receipt_delivered_fingerprint" \
-      "$receipt_settled_fingerprint" closed "$receipt_generation" close; then
+      "$receipt_settled_fingerprint" closed "$receipt_generation" "$close_reason"; then
       close_locked_error "closed tombstone could not be written: $name"
     fi
     if ! rm -f "$close_registry_file"; then
