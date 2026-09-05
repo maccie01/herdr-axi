@@ -318,7 +318,7 @@ if (process.argv[2] === "agent") {
       assert.equal(r.status, 0, r.output);
       assert.equal(r.calls.length, 0);
     }
-    for (const action of ["init", "config", "queue", "next", "status", "inbox", "accept", "revise", "phase", "close", "cancel", "recover", "leases", "unlock", "finish", "history", "gc"]) {
+    for (const action of ["init", "config", "queue", "move", "next", "status", "inbox", "accept", "revise", "phase", "close", "cancel", "recover", "leases", "unlock", "finish", "history", "gc"]) {
       const r = run(["run", action, "--help"]);
       assert.equal(r.status, 0, r.output);
       assert(r.stdout.startsWith(`herdr-axi run ${action}`));

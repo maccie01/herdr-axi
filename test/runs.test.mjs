@@ -127,7 +127,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       assert.match(f.initialized, /roles\[2\]/);
       assert.match(f.initialized, /implementer,copilot,gpt-5.6-sol,high,write/);
       assert.match(f.initialized, /verifier,claude,opus,high,read/);
-      assert.match(f.initialized, /--prompt-file/);
+      assert.match(f.initialized, /--prompt/);
       assert.doesNotMatch(f.initialized, /herdr-axi run --help/);
       assert.deepEqual(f.calls().map(({ group, action }) => [group, action]), [["agent", "get"]]);
       const before = f.state(), calls = f.calls().length;
@@ -148,6 +148,178 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       assert.equal(f.state().tasks[0].access, "read");
       assert.equal(f.state().tasks[0].kind, "claude");
       assert(!f.calls().some((c) => ["start", "create", "split", "prompt"].includes(c.action)), "init and queue do not start workers");
+    } finally { f.clean(); }
+  });
+
+  test("inline queue and revision prompts need no project documents and reject ambiguous inputs", () => {
+    const f = fixture();
+    try {
+      const cwd = f.state().project;
+      const args = ["run", "queue", "review", "--role", "verifier", "--cwd", cwd, "--area", "."];
+      const before = f.state();
+      for (const input of [[], ["--prompt", " "], ["--prompt", "é".repeat(32001)], ["--prompt", "task", "--prompt-file", path.join(f.dir, "prompt")]]) {
+        assert.equal(f.execute([...args, ...input]).status, 1);
+        assert.deepEqual(f.state(), before);
+      }
+      const prompt = "Inspect branch; report checks.\nNo writes. 'quoted' $literal `text`";
+      f.ok([...args, "--prompt", prompt]);
+      assert.equal(f.state().tasks[0].prompt, prompt);
+      assert.deepEqual(fs.readdirSync(cwd), []);
+      f.ok(["run", "next"]);
+      const w = f.state().workers[0]; f.complete(w);
+      const settled = f.state();
+      assert.equal(f.execute(["run", "revise", w.pane, "--prompt", "fix", "--prompt-file", path.join(f.dir, "prompt")]).status, 1);
+      assert.deepEqual(f.state(), settled);
+      f.ok(["run", "revise", w.pane, "--prompt", "Recheck branch only."]);
+      const t = f.state().tasks[0];
+      assert.equal(t.prompt, "Recheck branch only."); assert.equal(t.revisions[0].prompt, prompt);
+      assert.equal(t.pane, w.pane);
+      assert.equal(f.calls().filter((c) => c.action === "prompt").length, 2);
+      assert.deepEqual(fs.readdirSync(cwd), []);
+    } finally { f.clean(); }
+  });
+
+  test("busy verifier gets executable isolation recovery; move preserves task and never touches foreign panes", () => {
+    const f = fixture();
+    try {
+      const cwd = path.join(f.dir, "source's repo"); fs.mkdirSync(cwd);
+      const git = (...args) => {
+        const r = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
+        assert.equal(r.status, 0, r.stderr); return r.stdout;
+      };
+      git("init"); fs.mkdirSync(path.join(cwd, "src"));
+      fs.writeFileSync(path.join(cwd, "src", "value"), "committed"); git("add", ".");
+      git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "fixture");
+      fs.writeFileSync(path.join(cwd, "src", "value"), "dirty");
+      fs.writeFileSync(path.join(cwd, "untracked"), "keep");
+      const dirty = git("status", "--porcelain");
+      const pane = "wFOREIGN:pOTHER";
+      fs.writeFileSync(path.join(f.dir, `${pane}.agent`), JSON.stringify({ ...owner, pane_id: pane, workspace_id: "wFOREIGN", tab_id: "wFOREIGN:tOTHER", name: "unowned", cwd, agent_status: "idle" }));
+      f.ok(["run", "queue", "review", "--role", "verifier", "--cwd", path.join(cwd, "src"), "--area", ".", "--prompt", "Read value in the assigned cwd; report snapshot, no writes."]);
+      const original = f.state().tasks[0];
+      const source = `import { runCommand } from ${JSON.stringify(new URL("../src/runs.mjs", import.meta.url).href)}; console.log(JSON.stringify(await runCommand("next", {_:[]})));`;
+      const result = spawnSync(process.execPath, ["--input-type=module", "-e", source], { env: f.env, encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+      const blocked = JSON.parse(result.stdout);
+      assert.deepEqual(blocked.started, []);
+      assert.equal(blocked.deferred[0].pane, pane);
+      assert.equal(blocked.deferred[0].worktree, fs.realpathSync(cwd));
+      assert.match(blocked.isolation.note, /HEAD-only.*dirty\/untracked/);
+      assert.doesNotMatch(JSON.stringify(blocked.help), /herdr-axi read|run status/);
+      assert(!f.calls().some((c) => ["start", "prompt", "read", "close"].includes(c.action)));
+      // Execute the actual suggested commands, including shell quoting and a real Git worktree.
+      const shell = (cmd) => {
+        const r = spawnSync("/bin/sh", ["-c", cmd], { env: { ...f.env, PATH: `${path.dirname(cli)}:${f.env.PATH}` }, encoding: "utf8", timeout: 20000 });
+        assert.equal(r.status, 0, r.stdout + r.stderr); return r.stdout;
+      };
+      shell(blocked.isolation.snapshot[0]);
+      shell(blocked.isolation.snapshot[1]);
+      const moved = f.state().tasks[0];
+      for (const k of ["id", "prompt", "role", "model", "effort", "policy", "access", "deps", "phase", "state"]) assert.deepEqual(moved[k], original[k]);
+      assert.notEqual(moved.worktree, original.worktree);
+      assert.equal(moved.area, moved.cwd);
+      assert.equal(moved.cwd, path.join(moved.worktree, "src"), "snapshot relocation preserves subtree scope");
+      assert.equal(fs.readFileSync(path.join(moved.cwd, "value"), "utf8"), "committed");
+      assert(!fs.existsSync(path.join(moved.worktree, "untracked")));
+      assert(f.state().events.some((e) => e.action === "move" && e.from === original.cwd && e.to === moved.cwd));
+      shell(blocked.isolation.snapshot[2]);
+      assert.equal(f.state().tasks[0].state, "running");
+      const active = f.state();
+      assert.equal(f.execute(["run", "move", "review", "--cwd", cwd]).status, 1);
+      assert.deepEqual(f.state(), active);
+      const w = active.workers[0]; f.complete(w);
+      f.ok(["run", "accept", w.pane, "--evidence", "fixture checked"]);
+      f.ok(["run", "close", w.pane]); shell(blocked.isolation.cleanupAfterClose);
+      assert.equal(git("status", "--porcelain"), dirty);
+      assert.equal(fs.readFileSync(path.join(cwd, "src", "value"), "utf8"), "dirty");
+      assert(!f.calls().some((c) => ["prompt", "read", "send-keys", "close"].includes(c.action) && c.args.some((a) => a.startsWith("wFOREIGN:"))));
+    } finally { f.clean(); }
+  });
+
+  test("phase and ineligible next guidance avoid redundant status loops", () => {
+    const f = fixture();
+    try {
+      assert.match(f.ok(["run", "phase", "explore", "--cap", "1"]), /help\[1\]: herdr-axi run queue --help/);
+      f.queue("a");
+      assert.match(f.ok(["run", "phase", "explore"]), /help\[1\]: herdr-axi run next/);
+      f.ok(["run", "phase", "build"]);
+      const result = f.ok(["run", "next"]);
+      assert.match(result, /explicit phase change/);
+      assert.match(result, /herdr-axi run phase explore/);
+      assert.doesNotMatch(result, /herdr-axi run status/);
+      assert(!f.calls().some((c) => ["start", "prompt", "read"].includes(c.action)));
+    } finally { f.clean(); }
+  });
+
+  test("move validates before releasing reservations and remains retryable after publication failure", () => {
+    const f = fixture();
+    try {
+      f.queue("a"); const original = f.state();
+      const cwd = path.join(f.dir, "destination"); fs.mkdirSync(cwd);
+      for (const extra of [{ HERDR_PANE_ID: "wOTHER:pOWNER" }]) {
+        assert.equal(f.execute(["run", "move", "a", "--cwd", cwd], extra).status, 1);
+        assert.deepEqual(f.state(), original);
+      }
+      const alias = path.join(f.dir, "state-alias"); fs.symlinkSync(f.env.HERDR_AXI_RUN, alias);
+      for (const args of [["--cwd", cwd, "--area", "../escape"], ["--cwd", f.env.HERDR_AXI_RUN], ["--cwd", alias], ["--cwd", path.join(f.dir, "prompt")]]) {
+        assert.equal(f.execute(["run", "move", "a", ...args]).status, 1);
+        assert.deepEqual(f.state(), original);
+      }
+      const source = `import fs from 'node:fs'; import assert from 'node:assert/strict';
+        import { runCommand } from ${JSON.stringify(new URL("../src/runs.mjs", import.meta.url).href)};
+        import { loadRun } from ${JSON.stringify(new URL("../src/run-state.mjs", import.meta.url).href)};
+        import { writerLease, leasePath } from ${JSON.stringify(new URL("../src/project.mjs", import.meta.url).href)};
+        const run = loadRun(), task = run.tasks[0], file = leasePath(task);
+        assert(writerLease(run, task));
+        const value = fs.readFileSync(file);
+        fs.writeFileSync(file, 'partial');
+        await assert.rejects(runCommand('move', {_:['a'], cwd:${JSON.stringify(cwd)}}), {code:'LEASE_UNVERIFIED'});
+        assert.deepEqual(loadRun(), run);
+        fs.writeFileSync(file, value);
+        const rename = fs.renameSync;
+        fs.renameSync = (a,b) => { if (b.endsWith('/run.json')) throw Error('publication failed'); return rename(a,b); };
+        await assert.rejects(runCommand('move', {_:['a'], cwd:${JSON.stringify(cwd)}}), /publication failed/);
+        fs.renameSync = rename;
+        assert.deepEqual(loadRun(), run);
+        assert(!fs.existsSync(file), 'no live work: released queued reservation can be reacquired');
+        assert(writerLease(run, task));
+        await runCommand('move', {_:['a'], cwd:${JSON.stringify(cwd)}});
+        assert(!fs.existsSync(file), 'successful move must not leave old-tree reservation');
+        // Foreign reservations are never released, even when moving away.
+        const moved = loadRun(), newFile = leasePath(moved.tasks[0]);
+        assert(writerLease({...moved,id:'foreign'}, moved.tasks[0]));
+        const foreign = fs.readFileSync(newFile);
+        await runCommand('move', {_:['a'], cwd:task.cwd});
+        assert.deepEqual(fs.readFileSync(newFile), foreign);`;
+      const result = spawnSync(process.execPath, ["--input-type=module", "-e", source], { env: f.env, encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(f.state().tasks[0].cwd, original.tasks[0].cwd);
+      assert(!f.calls().some((c) => ["start", "prompt", "read", "close"].includes(c.action)));
+    } finally { f.clean(); }
+  });
+
+  test("full parked pool identifies a safe close; cancelled dependencies identify the blocked task", () => {
+    const f = fixture();
+    try {
+      f.ok(["run", "phase", "explore", "--cap", "1"]);
+      f.queue("old"); f.ok(["run", "next"]);
+      const w = f.state().workers[0]; f.complete(w); f.ok(["run", "accept", w.pane, "--evidence", "checked"]);
+      f.queue("fresh");
+      const full = f.ok(["run", "next"]);
+      assert.match(full, /parked pool full/); assert(full.includes(`herdr-axi run close ${w.pane}`));
+      assert.doesNotMatch(full, /herdr-axi run status/);
+      f.ok(["run", "close", w.pane]); f.ok(["run", "next"]);
+      assert.equal(f.state().tasks[1].state, "running");
+      const fresh = f.state().workers.find((p) => !p.closed); f.complete(fresh);
+      f.ok(["run", "accept", fresh.pane, "--evidence", "checked"]);
+      assert(f.ok(["run", "next"]).includes(`herdr-axi run close ${fresh.pane}`));
+      f.ok(["run", "close", fresh.pane]);
+      assert.match(f.ok(["run", "next"]), /herdr-axi run finish/);
+      f.queue("cancelled"); f.queue("dependent", "dependent", "cancelled");
+      f.ok(["run", "cancel", "cancelled"]);
+      const blocked = f.ok(["run", "next"]);
+      assert.match(blocked, /unaccepted dependency/); assert.match(blocked, /herdr-axi run cancel dependent/);
+      assert.equal(f.state().tasks.find((t) => t.id === "dependent").state, "queued");
     } finally { f.clean(); }
   });
 
@@ -774,7 +946,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       f.queue("fresh"); f.queue("reuse", "old");
       const result = f.ok(["run", "next"]);
       assert.match(result, /worktree busy/);
-      assert(result.includes(w.pane)); assert.match(result, /herdr-axi read/);
+      assert(result.includes(w.pane)); assert.match(result, /herdr-axi run move/);
       assert.match(f.ok(["run", "status"]), /parkedAttention/);
       assert.equal(f.state().tasks[1].state, "running");
       assert.equal(f.state().tasks[2].state, "queued");

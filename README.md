@@ -26,8 +26,8 @@ files are changed.
 
 ## Start a managed run
 
-Run from the **orchestrator's own Herdr pane**. Prepare a task file outside the
-project: bounded scope, acceptance criteria, required checks.
+Run from the **orchestrator's own Herdr pane**. Pass the task inline: bounded
+scope, acceptance criteria, required checks. No project task document needed.
 Start directly with `run init`: no fleet, config, environment or layout preflight.
 It resolves the owner, loads policy and returns worker roles plus queue syntax.
 For a read-only investigation, choose an `access: read` role and `--area .`.
@@ -37,13 +37,14 @@ herdr-axi run init --project /path/to/project
 export HERDR_AXI_RUN='/path/returned/by/init'
 herdr-axi run phase build
 herdr-axi run queue parser --role implementer --cwd /path/to/worktree \
-  --area src/parser --prompt-file /path/to/parser-task.txt
+  --area src/parser --prompt 'Fix parser edge cases; run parser tests; report checks.'
 herdr-axi run next
 ```
 
 `next` reserves available slots and starts eligible workers concurrently; matching
 accepted workers can be reused. Worker tabs: `<task-id> · <kind>`, 75% agent / 25%
 monitor by default. Keep `HERDR_AXI_RUN` in subsequent calls.
+Long assignments: `--prompt-file /external/task.txt` instead of `--prompt`.
 
 **While workers run, continue independent work.** Use `run inbox` for results,
 `read` for a specific diagnosis—not repeated inbox/read/status polling.
@@ -68,7 +69,7 @@ herdr-axi run inbox
 herdr-axi read w1:pP                     # only if the summary is insufficient
 # Review the actual changes and required checks, then choose:
 herdr-axi run accept w1:pP --evidence 'review and test results'
-# OR: herdr-axi run revise w1:pP --prompt-file /path/to/fix-task.txt
+# OR: herdr-axi run revise w1:pP --prompt 'Fix the failing edge case; rerun parser tests.'
 ```
 
 Acceptance is explicit—not inferred from an idle terminal. Continue with `run next`
@@ -90,6 +91,17 @@ or change phase. At the end, `run close <pane>` for each accepted worker, then
 - `sharedReadWorktree: true`: optional read/write overlap **within one run**;
   instruction-only read access, not enforced isolation. Final verification should
   depend on accepted writer tasks via `--after task-id,task-id`.
+
+**Worktree busy:** a reader is not sandboxed; a subtree is not an isolated worktree.
+Do not close or dispatch to the blocking pane. Continue independent work, or move
+the queued task: `run move <task-id> --cwd <existing-separate-worktree>`.
+Role, prompt, phase, dependencies and relative area stay intact; `next` rechecks
+conflicts. Check absolute paths in the preserved prompt before starting.
+The conflict response also offers executable Git snapshot commands; these require
+permission to change Git metadata. **HEAD only**:
+dirty/untracked work is excluded. Not suitable for reviewing in-flight changes.
+External worktrees remain yours to remove with Git after worker closure; no force.
+Retry `next` only after resolving the constraint, not after another status/read.
 
 | Phase | Default active-task cap |
 | --- | ---: |
