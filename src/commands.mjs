@@ -40,36 +40,42 @@ const nextSteps = (f) => {
   for (const state of ["blocked", "unknown", "done"])
     if (f[state].length) return [`herdr-axi read ${f[state][0].pane}`];
   if (f.working.length) return [`herdr-axi wait ${f.working[0].pane} --until idle`];
-  if (f.idle.length) return [`herdr-axi dispatch ${f.idle[0].pane} "<task>"`];
-  return ["herdr agent start --help"];
+  if (f.idle.length) return [loadRun() ? "herdr-axi run next" : `herdr-axi read ${f.idle[0].pane}`];
+  return [loadRun() ? "herdr-axi run next" : "herdr-axi run init"];
 };
+
+const discovery = { scope: "global-discovery; ownership not implied" };
 
 const brief = (rows) => rows.map((a) => a.pane);
 
 export function home() {
   if (loadRun()) return runStatus();
   const f = fleet();
-  if (!f.total) return { fleet: "0 agents", help: ["No live herdr agents.", "Startup usage: herdr agent start --help"] };
+  if (!f.total) return { ...discovery, fleet: "0 agents", help: ["herdr-axi run init", "herdr-axi run --help"] };
   return {
+    ...discovery,
     fleet: `${f.total} agents: ` + STATES.filter((s) => f.counts[s]).map((s) => `${f.counts[s]} ${s}`).join(", "),
     ...(f.blocked.length ? { blocked: brief(f.blocked) } : {}),
     ...(f.working.length ? { working: brief(f.working) } : {}),
     ...(f.idle.length ? { idle: brief(f.idle) } : {}),
     ...(f.done.length ? { done: brief(f.done) } : {}),
     ...(f.unknown.length ? { unknown: brief(f.unknown) } : {}),
-    help: nextSteps(f),
+    help: ["herdr-axi run init", ...nextSteps(f)],
   };
 }
 
 export function agents(args) {
   const o = parseArgs(args, { state: "string", kind: "string", all: "boolean" });
+  const scoped = !!loadRun() && !o.all;
   if (o.state && !STATES.includes(o.state))
     throw new AxiError(`invalid state: ${o.state}`, "INVALID_STATE", [`Valid: ${STATES.join(", ")}`, "herdr-axi agents --help"]);
   let rows = listAgents({ all: o.all });
+  const issues = rows.issues ?? [];
   if (o.state) rows = rows.filter((a) => a.state === o.state);
   if (o.kind) rows = rows.filter((a) => a.kind === o.kind);
-  if (!rows.length) return { agents: "0 matching agents", help: ["Widen the filter, or: herdr-axi agents"] };
-  return { agents: rows.map(({ name, kind, state, pane }) => ({ name, kind, state, pane })), help: nextSteps(fleet(rows)) };
+  if (issues.length) return { agents: rows.map(({ name, kind, state, pane }) => ({ name, kind, state, pane })), ownershipIssues: issues.slice(0, 8), ...(issues.length > 8 ? { moreIssues: issues.length - 8 } : {}), help: ["herdr-axi run status", "herdr-axi agents --all", ...issues.filter((e) => e.pane !== "unresolved").slice(0, 1).map((e) => `env HERDR_AXI_RUN= herdr-axi read ${e.pane} --raw`)] };
+  if (!rows.length) return { ...(!scoped ? discovery : {}), agents: "0 matching agents", help: ["herdr-axi agents", scoped ? "herdr-axi run next" : "herdr-axi run init"] };
+  return { ...(!scoped ? discovery : {}), agents: rows.map(({ name, kind, state, pane }) => ({ name, kind, state, pane })), help: scoped ? nextSteps(fleet(rows)) : [loadRun() ? "herdr-axi run status" : "herdr-axi run init", "herdr-axi run --help"] };
 }
 
 export function fleetCmd(args = []) {
@@ -77,7 +83,7 @@ export function fleetCmd(args = []) {
   if (o._.length) throw new AxiError("fleet takes no arguments", "INVALID_VALUE", ["herdr-axi fleet --help"]);
   if (loadRun() && !o.all) return runStatus();
   const f = fleet(listAgents({ all: o.all }));
-  return { total: f.total, counts: f.counts, blocked: brief(f.blocked), working: brief(f.working), idle: brief(f.idle), done: brief(f.done), unknown: brief(f.unknown), help: nextSteps(f) };
+  return { ...discovery, total: f.total, counts: f.counts, blocked: brief(f.blocked), working: brief(f.working), idle: brief(f.idle), done: brief(f.done), unknown: brief(f.unknown), help: [loadRun() ? "herdr-axi run status" : "herdr-axi run init", "herdr-axi run --help"] };
 }
 
 export function read(args) {
@@ -173,9 +179,9 @@ export function watch(args = []) {
 export function run(args) {
   const [action = "status", ...rest] = args;
   const specs = {
-    init: { dir: "string", owner: "string", project: "string" }, status: {}, inbox: {}, next: {}, unlock: {}, config: {}, history: { task: "string", all: "boolean" }, finish: {}, gc: {},
+    init: { dir: "string", owner: "string", project: "string" }, status: {}, inbox: {}, next: {}, unlock: {}, leases: {}, config: {}, history: { task: "string", all: "boolean" }, finish: {}, gc: {},
     queue: { kind: "string", role: "string", cwd: "string", area: "string", "prompt-file": "string", after: "string" },
-    phase: { cap: "string" }, accept: { evidence: "string" }, revise: { "prompt-file": "string" },
+    phase: { cap: "string" }, accept: { evidence: "string", "result-file": "string" }, revise: { "prompt-file": "string" },
     cancel: {}, close: {}, recover: {},
   };
   if (!Object.hasOwn(specs, action)) throw runError(`Unknown run action: ${action}`);

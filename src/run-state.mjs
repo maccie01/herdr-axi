@@ -5,6 +5,24 @@ import { AxiError } from "axi-sdk-js";
 export const PHASES = { explore: 4, build: 3, integrate: 2, verify: 2, fix: 1 };
 export const runError = (message, code = "RUN_ERROR") => new AxiError(message, code, ["herdr-axi run status", "herdr-axi run --help"]);
 export const runDir = () => process.env.HERDR_AXI_RUN ? path.resolve(process.env.HERDR_AXI_RUN) : null;
+const maintenance = [];
+export const takeRunWarnings = () => maintenance.splice(0);
+
+function taskHints(run) {
+  if (run.finishedAt || !/^[a-zA-Z0-9]+$/.test(run.workspace)) return;
+  const latest = new Map(run.tasks.filter((t) => /^axi-[a-z0-9-]+$/.test(t.name ?? "")).map((t) => [t.name, t]));
+  for (const t of latest.values()) {
+    const w = run.workers.find((w) => w.name === t.name && w.pane === t.pane);
+    if (w?.closed) continue;
+    const file = path.join(runDir(), "receipts", run.workspace, `${t.name}.task`);
+    const value = `herdr-task/1\t${t.state}\t${w?.generation || "-"}\n`;
+    try { if (fs.readFileSync(file, "utf8") === value) continue; } catch (e) { if (e.code !== "ENOENT") throw e; }
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    const temp = `${file}.${process.pid}.tmp`;
+    try { fs.writeFileSync(temp, value, { mode: 0o600 }); fs.renameSync(temp, file); }
+    finally { fs.rmSync(temp, { force: true }); }
+  }
+}
 
 export function loadRun(dir = runDir()) {
   if (!dir) return null;
@@ -42,14 +60,20 @@ export function changeRun(fn, { allowFinished = false } = {}) {
     fs.writeFileSync(temp, JSON.stringify(run) + "\n", { mode: 0o600 });
     fs.renameSync(temp, path.join(dir, "run.json"));
     committed = true;
-    for (const effect of afterCommit) effect();
+    // Publication has succeeded. Never turn maintenance failure into a failed
+    // transaction or retry its business operation. Surface it separately.
+    for (const effect of [...afterCommit, () => taskHints(run)]) {
+      try { effect(); }
+      catch (e) { maintenance.push({ code: e.code || "MAINTENANCE_FAILED", error: e.message.slice(0, 600) }); }
+    }
     return result;
   } finally {
     // Undo reservations before unlocking; crashes remain fail-closed.
     if (!committed) for (const undo of rollback.reverse()) { try { undo(); } catch { /* lease retained */ } }
-    fs.closeSync(fd);
-    fs.rmSync(temp, { force: true });
-    fs.rmSync(lock, { force: true });
+    for (const cleanup of [() => fs.closeSync(fd), () => fs.rmSync(temp, { force: true }), () => fs.rmSync(lock, { force: true })]) {
+      try { cleanup(); }
+      catch (e) { if (committed) maintenance.push({ code: e.code || "MAINTENANCE_FAILED", error: e.message.slice(0, 600) }); }
+    }
   }
 }
 
@@ -59,8 +83,14 @@ export function isSelf(pane, run = loadRun()) {
 
 export function ownedRows(rows, { all = false } = {}) {
   const run = loadRun();
-  const workers = run && !all ? ownedWorkers(run, { observe: true }) : [];
-  return rows.filter((a) => !isSelf(a.pane, run) && (all || !run || workers.some((w) => !w.closed && w.tab !== run.owner.tab && w.pane === a.pane && w.workspace === a.workspace && w.tab === a.tab && w.name === a.backendName && (!w.terminal || w.terminal === a.terminal) && (!w.session || w.session === a.session))));
+  const issues = [];
+  const workers = run && !all ? ownedWorkers(run, { issues }) : [];
+  const result = rows.filter((a) => !isSelf(a.pane, run) && (all || !run || workers.some((w) => !w.closed && w.tab !== run.owner.tab && w.pane === a.pane && w.workspace === a.workspace && w.tab === a.tab && w.name === a.backendName && (!w.terminal || w.terminal === a.terminal) && (!w.session || w.session === a.session))));
+  result.issues = issues.map((e) => {
+    const candidate = rows.find((a) => a.backendName === e.name && a.workspace === run.workspace && !isSelf(a.pane, run));
+    return { ...e, pane: e.pane || candidate?.pane || "unresolved" };
+  });
+  return result;
 }
 
 export function registeredWorker(run, task) {
@@ -73,13 +103,16 @@ export function registeredWorker(run, task) {
   return { name: task.name, pane: r.agent_pane, tab: r.tab_id, monitor: r.monitor_pane, workspace: run.workspace, kind: task.kind, cwd: task.cwd, model: task.model, effort: task.effort, policy: task.policy, contextWindowTokens: task.contextWindowTokens, receipt: r.receipt_file, generation: r.generation, stage: r.stage };
 }
 
-export function ownedWorkers(run, { observe = false } = {}) {
+export function ownedWorkers(run, { issues } = {}) {
   const workers = [...run.workers];
   for (const t of pending(run)) if (!workers.some((w) => w.name === t.name)) {
     try {
       const w = registeredWorker(run, t);
       if (w) workers.push(w);
-    } catch (e) { if (!observe) throw e; }
+    } catch (e) {
+      if (!issues) throw e;
+      issues.push({ task: t.id, name: t.name, pane: t.pane, error: e.message.slice(0, 400) });
+    }
   }
   return workers;
 }

@@ -69,7 +69,7 @@ if (process.argv[2] === "agent") {
     try {
       const r = spawnSync(process.execPath, [cli, ...args], {
         encoding: "utf8", timeout: 10000,
-        env: { ...process.env, HERDR_BIN: self, AXI_TEST_SCENARIO: scenario, AXI_TEST_LOG: log },
+        env: { ...process.env, HERDR_AXI_RUN: "", HERDR_BIN: self, AXI_TEST_SCENARIO: scenario, AXI_TEST_LOG: log },
       });
       assert.ifError(r.error);
       let calls = [];
@@ -161,12 +161,12 @@ if (process.argv[2] === "agent") {
       assert.equal(r.status, 0, r.output);
       for (let i = 0; i < 13; i++) assert(r.output.includes(`w1:p${i}`));
       assert.doesNotMatch(r.output, /Title with spaces/);
-      assert.match(r.output, /help\[1\]/);
+      assert.match(r.output, /help\[2\]/);
     }
     const r = run(["agents"], "many");
     assert.match(r.output, /Title with spaces/);
     const mixed = run(["fleet"], "mixed");
-    assert.match(mixed.output, /help\[1\]: "herdr-axi read w1:p4"/);
+    assert.match(mixed.output, /herdr-axi run init/);
     for (let i = 0; i < 5; i++) assert(mixed.output.includes(`w1:p${i}`));
   });
 
@@ -284,7 +284,7 @@ if (process.argv[2] === "agent") {
       const r = run(["fleet"], state);
       assert.equal(r.status, 0);
       assert.match(r.output, new RegExp(`${state}\\[1\\]`));
-      assert.match(r.output, /herdr-axi read w1:pTEST/);
+      assert.match(r.output, /herdr-axi run init/);
     }
     assert.match(run([], "empty").output, /0 agents/);
     assert.match(run(["agents"], "empty").output, /0 matching agents/);
@@ -324,5 +324,19 @@ if (process.argv[2] === "agent") {
       assert(r.output.endsWith("\n"));
     }
     assert.match(run(["--help"]).output, /pane IDs.*never titles/);
+  });
+
+  test("discovery and help direct delegation through managed runs, never arbitrary idle dispatch or raw startup", () => {
+    for (const args of [[], ["agents"], ["fleet"]]) for (const scenario of ["idle", "empty"]) {
+      const r = run(args, scenario);
+      assert.equal(r.status, 0, r.output); assert.match(r.output, /global-discovery; ownership not implied/);
+      assert.match(r.output, /herdr-axi run init/); assert.doesNotMatch(r.output, /herdr agent start|herdr-axi dispatch/);
+      assert(r.calls.every((c) => c[1] === "list"));
+    }
+    const help = run(["--help"]);
+    assert.match(help.output, /run next owns startup, layout and limits/);
+    assert.match(help.output, /Do not create worker panes or call raw herdr agent start\/prompt/);
+    assert.doesNotMatch(help.output, /Startup\/layout:|herdr agent start --help/);
+    assert.equal(help.calls.length, 0);
   });
 }

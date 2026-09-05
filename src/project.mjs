@@ -74,29 +74,64 @@ export function projectConfig(cwd) {
   return { project, configFile: fs.existsSync(file) ? file : null, config: validateConfig(input) };
 }
 
-// Shared across runs; fail closed after crashes. A lease is released only by
-// its recorded task, after acceptance or verified disappearance of its panes.
+export const leasePath = (task) => path.join(stateRoot(), "writers", hash(task.worktree || task.cwd) + ".json");
+
+function leaseRecord(file) {
+  let record;
+  try { record = JSON.parse(fs.readFileSync(file, "utf8")); }
+  catch (e) { if (e.code === "ENOENT") return null; throw runError(`Cannot verify lease ${file}: ${e.message}`, "LEASE_UNVERIFIED"); }
+  if (!record?.run || !Object.hasOwn(record, "directory") || (!Array.isArray(record.holders) && !record.task)) throw runError(`Cannot verify lease ${file}: invalid record; inspect with herdr-axi run leases`, "LEASE_UNVERIFIED");
+  const holders = record.holders ?? [{ task: record.task, access: "write", shared: false }];
+  if (!Array.isArray(holders) || !holders.length || holders.some((h) => !h?.task || !["read", "write"].includes(h.access) || typeof h.shared !== "boolean")) throw runError(`Cannot verify lease ${file}: invalid holders`, "LEASE_UNVERIFIED");
+  return { ...record, holders };
+}
+
+// One owner run per worktree. Its run.lock serializes holder changes; other runs
+// can only acquire after the last holder releases. Read sharing is within that
+// owner run, never an invisible opt-out from the cross-run lease protocol.
 export function writerLease(run, task, release = false) {
-  if (task.access === "read" && run.config?.sharedReadWorktree) return true;
-  const dir = path.join(stateRoot(), "writers");
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const file = path.join(dir, hash(task.worktree || task.cwd) + ".json");
-  const value = { run: run.id, directory: process.env.HERDR_AXI_RUN ? path.resolve(process.env.HERDR_AXI_RUN) : null, task: task.id, worktree: task.worktree || task.cwd };
+  const file = leasePath(task);
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const holder = { task: task.id, access: task.access || "write", shared: !!run.config?.sharedReadWorktree };
+  const value = { schema: 2, run: run.id, directory: process.env.HERDR_AXI_RUN ? path.resolve(process.env.HERDR_AXI_RUN) : null, worktree: task.worktree || task.cwd, holders: [holder] };
   if (!release) {
     try { fs.writeFileSync(file, JSON.stringify(value), { flag: "wx", mode: 0o600 }); return true; }
-    catch (e) {
-      if (e.code !== "EEXIST") throw e;
-      // A queued task cannot have launched. Reclaim its own reservation after
-      // an interrupted transaction, never another run/task's lease.
-      let old;
-      try { old = JSON.parse(fs.readFileSync(file, "utf8")); }
-      catch { return false; } // Unreadable reservation blocks only this worktree.
-      return task.state === "queued" && old?.run === value.run && old.task === value.task && old.directory === value.directory;
-    }
+    catch (e) { if (e.code !== "EEXIST") throw e; }
   }
+  let old;
+  try { old = leaseRecord(file); }
+  catch (e) { if (!release && e.code === "LEASE_UNVERIFIED") return false; throw e; }
+  if (!old) return release;
+  if (old.run !== value.run || old.directory !== value.directory) return false;
+  if (release) old.holders = old.holders.filter((h) => h.task !== task.id);
+  else {
+    if (old.holders.some((h) => h.task === task.id)) return task.state === "queued";
+    if (!holder.shared || old.holders.some((h) => !h.shared || (h.access === "write" && holder.access === "write"))) return false;
+    old.holders.push(holder);
+  }
+  if (!old.holders.length) { fs.unlinkSync(file); return true; }
+  const temp = `${file}.${process.pid}.tmp`;
   try {
-    const old = JSON.parse(fs.readFileSync(file, "utf8"));
-    if (old.run === value.run && old.task === value.task && (!old.directory || old.directory === value.directory)) fs.unlinkSync(file);
-  } catch (e) { if (e.code !== "ENOENT") throw e; }
+    fs.writeFileSync(temp, JSON.stringify({ ...value, holders: old.holders }), { mode: 0o600 });
+    fs.renameSync(temp, file);
+  } finally { fs.rmSync(temp, { force: true }); }
   return true;
+}
+
+export function leaseStatus(run) {
+  const entries = [];
+  for (const file of new Set(run.tasks.map(leasePath))) {
+    try {
+      const r = leaseRecord(file);
+      if (r) entries.push({ file, owner: r.run, tasks: r.holders.map((h) => h.task).slice(0, 8), state: r.run === run.id && r.directory === path.resolve(process.env.HERDR_AXI_RUN) ? "owned" : "foreign" });
+    } catch (e) { entries.push({ file, state: "unverified", error: e.message.slice(0, 400) }); }
+  }
+  return { leases: entries.slice(0, 8), ...(entries.length > 8 ? { more: entries.length - 8 } : {}), note: "Unknown ownership: inspect the exact file; never auto-delete. Completed own tasks: run recover <task-id>, including archived runs.", help: ["herdr-axi run --help"] };
+}
+
+export function hasRunLeases(run, directory) {
+  return run.tasks.some((t) => {
+    try { const lease = leaseRecord(leasePath(t)); return !!lease && lease.run === run.id && lease.directory === directory; }
+    catch { return true; } // Keep provenance when ownership cannot be established.
+  });
 }
