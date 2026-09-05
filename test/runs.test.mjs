@@ -117,9 +117,39 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
     };
     fs.writeFileSync(path.join(dir, "prompt"), "Write hello. Check its contents. Report file and check.");
     const project = path.join(dir, "project"); fs.mkdirSync(project);
-    ok(["run", "init", "--dir", env.HERDR_AXI_RUN, "--project", project]);
-    return { dir, env, execute, ok, asyncRun, state, write, calls, queue, complete, clean: () => fs.rmSync(dir, { recursive: true, force: true }) };
+    const initialized = ok(["run", "init", "--dir", env.HERDR_AXI_RUN, "--project", project]);
+    return { dir, env, execute, ok, asyncRun, state, write, calls, queue, complete, initialized, clean: () => fs.rmSync(dir, { recursive: true, force: true }) };
   }
+
+  test("init exposes worker choices and queue syntax; config is compact with explicit full detail", () => {
+    const f = fixture();
+    try {
+      assert.match(f.initialized, /roles\[2\]/);
+      assert.match(f.initialized, /implementer,copilot,gpt-5.6-sol,high,write/);
+      assert.match(f.initialized, /verifier,claude,opus,high,read/);
+      assert.match(f.initialized, /--prompt-file/);
+      assert.doesNotMatch(f.initialized, /herdr-axi run --help/);
+      assert.deepEqual(f.calls().map(({ group, action }) => [group, action]), [["agent", "get"]]);
+      const before = f.state(), calls = f.calls().length;
+      const compact = f.ok(["run", "config"]), full = f.ok(["run", "config", "--full"]);
+      assert.match(compact, /roles\[2\]/);
+      assert.match(compact, /herdr-axi run config --full/);
+      assert.match(full, /orchestrator:/);
+      assert.match(full, /retention:/);
+      assert(Buffer.byteLength(compact) < Buffer.byteLength(full));
+      assert.equal(f.calls().length, calls, "config must not inspect panes or models");
+      assert.deepEqual(f.state(), before);
+      const startHint = f.execute(["start", "--help"]);
+      assert.equal(startHint.status, 2);
+      assert.match(startHint.output, /help\[1\]: herdr-axi run queue --help/);
+      assert.equal(f.calls().length, calls);
+      assert.equal(f.execute(["run", "config", "--full=false"]).status, 1);
+      f.ok(["run", "queue", "review", "--role", "verifier", "--cwd", f.state().project, "--area", ".", "--prompt-file", path.join(f.dir, "prompt")]);
+      assert.equal(f.state().tasks[0].access, "read");
+      assert.equal(f.state().tasks[0].kind, "claude");
+      assert(!f.calls().some((c) => ["start", "create", "split", "prompt"].includes(c.action)), "init and queue do not start workers");
+    } finally { f.clean(); }
+  });
 
   test("run scopes ownership and excludes self from reads, waits, prompts and close", () => {
     const f = fixture();
@@ -142,6 +172,29 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       fs.writeFileSync(guard, "");
       assert.match(f.execute(["run", "phase", "fix"]).output, /RUN_BUSY/);
       fs.unlinkSync(guard);
+    } finally { f.clean(); }
+  });
+
+  test("compact role preview preserves custom contracts and discloses overflow", () => {
+    const f = fixture();
+    try {
+      const r = f.state();
+      r.limits.explore = 2;
+      r.config.roles.implementer.subagents = [{ role: "verifier", max: 1, when: "review only" }];
+      for (let i = 0; i < 10; i++) r.config.roles[`reviewer${i}`] = { ...r.config.roles.verifier, model: `model-${i}` };
+      f.write(r);
+      const compact = f.ok(["run", "config"]);
+      assert.match(compact, /roles\[8\]/);
+      assert.match(compact, /moreRoles: 4/);
+      assert.match(compact, /implementer,copilot,gpt-5.6-sol,high,write,1/);
+      assert.match(compact, /capacity: 2/);
+      assert.doesNotMatch(compact, /reviewer9/);
+      const full = f.ok(["run", "config", "--full"]);
+      assert.match(full, /reviewer9:/);
+      assert.match(full, /review only/);
+      assert.deepEqual(f.state(), r, "summaries never trim or rewrite stored contracts");
+      f.ok(["run", "queue", "last", "--role", "reviewer9", "--cwd", r.project, "--area", ".", "--prompt-file", path.join(f.dir, "prompt")]);
+      assert.equal(f.state().tasks[0].model, "model-9");
     } finally { f.clean(); }
   });
 

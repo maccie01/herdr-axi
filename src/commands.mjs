@@ -45,13 +45,14 @@ const nextSteps = (f) => {
 };
 
 const discovery = { scope: "global-discovery; ownership not implied" };
+const setupHelp = ["herdr-axi run init", "herdr-axi run init --help"];
 
 const brief = (rows) => rows.map((a) => a.pane);
 
 export function home() {
   if (loadRun()) return runStatus();
   const f = fleet();
-  if (!f.total) return { ...discovery, fleet: "0 agents", help: ["herdr-axi run init", "herdr-axi run --help"] };
+  if (!f.total) return { ...discovery, fleet: "0 agents", help: setupHelp };
   return {
     ...discovery,
     fleet: `${f.total} agents: ` + STATES.filter((s) => f.counts[s]).map((s) => `${f.counts[s]} ${s}`).join(", "),
@@ -60,7 +61,7 @@ export function home() {
     ...(f.idle.length ? { idle: brief(f.idle) } : {}),
     ...(f.done.length ? { done: brief(f.done) } : {}),
     ...(f.unknown.length ? { unknown: brief(f.unknown) } : {}),
-    help: ["herdr-axi run init", ...nextSteps(f)],
+    help: setupHelp,
   };
 }
 
@@ -74,8 +75,8 @@ export function agents(args) {
   if (o.state) rows = rows.filter((a) => a.state === o.state);
   if (o.kind) rows = rows.filter((a) => a.kind === o.kind);
   if (issues.length) return { agents: rows.map(({ name, kind, state, pane }) => ({ name, kind, state, pane })), ownershipIssues: issues.slice(0, 8), ...(issues.length > 8 ? { moreIssues: issues.length - 8 } : {}), help: ["herdr-axi run status", "herdr-axi agents --all", ...issues.filter((e) => e.pane !== "unresolved").slice(0, 1).map((e) => `env HERDR_AXI_RUN= herdr-axi read ${e.pane} --raw`)] };
-  if (!rows.length) return { ...(!scoped ? discovery : {}), agents: "0 matching agents", help: ["herdr-axi agents", scoped ? "herdr-axi run next" : "herdr-axi run init"] };
-  return { ...(!scoped ? discovery : {}), agents: rows.map(({ name, kind, state, pane }) => ({ name, kind, state, pane })), help: scoped ? nextSteps(fleet(rows)) : [loadRun() ? "herdr-axi run status" : "herdr-axi run init", "herdr-axi run --help"] };
+  if (!rows.length) return { ...(!scoped ? discovery : {}), agents: "0 matching agents", help: loadRun() ? ["herdr-axi run status"] : setupHelp };
+  return { ...(!scoped ? discovery : {}), agents: rows.map(({ name, kind, state, pane }) => ({ name, kind, state, pane })), help: scoped ? nextSteps(fleet(rows)) : loadRun() ? ["herdr-axi run status"] : setupHelp };
 }
 
 export function fleetCmd(args = []) {
@@ -83,7 +84,7 @@ export function fleetCmd(args = []) {
   if (o._.length) throw new AxiError("fleet takes no arguments", "INVALID_VALUE", ["herdr-axi fleet --help"]);
   if (loadRun() && !o.all) return runStatus();
   const f = fleet(listAgents({ all: o.all }));
-  return { ...discovery, total: f.total, counts: f.counts, blocked: brief(f.blocked), working: brief(f.working), idle: brief(f.idle), done: brief(f.done), unknown: brief(f.unknown), help: [loadRun() ? "herdr-axi run status" : "herdr-axi run init", "herdr-axi run --help"] };
+  return { ...discovery, total: f.total, counts: f.counts, blocked: brief(f.blocked), working: brief(f.working), idle: brief(f.idle), done: brief(f.done), unknown: brief(f.unknown), help: loadRun() ? ["herdr-axi run status"] : setupHelp };
 }
 
 export function read(args) {
@@ -182,7 +183,7 @@ export function watch(args = []) {
 export function run(args) {
   const [action = "status", ...rest] = args;
   const specs = {
-    init: { dir: "string", owner: "string", project: "string" }, status: {}, inbox: {}, next: {}, unlock: {}, leases: {}, config: {}, history: { task: "string", all: "boolean" }, finish: {}, gc: {},
+    init: { dir: "string", owner: "string", project: "string" }, status: {}, inbox: {}, next: {}, unlock: {}, leases: {}, config: { full: "boolean" }, history: { task: "string", all: "boolean" }, finish: {}, gc: {},
     queue: { kind: "string", role: "string", cwd: "string", area: "string", "prompt-file": "string", after: "string" },
     phase: { cap: "string" }, accept: { evidence: "string", "result-file": "string" }, revise: { "prompt-file": "string" },
     cancel: {}, close: {}, recover: {},

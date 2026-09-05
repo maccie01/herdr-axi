@@ -28,6 +28,9 @@ files are changed.
 
 Run from the **orchestrator's own Herdr pane**. Prepare a task file outside the
 project: bounded scope, acceptance criteria, required checks.
+Start directly with `run init`: no fleet, config, environment or layout preflight.
+It resolves the owner, loads policy and returns worker roles plus queue syntax.
+For a read-only investigation, choose an `access: read` role and `--area .`.
 
 ```sh
 herdr-axi run init --project /path/to/project
@@ -106,7 +109,9 @@ policy prevents reuse and occupies a needed slot.
 
 ## Command reference
 
-`herdr-axi <command> --help` for full syntax; `herdr-axi run --help` for all run actions.
+`herdr-axi run --help`: short workflow. `herdr-axi run <action> --help`: one step
+only (for example `run queue --help`). `herdr-axi run --help --full`: all run actions.
+Other commands: `herdr-axi <command> --help`. There is no standalone `start` command.
 
 | Command | Purpose |
 | --- | --- |
@@ -165,7 +170,10 @@ response with `maintenance` means state was saved but follow-up cleanup needs at
 ## Project policy
 
 Track one [`.herdr-axi.json`](.herdr-axi.json) at the Git worktree root. `run init`
-snapshots it; `run config` shows the effective policy. Edits apply to **new runs**.
+snapshots it; `run config` shows worker roles and current limits (first eight roles,
+with an overflow count). `run config --full` shows the complete effective policy,
+including native review contracts and owner settings. No config call is required
+before queueing. Edits apply to **new runs**.
 
 | Setting | Default / behavior |
 | --- | --- |

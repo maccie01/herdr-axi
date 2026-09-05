@@ -65,6 +65,12 @@ export function validateConfig(input = {}) {
 }
 
 export const nativeSlots = (role) => (role.subagents ?? []).reduce((n, s) => n + s.max, 0);
+export function workerRoleSummary(config) {
+  const roles = Object.entries(config.roles).filter(([name]) => name !== "orchestrator")
+    .map(([role, { kind, model, effort, access, subagents }]) => ({ role, kind, model, effort, access, native: nativeSlots({ subagents }) }));
+  return { roles: roles.slice(0, 8), ...(roles.length > 8 ? { moreRoles: roles.length - 8 } : {}) };
+}
+
 export function projectConfig(cwd) {
   const project = worktree(cwd);
   const file = path.join(project, ".herdr-axi.json");
