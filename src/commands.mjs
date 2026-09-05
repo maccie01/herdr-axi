@@ -184,13 +184,14 @@ export function run(args) {
   const [action = "status", ...rest] = args;
   const specs = {
     init: { dir: "string", owner: "string", project: "string" }, status: {}, inbox: {}, next: {}, unlock: {}, leases: {}, config: { full: "boolean" }, history: { task: "string", all: "boolean" }, finish: {}, gc: {},
-    queue: { kind: "string", role: "string", cwd: "string", area: "string", "prompt-file": "string", after: "string" },
-    phase: { cap: "string" }, accept: { evidence: "string", "result-file": "string" }, revise: { "prompt-file": "string" },
+    queue: { kind: "string", role: "string", cwd: "string", area: "string", prompt: "string", "prompt-file": "string", after: "string" },
+    move: { cwd: "string", area: "string" },
+    phase: { cap: "string" }, accept: { evidence: "string", "result-file": "string" }, revise: { prompt: "string", "prompt-file": "string" },
     cancel: {}, close: {}, recover: {},
   };
   if (!Object.hasOwn(specs, action)) throw runError(`Unknown run action: ${action}`);
   const o = parseArgs(rest, specs[action]);
-  const count = ["queue", "phase", "accept", "revise", "cancel", "close", "recover"].includes(action) ? 1 : 0;
+  const count = ["queue", "move", "phase", "accept", "revise", "cancel", "close", "recover"].includes(action) ? 1 : 0;
   if (o._.length !== count) throw runError(`${action} takes ${count} positional argument(s)`);
   return runCommand(action, o).catch((e) => { throw e instanceof AxiError ? e : runError(e.message); });
 }

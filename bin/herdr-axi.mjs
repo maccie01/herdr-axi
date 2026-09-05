@@ -27,10 +27,17 @@ const RUN_HELP = {
   config: `herdr-axi run config [--full]
   Default: worker roles and current limits. --full: complete effective snapshot, including owner, native review contracts, context and retention.
   Already loaded at init; no config preflight needed before queue.`,
-  queue: `herdr-axi run queue <task-id> --role <role> --cwd <path> --area <relative-path> --prompt-file <path> [--after task-id,task-id]
+  queue: `herdr-axi run queue <task-id> --role <role> --cwd <path> --area <relative-path> --prompt "<task and checks>" [--after task-id,task-id]
+  Alternative: --prompt-file <path>. Exactly one; no task document needed in the project.
   Legacy --kind claude|codex|copilot instead of --role. Explicit acceptance criteria. 128 tasks/run.
   Read-only investigation: choose an access:read role from init; --area . for the whole tree.
   Then: herdr-axi run next. No separate config or layout call.`,
+  move: `herdr-axi run move <queued-task-id> --cwd <existing-worktree> [--area <relative-path>]
+  Preserve prompt, role, dependencies and phase; relocate the relative area. Queued tasks without resources only.
+  No copy or startup; next rechecks conflicts. Check absolute paths in the preserved prompt.
+  Worktree busy: even read roles reserve; --area/subdirectories do not isolate. Never close an unowned blocker.
+  Use a separate worktree, or continue local work. next provides optional Git HEAD snapshot commands: excludes dirty/untracked changes.
+  Remove externally created worktrees with Git only after owned worker closure; no force.`,
   next: `herdr-axi run next
   Reserve free slots; concurrent starts; reuse matching kind/cwd/policy. One writer per worktree.
   Separate worktrees for parallel work; sharedReadWorktree opts into instruction-only verifier overlap within this run only.
@@ -44,7 +51,7 @@ const RUN_HELP = {
   accept: `herdr-axi run accept <pane> --evidence "review and checks" [--result-file FILE]
   Current generation proof + settlement + saved result + explicit review. No silent report loss.
   Missing/corrupt inbox: retry inbox, or supply a reviewed replacement (1..3500 chars); recorded as coordinator-replacement.`,
-  revise: `herdr-axi run revise <pane> --prompt-file <fix-task>
+  revise: `herdr-axi run revise <pane> --prompt "<fix and checks>"  # or --prompt-file <file>
   Same worker/slot; retain revision history. Max eight revisions, then explicitly re-scope.`,
   phase: `herdr-axi run phase explore|build|integrate|verify|fix [--cap 1..16]
   Defaults 4/3/2/2/1. Never narrow below outstanding work; retire surplus accepted workers.
@@ -78,12 +85,12 @@ const COMMAND_HELP = {
   watch: "herdr-axi watch [--timeout-ms N]\n  Selected run: one blocking wait, up to 30s. No prompt injection.\n  Notification workflow: one watch --timeout-ms 1800000 in a harness-native tracked background job with completion delivery; then continue your own work.\n  Keep its job handle; never start a duplicate. A returned PID/session ID alone does not prove notification delivery.\n  Without callback support, do independent work first; block only when worker results are needed. No nohup, shell &, or fake notification promises.\n  reason:timeout = no relevant change, compact response; continue independent work or wait again if dependent.\n  reason:attention/state-change = act on the result/help, not another polling loop.\n  Telemetry timestamp/percentage churn alone does not wake watch; new warning levels do.",
   run: `herdr-axi run init --project <path>    # auto-detect owner; load policy; return roles
 Export returned HERDR_AXI_RUN; keep it in subsequent calls.
-herdr-axi run queue <task-id> --role <role> --cwd <worktree> --area <relative-path> --prompt-file <file>
+herdr-axi run queue <task-id> --role <role> --cwd <worktree> --area <relative-path> --prompt "<task and checks>"
 herdr-axi run next                     # reserve slots; start/reuse owned workers
 Continue independent work. One notification-backed watch if supported; otherwise block only when dependent.
-Results: run inbox -> review -> run accept <pane> --evidence "<checks>" OR run revise <pane> --prompt-file <file>.
+Results: run inbox -> review -> run accept <pane> --evidence "<checks>" OR run revise <pane> --prompt "<fix>".
 Finish: run close <accepted-pane>, then run finish.
-One writer/worktree; read-only roles reserve too unless explicitly configured. Never auto-approve dialogs.
+One writer/worktree; readers reserve too. Busy: run move --help. Never auto-approve dialogs.
 No fleet/config/layout preflight. No raw worker startup. Phases explore/build/integrate/verify/fix: 4/3/2/2/1.
 Details: herdr-axi run <action> --help. All actions: herdr-axi run --help --full.`,
 };

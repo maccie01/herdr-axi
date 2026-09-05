@@ -15,6 +15,25 @@ const idOK = (id) => /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,39}$/.test(id ?? "");
 const liveAgent = (pane) => runHerdr(["agent", "get", pane]).agent;
 const callerPane = () => process.env.HERDR_PANE_ID || runHerdr(["pane", "current", "--current"]).pane?.pane_id;
 const overlaps = (a, b) => a === b || a.startsWith(b + path.sep) || b.startsWith(a + path.sep);
+const quote = (s) => `'${s.replaceAll("'", "'\\''")}'`;
+
+function taskPrompt(o) {
+  if ((o.prompt !== undefined) === (o["prompt-file"] !== undefined)) throw runError("Provide exactly one of --prompt TEXT or --prompt-file PATH");
+  const prompt = o.prompt ?? fs.readFileSync(o["prompt-file"], "utf8");
+  if (!prompt.trim() || Buffer.byteLength(prompt) > 64000) throw runError("Task prompt must be nonempty and at most 64KB");
+  return prompt;
+}
+
+function taskLocation(cwd, relativeArea) {
+  cwd = fs.realpathSync(cwd);
+  if (!fs.statSync(cwd).isDirectory()) throw runError("--cwd must be a directory");
+  const area = path.resolve(cwd, relativeArea);
+  if (cwd !== area && !area.startsWith(cwd + path.sep)) throw runError("--area must be within --cwd");
+  const tree = worktree(cwd);
+  const state = fs.realpathSync(runDir());
+  if (state === tree || state.startsWith(tree + path.sep)) throw runError("Worker worktree must not contain run state", "STATE_IN_PROJECT");
+  return { cwd, area, worktree: tree };
+}
 const launcherAlive = (pid) => {
   if (!Number.isSafeInteger(pid) || pid <= 0) return false;
   try { process.kill(pid, 0); return true; } catch (e) { return e.code !== "ESRCH"; }
@@ -228,8 +247,8 @@ async function executeRunCommand(action, o) {
     catch (e) { if (e.code === "EEXIST") throw runError("Run already exists; select it, do not overwrite it"); throw e; }
     const roles = workerRoleSummary(run.config);
     return { run: dir, owner: ownerPane, workspace: run.workspace, project: project.project, config: project.configFile || "defaults", phase: run.phase, capacity: limit(run), ...roles, cleanup: collectArchives(project.project),
-      queue: "herdr-axi run queue TASK --role ROLE --cwd WORKTREE --area AREA --prompt-file FILE",
-      note: "Replace queue placeholders; bounded external prompt. Roles/policy already loaded, no config/fleet/layout preflight. Then herdr-axi run next.",
+      queue: 'herdr-axi run queue TASK --role ROLE --cwd WORKTREE --area AREA --prompt "task and checks"',
+      note: "Replace queue placeholders; inline task and checks, no project task file. Roles/policy already loaded, no config/fleet/layout preflight. Then herdr-axi run next.",
       help: [`export HERDR_AXI_RUN='${dir.replaceAll("'", "'\\''")}'`, ...(roles.moreRoles ? ["herdr-axi run config --full"] : [])] };
   }
   const run = loadRun();
@@ -321,21 +340,34 @@ async function executeRunCommand(action, o) {
     const role = o.role ? (run.config ?? DEFAULT_CONFIG).roles[o.role] : null;
     if (o.role && (!role || o.role === "orchestrator" || (o.kind && o.kind !== role.kind))) throw runError("Unknown/owner role or conflicting --kind", "CONFIG_INVALID");
     const kind = role?.kind ?? o.kind;
-    if (!idOK(id) || !["claude", "codex", "copilot"].includes(kind) || !o.cwd || !o["prompt-file"] || !o.area) throw runError("queue needs a short task ID, --role or --kind, --cwd, --area and --prompt-file");
-    const cwd = fs.realpathSync(o.cwd);
-    const area = path.resolve(cwd, o.area);
-    if (!overlaps(cwd, area) || (cwd !== area && !area.startsWith(cwd + path.sep))) throw runError("--area must be within --cwd");
-    const prompt = fs.readFileSync(o["prompt-file"], "utf8");
-    if (!prompt.trim() || Buffer.byteLength(prompt) > 64000) throw runError("Task prompt must be nonempty and at most 64KB");
+    if (!idOK(id) || !["claude", "codex", "copilot"].includes(kind) || !o.cwd || !o.area) throw runError("queue needs a short task ID, --role or --kind, --cwd, --area and --prompt TEXT or --prompt-file PATH");
+    const location = taskLocation(o.cwd, o.area);
+    const prompt = taskPrompt(o);
     const deps = o.after ? o.after.split(",") : [];
-    const tree = worktree(cwd);
-    if (runDir() === tree || runDir().startsWith(tree + path.sep)) throw runError("Worker worktree must not contain run state", "STATE_IN_PROJECT");
     changeRun((r) => {
       if (r.tasks.length >= 128 || r.tasks.some((t) => t.id === id)) throw runError("Duplicate task ID or 128-task run limit");
       if (deps.some((id) => !r.tasks.some((t) => t.id === id))) throw runError("Dependencies must reference existing tasks");
-      r.tasks.push({ id, ...(role || {}), kind, role: o.role, policy: hash(JSON.stringify(role || { kind, access: "write" })), access: role?.access ?? "write", nativeSlots: role ? nativeSlots(role) : 0, worktree: tree, cwd, area, prompt, deps, phase: r.phase, state: "queued" });
+      r.tasks.push({ id, ...(role || {}), kind, role: o.role, policy: hash(JSON.stringify(role || { kind, access: "write" })), access: role?.access ?? "write", nativeSlots: role ? nativeSlots(role) : 0, ...location, prompt, deps, phase: r.phase, state: "queued" });
     });
     return { queued: id, help: ["herdr-axi run next"] };
+  }
+  if (action === "move") {
+    if (!o.cwd) throw runError("move requires --cwd pointing to an existing isolated worktree");
+    const original = run.tasks.find((t) => t.id === o._[0]);
+    if (!original || original.state !== "queued" || original.name || original.pane) throw runError("Only queued tasks without registered resources can move");
+    const location = taskLocation(o.cwd, o.area ?? path.relative(original.cwd, original.area));
+    const result = changeRun((r) => {
+      const t = r.tasks.find((t) => t.id === o._[0]);
+      if (!t || t.state !== "queued" || t.name || t.pane) throw runError("Only queued tasks without registered resources can move");
+      if (t.cwd !== original.cwd || t.area !== original.area) throw runError("Task moved concurrently; inspect before retrying");
+      // No live work can hold this reservation. Release before publication so
+      // failure leaves a repeatable queued task, not an orphaned old-tree lease.
+      writerLease(r, t, true);
+      (r.events ??= []).push({ at: new Date().toISOString(), task: t.id, action: "move", from: t.cwd, to: location.cwd });
+      Object.assign(t, location);
+      return { moved: t.id, cwd: t.cwd, area: t.area, phase: t.phase, help: [t.phase === r.phase ? "herdr-axi run next" : `herdr-axi run phase ${t.phase}`] };
+    });
+    return { ...result, note: "Prompt, role, phase and dependencies preserved; check any absolute paths in the prompt. No worker started; next rechecks conflicts. External worktree cleanup remains yours after worker closure." };
   }
   if (action === "phase") {
     const phase = o._[0];
@@ -353,7 +385,7 @@ async function executeRunCommand(action, o) {
       try { return await executeRunCommand("close", { _: [w.pane] }); }
       catch (e) { return { pane: w.pane, error: e.message.slice(0, 600) }; }
     }));
-    return { phase, capacity: cap, ...(retired.length ? { retired } : {}), help: ["herdr-axi run status"] };
+    return { phase, capacity: cap, ...(retired.length ? { retired } : {}), help: [retired.some((w) => w.error) ? "herdr-axi run inbox" : updated.tasks.some((t) => t.state === "queued" && t.phase === phase) ? "herdr-axi run next" : pending(updated).length ? "herdr-axi watch" : "herdr-axi run queue --help"] };
   }
   if (action === "cancel") {
     changeRun((r, { afterCommit }) => {
@@ -412,21 +444,31 @@ async function executeRunCommand(action, o) {
     return { recovered: worker.pane, help: ["herdr-axi watch"] };
   }
   if (action === "next") {
+    const trees = new Map();
+    const agentTree = (cwd) => {
+      if (!trees.has(cwd)) { try { trees.set(cwd, worktree(cwd)); } catch { trees.set(cwd, cwd); } }
+      return trees.get(cwd);
+    };
     const sharedReaders = new Set(run.config?.sharedReadWorktree ? pending(run).filter((t) => t.access === "read").map((t) => t.pane) : []);
-    const blockers = rows.filter((a) => a.kind && a.cwd && !run.workers.some((w) => w.pane === a.pane && (["idle", "done"].includes(a.state) || sharedReaders.has(a.pane)) && safeWorker(run, w, rows, { observe: true }))).map((a) => { let tree; try { tree = worktree(a.cwd); } catch { tree = a.cwd; } return { pane: a.pane, tree, shared: !!run.config?.sharedReadWorktree && pending(run).some((t) => t.pane === a.pane) && run.workers.some((w) => w.pane === a.pane && safeWorker(run, w, rows, { observe: true })) }; });
+    const blockers = rows.filter((a) => a.kind && a.cwd && !run.workers.some((w) => w.pane === a.pane && (["idle", "done"].includes(a.state) || sharedReaders.has(a.pane)) && safeWorker(run, w, rows, { observe: true }))).map((a) => ({ pane: a.pane, tree: agentTree(a.cwd), shared: !!run.config?.sharedReadWorktree && pending(run).some((t) => t.pane === a.pane) && run.workers.some((w) => w.pane === a.pane && safeWorker(run, w, rows, { observe: true })) }));
     const selection = changeRun((r, { rollback }) => {
       const selected = [], deferred = [];
       const defer = (t, reason, detail = {}) => deferred.push({ task: t.id, reason, ...detail });
+      const availableParked = () => r.workers.find((w) => !w.closed && !w.closing && !pending(r).some((t) => t.pane === w.pane) && [...r.tasks].reverse().find((t) => t.pane === w.pane)?.state === "accepted" && ["idle", "done"].includes(safeWorker(r, w, rows, { observe: true })?.state));
       for (const t of r.tasks.filter((t) => t.state === "queued" && t.phase === r.phase)) {
         if (pending(r).length >= limit(r)) { defer(t, "primary capacity"); continue; }
-        if (t.deps.some((id) => r.tasks.find((d) => d.id === id)?.state !== "accepted")) { defer(t, "unaccepted dependency"); continue; }
+        const dependency = t.deps.map((id) => r.tasks.find((d) => d.id === id) ?? { id, state: "missing" }).find((d) => d.state !== "accepted");
+        if (dependency) { defer(t, "unaccepted dependency", { dependency: dependency.id, state: dependency.state, help: dependency.state === "cancelled" ? `herdr-axi run cancel ${t.id}` : dependency.state === "queued" && dependency.phase !== r.phase ? `herdr-axi run phase ${dependency.phase}` : "herdr-axi run inbox" }); continue; }
         const exclusive = (task) => task.access !== "read" || !r.config?.sharedReadWorktree;
         const blocker = blockers.find((a) => a.tree === t.worktree && (exclusive(t) || !a.shared));
-        if ((blocker && (exclusive(t) || !blocker.shared)) || (exclusive(t) && pending(r).some((p) => exclusive(p) && ((p.worktree && p.worktree === t.worktree) || overlaps(p.area, t.area))))) { defer(t, "worktree busy", blocker ? { pane: blocker.pane, help: `env HERDR_AXI_RUN= herdr-axi read ${blocker.pane} --raw` } : {}); continue; }
+        if ((blocker && (exclusive(t) || !blocker.shared)) || (exclusive(t) && pending(r).some((p) => exclusive(p) && ((p.worktree && p.worktree === t.worktree) || overlaps(p.area, t.area))))) { defer(t, "worktree busy", { ...(blocker ? { pane: blocker.pane } : {}), worktree: t.worktree, cwd: t.cwd, access: t.access, help: "herdr-axi run move --help" }); continue; }
         if (pending(r).reduce((n, p) => n + (p.nativeSlots ?? 0), 0) + (t.nativeSlots ?? 0) > (r.config?.nativeSubagentLimit ?? 0)) { defer(t, "native capacity"); continue; }
         const reusable = r.workers.find((w) => !w.closed && !w.closing && w.kind === t.kind && w.cwd === t.cwd && w.policy === t.policy && !pending(r).some((p) => p.pane === w.pane) && ["idle", "done"].includes(safeWorker(r, w, rows, { observe: true })?.state));
         // Parked workers remain a bounded pool, even after a phase narrows.
-        if (!reusable && r.workers.filter((w) => !w.closed).length + pending(r).filter((p) => !p.pane).length >= limit(r)) { defer(t, "parked pool full; close an unused accepted worker"); continue; }
+        if (!reusable && r.workers.filter((w) => !w.closed).length + pending(r).filter((p) => !p.pane).length >= limit(r)) {
+          const parked = availableParked();
+          defer(t, "parked pool full; close an unused accepted worker", { help: parked ? `herdr-axi run close ${parked.pane}` : "herdr-axi run inbox" }); continue;
+        }
         if (!writerLease(r, t)) { defer(t, "worktree lease held or unverified", { help: "herdr-axi run leases" }); continue; }
         rollback.push(() => writerLease(r, t, true));
         t.state = "starting";
@@ -437,10 +479,21 @@ async function executeRunCommand(action, o) {
         if (reusable) t.pane = reusable.pane;
         selected.push({ ...t });
       }
-      return { selected, deferred };
+      const otherPhases = [...new Set(r.tasks.filter((t) => t.state === "queued" && t.phase !== r.phase).map((t) => t.phase))];
+      const parked = availableParked();
+      const fallback = pending(r).length ? "herdr-axi run inbox" : otherPhases.length ? `herdr-axi run phase ${otherPhases[0]}` : parked ? `herdr-axi run close ${parked.pane}` : r.workers.some((w) => !w.closed) ? "herdr-axi run inbox" : r.tasks.length && r.tasks.every((t) => ["accepted", "cancelled"].includes(t.state)) ? "herdr-axi run finish" : "herdr-axi run queue --help";
+      return { selected, deferred, otherPhases, fallback };
     });
     const started = await Promise.all(selection.selected.map((t) => launch(t, run)));
-    return { started, ...(selection.deferred.length ? { deferred: selection.deferred.slice(0, 8), ...(selection.deferred.length > 8 ? { more: selection.deferred.length - 8 } : {}) } : {}), help: started.find((t) => t.help)?.help ?? [started.length ? "herdr-axi watch" : selection.deferred.find((t) => t.help)?.help ?? "herdr-axi run status"], note: !started.length ? "No eligible task; inspect deferred reasons or queued phases." : started.every((t) => t.state === "running") ? waitingNote : "Handle startup/delivery issues first; other workers may still be running." };
+    const { otherPhases } = selection;
+    const busy = selection.deferred.find((t) => t.reason === "worktree busy");
+    let isolation;
+    if (busy) {
+      const target = path.join(path.dirname(busy.worktree), ".herdr-axi-worktrees", `${run.id}-${busy.task}`);
+      const targetCwd = path.join(target, path.relative(busy.worktree, busy.cwd));
+      isolation = { task: busy.task, note: "Read access/--area: instructions, not isolation. Blocking pane: no control. Continue local work or move. Optional HEAD-only Git snapshot: excludes dirty/untracked changes; requires commit and permission for Git metadata writes. Use only if task scope allows.", snapshot: [`git -C ${quote(busy.worktree)} worktree add --detach ${quote(target)} HEAD`, `herdr-axi run move ${busy.task} --cwd ${quote(targetCwd)}`, "herdr-axi run next"], cleanupAfterClose: `git -C ${quote(busy.worktree)} worktree remove ${quote(target)}` };
+    }
+    return { started, ...(selection.deferred.length ? { deferred: selection.deferred.slice(0, 8), ...(selection.deferred.length > 8 ? { more: selection.deferred.length - 8 } : {}) } : {}), ...(isolation ? { isolation } : {}), ...(!started.length && otherPhases.length ? { queuedPhases: otherPhases } : {}), help: started.find((t) => t.help)?.help ?? [started.length ? "herdr-axi watch" : selection.deferred.find((t) => t.help)?.help ?? selection.fallback], note: !started.length ? "No eligible task. Resolve listed constraints or follow cleanup/phase help; no status/read polling. Other-phase tasks require an explicit phase change." : started.every((t) => t.state === "running") ? waitingNote : "Handle startup/delivery issues first; other workers may still be running." };
   }
   const pane = o._[0];
   const worker = run.workers.find((w) => w.pane === pane && !w.closed);
@@ -473,9 +526,8 @@ async function executeRunCommand(action, o) {
     return { accepted: task.id, pane, help: ["herdr-axi run next"] };
   }
   if (action === "revise") {
-    if (!o["prompt-file"] || !live || !["idle", "done"].includes(live.state) || !receipt(worker)?.complete) throw runError("revise needs --prompt-file and a completed current generation");
-    const prompt = fs.readFileSync(o["prompt-file"], "utf8");
-    if (!prompt.trim() || Buffer.byteLength(prompt) > 64000) throw runError("Fix prompt must be nonempty and at most 64KB");
+    if (!live || !["idle", "done"].includes(live.state) || !receipt(worker)?.complete) throw runError("revise needs a completed current generation");
+    const prompt = taskPrompt(o);
     const next = changeRun((r) => {
       const t = r.tasks.find((t) => t.id === task.id);
       if (t.state !== "running") throw runError("Only unaccepted results can be revised; queue new work after acceptance");

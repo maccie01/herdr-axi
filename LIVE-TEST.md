@@ -320,3 +320,24 @@ covered). Standalone Bash suite 41/41; Node syntax, README links/example syntax 
 An unsandboxed parallel Bash run also failed `idle completion cleanup` (surviving
 fake waiter); the isolated rerun passed. That intermittent cleanup failure remains
 unresolved; no engine changes in this pass.
+
+## Blocked delegation recovery (5 September 2026)
+
+Reproduced an idle foreign pane blocking a read-only verifier. Exclusion stays:
+read access and subdirectory scope are instructions, not isolation. `next` now
+explains the conflict and offers a scoped recovery rather than a foreign-pane read.
+Inline `queue/revise --prompt` avoids project task documents; queued `run move`
+preserves role, prompt, phase and dependencies and records the relocation.
+
+The regression executes the actual suggested shell commands against a real temporary
+Git repository/worktree, including a quoted source path and subtree cwd. HEAD snapshot verified;
+dirty/untracked source preserved; fake owned worker started/accepted/closed; worktree
+removed without force. No real Herdr agents or production runs touched.
+Additional coverage: ambiguous/oversized prompts, full parked pools, cancelled
+dependencies, phase/cleanup guidance, wrong owner, corrupt/foreign leases and failed
+publication. A new negative test exposed a pre-existing macOS `/var` → `/private/var`
+alias bypass of state-directory exclusion; both paths are now canonicalized.
+
+JS suite: 69/69; standalone Bash monitor suite: 41/41. Global executable exposes the new commands. No new dependencies,
+daemon or runtime files in projects. LLM adherence and provider startup remain
+unverified in this pass; automatic end-hook-to-orchestrator wakeup remains open.
