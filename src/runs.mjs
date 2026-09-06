@@ -381,7 +381,7 @@ async function executeRunCommand(action, o) {
     const roles = workerRoleSummary(run.config);
     return { run: dir, owner: ownerPane, workspace: run.workspace, project: project.project, config: project.configFile || "defaults", phase: run.phase, capacity: limit(run), ...roles, cleanup: collectArchives(project.project),
       selection: "Role supplies access/native limits. Explicit model request: add --kind claude --model claude-opus-5 --effort high. No config edit/new run needed. Worker budget != application API budget.",
-      note: "Next tool call: replace TASK/WORKTREE/task text below; role already selected (read-only: verifier). Export + queue together. --start schedules eligible tasks within caps; batch: omit --start, then next once. No fleet/help/config/layout/run.json preflight.",
+      note: "Next tool call: replace TASK/WORKTREE/task text; role selected (read-only: verifier). Export + queue together; repeat export in EVERY tool call (shells may reset). --start schedules within caps; batch: omit --start, next once. No fleet/help/config/layout/run.json preflight.",
       help: [`export HERDR_AXI_RUN=${quote(dir)}; herdr-axi run queue TASK --role implementer --cwd WORKTREE --area . --prompt 'task; owned files; checks' --start`, ...(roles.moreRoles ? ["herdr-axi run config --full"] : [])] };
   }
   const run = loadRun();
@@ -813,16 +813,26 @@ async function executeRunCommand(action, o) {
     if (busy) {
       const target = path.join(path.dirname(busy.worktree), ".herdr-axi-worktrees", `${run.id}-${busy.task}`);
       const targetCwd = path.join(target, path.relative(busy.worktree, busy.cwd));
-      isolation = { task: busy.task, note: "Read access/--area: instructions, not isolation. Blocking pane: no control. Continue local work or move. Optional HEAD-only Git snapshot: excludes dirty/untracked changes; requires commit and permission for Git metadata writes. Use only if task scope allows.", snapshot: [`git -C ${quote(busy.worktree)} worktree add --detach ${quote(target)} HEAD`, `herdr-axi run move ${busy.task} --cwd ${quote(targetCwd)}`, "herdr-axi run next"], cleanupAfterClose: `git -C ${quote(busy.worktree)} worktree remove ${quote(target)}` };
+      const head = spawnSync("git", ["-C", busy.worktree, "rev-parse", "--verify", "HEAD^{commit}"], { encoding: "utf8", timeout: 1000 });
+      isolation = head.status === 0
+        ? { task: busy.task, note: "Read access/--area: instructions, not isolation. Blocking pane: no control. Continue local work or move. Optional HEAD-only Git snapshot: excludes dirty/untracked changes; requires commit and permission for Git metadata writes. Use only if task scope allows.", snapshot: [`git -C ${quote(busy.worktree)} worktree add --detach ${quote(target)} HEAD`, `herdr-axi run move ${busy.task} --cwd ${quote(targetCwd)}`, "herdr-axi run next"], cleanupAfterClose: `git -C ${quote(busy.worktree)} worktree remove ${quote(target)}` }
+        : { task: busy.task, note: "No verified Git HEAD; no worktree snapshot command. Serialize behind the current task, or move to an existing independent directory containing the required inputs. --area alone does not isolate writers.", help: [`herdr-axi run move ${busy.task} --cwd <independent-directory> --area <relative-area>`] };
     }
     return { started, ...(selection.deferred.length ? { deferred: selection.deferred.slice(0, 8), ...(selection.deferred.length > 8 ? { more: selection.deferred.length - 8 } : {}) } : {}), ...(isolation ? { isolation } : {}), ...(!started.length && otherPhases.length ? { queuedPhases: otherPhases } : {}), help: started.find((t) => t.help)?.help ?? [started.length ? "herdr-axi watch" : selection.deferred.find((t) => t.help)?.help ?? selection.fallback], note: !started.length ? "No eligible task. Resolve listed constraints or follow cleanup/phase help; no status/read polling. Other-phase tasks require an explicit phase change." : started.every((t) => t.state === "running") ? waitingNote : "Handle startup/delivery issues first; other workers may still be running." };
   }
   const pane = o._[0];
   const worker = run.workers.find((w) => w.pane === pane && !w.closed);
-  const live = safeWorker(run, worker, rows);
+  let live = safeWorker(run, worker, rows);
   const task = taskFor(run, pane);
+  if (action === "accept" && !o.evidence?.trim()) throw runError("accept requires --evidence describing coordinator review and checks");
+  const revisionPrompt = action === "revise" ? taskPrompt(o) : null;
+  // A settled native turn can precede hook collection. Reconcile its existing
+  // proof once; never require an extra inbox round trip just to accept/revise.
+  if (["accept", "revise"].includes(action) && live && ["idle", "done"].includes(live.state) && !receipt(worker)?.complete && fs.existsSync(`${worker.receipt}.proof.${worker.generation}`)) {
+    await engineCall(["collect", worker.name], run);
+    live = safeWorker(run, worker, listAgents({ all: true }));
+  }
   if (action === "accept") {
-    if (!o.evidence?.trim()) throw runError("accept requires --evidence describing coordinator review and checks");
     if (!live || !["idle", "done"].includes(live.state) || !receipt(worker)?.complete) {
       const quota = live && live.state !== "working" ? quotaError(runHerdr(["agent", "read", pane, "--source", "visible", "--lines", "24"], { timeoutMs: 1000, text: true })) : null;
       throw runError(quota ? "Quota exhausted, not completed. Switch the existing task; no acceptance or new run needed." : "Acceptance requires live settlement and this generation's completion receipt. To stop unfinished work instead, use cancel with explicit evidence.", quota ? "QUOTA_EXHAUSTED" : "NOT_COMPLETE", quota ? switchHelp(run, pane, worker.kind) : ["herdr-axi run inbox", `herdr-axi run cancel ${pane} --evidence 'Authorized stop; partial state and background jobs reviewed'`]);
@@ -852,10 +862,10 @@ async function executeRunCommand(action, o) {
   }
   if (action === "revise") {
     if (!live || !["idle", "done"].includes(live.state) || !receipt(worker)?.complete) throw runError("revise needs a completed current generation");
-    const prompt = taskPrompt(o);
+    const prompt = revisionPrompt;
     const next = changeRun((r) => {
       const t = r.tasks.find((t) => t.id === task.id);
-      if (t.state !== "running") throw runError("Only unaccepted results can be revised; queue new work after acceptance");
+      if (t.state !== "running") throw runError("Only unaccepted results can be revised; queue new work after acceptance with the same role/cwd to reuse the worker", "RUN_ERROR", ["herdr-axi run queue --help"]);
       if (r.workers.find((w) => w.pane === pane)?.generation !== worker.generation) throw runError("Generation changed; inspect again");
       t.revisions ??= [];
       if (t.revisions.length >= 8) throw runError("Eight revisions reached; accept/re-scope explicitly instead of an unbounded fix loop");
@@ -871,7 +881,7 @@ async function executeRunCommand(action, o) {
   }
   if (action === "close") {
     changeRun((r) => {
-      if (pending(r).some((t) => t.pane === pane) || task?.state !== "accepted") throw runError("Close requires acceptance. To stop unfinished work and its monitor, use cancel; never fabricate completion or remove the worktree.", "NOT_ACCEPTED", [`herdr-axi run cancel ${pane} --evidence 'Authorized stop; partial state and background jobs reviewed'`]);
+      if (pending(r).some((t) => t.pane === pane) || task?.state !== "accepted") throw runError("Close requires acceptance. Finished work: review inbox then accept. Unfinished stop: cancel with authorization; never fabricate completion or remove the worktree.", "NOT_ACCEPTED", ["herdr-axi run inbox", `herdr-axi run cancel ${pane} --evidence 'Authorized stop; partial state and background jobs reviewed'`]);
       r.workers.find((w) => w.pane === pane).closing = true;
     });
     await engineCall(["close", worker.name], run);

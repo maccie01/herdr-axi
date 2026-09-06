@@ -73,6 +73,11 @@ or Herdr toast does not guarantee an agent wakeup. `watch` defaults to 30 second
 with `WATCH_ACTIVE`. Watch collects late completion proofs and includes review reports—no separate
 inbox fetch needed. Act on returned help, then continue independent work.
 
+- `accept` / `revise`: collect an existing generation-bound late proof once before checking settlement; no prerequisite inbox call when the result was already reviewed. No evidence fabrication or relaxed ownership checks.
+- `revise` before acceptance; after acceptance, a new task with matching role/cwd can reuse the same worker.
+- Explicit abort: `cancel` before acceptance. Accepted-and-closed is not cancelled; archived history remains immutable.
+- Fresh tool shells may reset exports: include the selected `HERDR_AXI_RUN` in every call.
+
 ### Efficient supervision contract
 
 | Pattern | Contract |
