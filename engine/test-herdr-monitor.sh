@@ -240,7 +240,12 @@ case "$group:$action" in
     ;;
   agent:read)
     if [[ -e "$case_dir/delayed-footer" ]]; then
-      rm -f "$case_dir/delayed-footer"
+      remaining=$(read_value "$case_dir/delayed-footer" 1)
+      if (( remaining > 1 )); then
+        printf '%s\n' "$((remaining - 1))" > "$case_dir/delayed-footer"
+      else
+        rm -f "$case_dir/delayed-footer"
+      fi
       printf '%s\n' 'Starting Claude...'
       exit 0
     fi
@@ -2093,26 +2098,30 @@ test_claude_startup_requires_verified_auto_mode() (
   fi
   assert_eq 0 "$(call_count '^tab create')" "invalid model rejected before allocation"
   rg -q AUTO_MODE_UNSUPPORTED "$TMPDIR/result" || fail "missing model policy error"
-  for mode in auto manual unknown delayed-auto delayed-manual; do
+  for mode in auto slow-auto manual unknown delayed-auto delayed-manual slow-manual; do
     setup_case "claude-mode-$mode"
     printf '%s\n' claude > "$FAKE_HERDR_CASE/kind"
     case "$mode" in
-      manual|delayed-manual) printf '%s\n' '❯' '⏵⏵ accept edits on (shift+tab to cycle)' > "$FAKE_HERDR_CASE/startup-screen" ;;
+      manual|delayed-manual|slow-manual) printf '%s\n' '❯' '⏵⏵ accept edits on (shift+tab to cycle)' > "$FAKE_HERDR_CASE/startup-screen" ;;
       unknown) printf '%s\n' 'Starting Claude...' > "$FAKE_HERDR_CASE/startup-screen" ;;
     esac
     [[ "$mode" != delayed-* ]] || : > "$FAKE_HERDR_CASE/delayed-footer"
+    [[ "$mode" != slow-* ]] || printf '%s\n' 4 > "$FAKE_HERDR_CASE/delayed-footer"
     worker_prompt="$FAKE_HERDR_CASE/worker.txt"
     printf '%s\n' "bounded implementation" > "$worker_prompt"
     if bash "$worker_script" --name worker --kind claude --cwd "$FAKE_HERDR_CASE" \
       --prompt-file "$worker_prompt" --workspace ws --orchestrator-agent orch > "$TMPDIR/result" 2>&1; then
-      [[ "$mode" == auto || "$mode" == delayed-auto ]] || fail "work submitted in $mode mode"
+      [[ "$mode" == auto || "$mode" == delayed-auto || "$mode" == slow-auto ]] || fail "work submitted in $mode mode"
       assert_eq 1 "$(file_value "$FAKE_HERDR_CASE/worker-prompts")" "verified auto gets one prompt"
+      [[ "$mode" != auto ]] || assert_eq 1 "$(call_count '^agent read')" "ready auto has no retry"
+      [[ "$mode" != slow-auto ]] || assert_eq 5 "$(call_count '^agent read')" "slow footer accepted without resubmission"
     else
-      [[ "$mode" != auto && "$mode" != delayed-auto ]] || fail "auto startup refused: $(< "$TMPDIR/result")"
+      [[ "$mode" != auto && "$mode" != delayed-auto && "$mode" != slow-auto ]] || fail "auto startup refused: $(< "$TMPDIR/result")"
       case "$mode" in
         manual) assert_eq 1 "$(call_count '^agent read')" "manual fails immediately" ;;
         delayed-manual) assert_eq 2 "$(call_count '^agent read')" "manual after rendering fails immediately" ;;
-        unknown) assert_eq 4 "$(call_count '^agent read')" "missing footer retry budget" ;;
+        slow-manual) assert_eq 5 "$(call_count '^agent read')" "slow manual never receives assignment" ;;
+        unknown) assert_eq 6 "$(call_count '^agent read')" "missing footer retry budget" ;;
       esac
       assert_file_present "$FAKE_HERDR_CASE/tab-alive" "$mode startup retained for inspection"
       assert_eq 0 "$(file_value "$FAKE_HERDR_CASE/worker-prompts")" "$mode gets no assignment"

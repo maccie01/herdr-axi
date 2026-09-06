@@ -627,3 +627,14 @@ by these tests. Existing fake backends; dependency-free Node tests.
 - Two misrouted F files moved recoverably to scratch `misrouted-evidence/`; no foreign runtime files removed. F/G ownership manifests retained beside earlier evidence.
 - Remaining startup finding: three 250ms render backoffs reduce, but do not reliably eliminate, native-ready/Auto-footer races. Wrong mode still fails closed; no automatic trust approval.
 - Validation after complete routing fix: Bash **56/56**, syntax and whitespace clean. Live tab list contains only original `w1B:t1,t2`; no test leases remain. The existing Node **158/158** run precedes this shell-only correction, not represented as a new rerun.
+
+### Startup rendering follow-up — round H
+
+- Routing correction committed/pushed separately as `7845db3`.
+- Reproduced slow-footer failure before correction: first four reads contain no footer, fifth becomes Auto. Extend missing-evidence retries to six checks with 0.25/0.5/1/2/4s backoff, **7.75s total backoff maximum**; backend-call latency additional. Already-ready Auto requires one read; visible wrong mode fails immediately; unknown exhausts six reads without submission.
+- Regression variants: immediate Auto/manual, missing footer, one-read-delayed Auto/manual, four-read-delayed Auto/manual; exactly one prompt only after verified Auto, no unnecessary monitor on refusal, resume retains the same checks.
+- Two fresh parallel Sonnet/medium verifiers, separate scratch directories: both `running` on initial `queue --start`; no recovery, approval or repeated start. One `watch` returned both generation-bound reports. Parent independently checked `[2,3,5]` and exact `welcome\n`, then accepted both, closed both whole tabs and archived the run.
+- Test identities: `w1B:p2G` / monitor `w1B:p2J` / tab `w1B:t1K`; `w1B:p2H` / monitor `w1B:p2K` / tab `w1B:t1M`. Final live tab list: only original `w1B:t1,t2`; zero test leases. This demonstrates two successful starts, not a guarantee across account policies or a controlled latency benchmark.
+- Final cleanup audit found five additional global receipts belonging to recorded D/E test workers. Moved these plus the two F files recoverably into scratch `misrouted-evidence/`; foreign files/native histories untouched. Across D–H: one test orchestrator, nine workers, ten created tabs, five archived runs.
+- Focused launch/wake tests: **5/5** with native filesystem notifications available. Restricted-sandbox run failed the filesystem-wake assertion; no test weakened or skipped to hide that environment limitation.
+- Final engine rerun: **56/56**, including slow-footer and clean-environment monitor regressions; syntax/whitespace clean. JS changes remain covered by the earlier full **158/158** run. No no-mistakes pipeline claim: binary/doctor work, but this repository has no initialized gate and its daemon was stopped.

@@ -205,8 +205,9 @@ if [[ "$kind" == "claude" ]]; then
   # Passing --permission-mode auto is not proof that the provider enabled it.
   # Keep an unsupported or unverified session inspectable, without sending work.
   # Native readiness may precede the first footer render. Retry only missing
-  # evidence, with at most 750ms backoff; a wrong mode fails immediately.
-  for mode_attempt in 1 2 3 4; do
+  # evidence, with at most 7.75s backoff; a wrong mode fails immediately.
+  mode_delays=(0.25 0.5 1 2 4)
+  for mode_attempt in 0 1 2 3 4 5; do
     if ! mode_screen=$(herdr agent read "$agent_pane" --source visible --lines 40); then
       cleanup_created_tab=false
       exit 1
@@ -215,12 +216,12 @@ if [[ "$kind" == "claude" ]]; then
       "$HERDR_AXI_NODE" "$script_dir/../src/launch-policy.mjs" --check-screen 2>&1); then
       break
     fi
-    if [[ "$mode_error" != AUTO_MODE_UNVERIFIED:* || "$mode_attempt" == 4 ]]; then
+    if [[ "$mode_error" != AUTO_MODE_UNVERIFIED:* || "$mode_attempt" == 5 ]]; then
       printf '%s\n' "$mode_error" >&2
       cleanup_created_tab=false
       exit 1
     fi
-    sleep 0.25
+    sleep "${mode_delays[$mode_attempt]}"
   done
 fi
 
