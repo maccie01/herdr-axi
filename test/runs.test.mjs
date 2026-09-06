@@ -548,7 +548,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
     } finally { f.clean(); }
   });
 
-  for (const [quota, action] of [[false, "watch"], [true, "watch"], [true, "switch"]]) test(`${action} collects late native proof without losing completed work${quota ? " despite quota banner" : ""}`, () => {
+  for (const [quota, action] of [[false, "watch"], [true, "watch"], [true, "switch"], [false, "accept"], [true, "accept"], [false, "revise"]]) test(`${action} collects late native proof without losing completed work${quota ? " despite quota banner" : ""}`, () => {
     const f = fixture();
     try {
       const w = exhaustedWorker(f), aFile = path.join(f.dir, `${w.pane}.agent`), a = JSON.parse(fs.readFileSync(aFile));
@@ -559,6 +559,21 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       fs.writeFileSync(transcript, JSON.stringify({ type: "session.task_complete", data: { summary: "LATE_REPORT: checks passed" } }) + "\n");
       fs.writeFileSync(`${w.receipt}.proof.${w.generation}`, w.generation + "\n");
       if (!quota) fs.writeFileSync(path.join(f.dir, `screen-${w.pane}`), "Task finished");
+      if (action === "accept") {
+        const output = f.ok(["run", "accept", w.pane, "--evidence", "Independently reviewed current result/checks"]);
+        assert.match(output, /accepted: quota-task/);
+        assert.match(f.state().tasks[0].result, /LATE_REPORT/);
+        assert.equal(f.calls().filter((c) => c.action === "prompt").length, 1);
+        return;
+      }
+      if (action === "revise") {
+        f.ok(["run", "revise", w.pane, "--prompt", "Small correction; recheck"]);
+        assert.equal(f.state().tasks[0].pane, w.pane);
+        assert.notEqual(f.state().workers[0].generation, w.generation);
+        assert.match(f.state().tasks[0].revisions[0].summary, /LATE_REPORT/);
+        assert.equal(f.calls().filter((c) => c.action === "prompt").length, 2);
+        return;
+      }
       if (action === "switch") {
         const r = f.execute(["run", "switch", w.pane, "--kind", "codex", "--model", "gpt-5.6-sol"]);
         assert.equal(r.status, 1); assert.match(r.output, /NOT_SWITCHABLE/);
@@ -1120,6 +1135,26 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       assert.equal(t.pane, w.pane);
       assert.equal(f.calls().filter((c) => c.action === "prompt").length, 2);
       assert.deepEqual(fs.readdirSync(cwd), []);
+    } finally { f.clean(); }
+  });
+
+  test("non-git busy work never suggests impossible Git snapshots and settled waits lead to inbox", () => {
+    const f = fixture();
+    try {
+      f.queue("first", "shared"); f.queue("second", "shared");
+      const output = f.ok(["run", "next"]);
+      assert.match(output, /No verified Git HEAD/);
+      assert.doesNotMatch(output, /worktree add|cleanupAfterClose|snapshot\[/);
+      assert.match(output, /run move second/);
+      const w = f.state().workers[0]; f.complete(w);
+      const waited = f.ok(["wait", w.pane, "--until", "idle", "--timeout-ms", "100"]);
+      assert.match(waited, /help\[1\]: herdr-axi run inbox/);
+      assert.doesNotMatch(waited, /herdr-axi read/);
+      const refused = f.execute(["run", "close", w.pane]);
+      assert.equal(refused.status, 1);
+      assert.match(refused.output, /review inbox then accept/);
+      assert.match(refused.output, /herdr-axi run inbox/);
+      assert(!f.calls().some((c) => c.action === "close"));
     } finally { f.clean(); }
   });
 

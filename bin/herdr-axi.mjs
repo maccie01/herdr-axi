@@ -58,13 +58,14 @@ const RUN_HELP = {
   Current generation proof + settlement + saved result + explicit review. No silent report loss.
   Missing/corrupt inbox: retry inbox, or supply a reviewed replacement (1..3500 chars); recorded as coordinator-replacement.`,
   revise: `herdr-axi run revise <pane> --prompt "<fix and checks>"  # or --prompt-file <file>
-  Same worker/slot; retain revision history. Max eight revisions, then explicitly re-scope.`,
+  Before acceptance only: same worker/slot; retain revision history. Max eight revisions.
+  Already accepted: queue a new task with the same role/cwd; next can reuse the worker.`,
   phase: `herdr-axi run phase explore|build|integrate|verify|fix [--cap 1..16]
   Defaults 4/3/2/2/1. Never narrow below outstanding work; retire surplus accepted workers.
   Queued tasks keep their phase; return to it or cancel/requeue explicitly.`,
   close: `herdr-axi run close <pane>
   Accepted owned workers only; whole tab including monitor. Never the owner tab.
-  Unfinished work: run cancel <pane> --evidence "authorized stop; partial state/background jobs reviewed".`,
+  Closing is not cancellation. User requested abort: run cancel <pane> --evidence "authorized stop; partial state/background jobs reviewed" BEFORE acceptance.`,
   switch: `herdr-axi run switch <pane-or-task-id> --kind claude|codex|copilot --model <model> [--effort high] [--summary "partial work / pending checks"]
   Or --role <configured-worker-role>; same read/write access, different provider.
   Quota/session limit only; live identity + current quota error required, including native unknown. Never working.

@@ -150,7 +150,7 @@ export function wait(args) {
   const timeout = positiveInt(o["timeout-ms"] ?? 300000, "timeout-ms");
   const result = runHerdr(["agent", "wait", a.pane, "--until", until, ...(until === "idle" ? ["--until", "done"] : []), "--timeout", String(timeout)], { timeoutMs: timeout + 5000 });
   const after = result?.agent ? projectAgent(result.agent) : findAgent(a.pane);
-  return { pane: a.pane, requested: until, reached: after.state, help: nextSteps(fleet([after])) };
+  return { pane: a.pane, requested: until, reached: after.state, help: loadRun() && ["idle", "done"].includes(after.state) ? ["herdr-axi run inbox"] : nextSteps(fleet([after])) };
 }
 
 export function dispatch(args) {

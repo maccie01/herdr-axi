@@ -53,6 +53,11 @@ test("keyword guide returns bounded exact recipes rather than the full workflow"
   assert.equal(opus.start.length, 2);
   assert.match(opus.start[1], /--role implementer --kind claude --model claude-opus-5 --effort high.*--start$/);
   assert(!opus.recovery);
+  const sonnet = guide(["start sonnet"]);
+  assert.match(sonnet.start[1], /--kind claude --model sonnet --effort high/);
+  assert.doesNotMatch(sonnet.start[1], /opus/);
+  assert.match(guide(["model sonnet"]).choice, /--model sonnet/);
+  assert.equal(guide(["start opus sonnet"]).code, "AMBIGUOUS_GUIDE_TOPIC");
   assert(Buffer.byteLength(JSON.stringify(opus)) < 1800);
   for (const [query, topic] of [["quota switch", "quota"], ["stop worker", "stop"], ["config subproject", "config"], ["wait notification", "wait"], ["trust permission", "trust"], ["worktree busy", "worktree"], ["review accept", "review"]]) {
     const result = guide([query]);

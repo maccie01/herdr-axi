@@ -538,3 +538,39 @@ by these tests. Existing fake backends; dependency-free Node tests.
 - Final frozen-product suite: **Node 149/149**, 205 seconds; no failures or skips. Global PATH entry resolves the updated guide correctly.
 - Bash syntax, ShellCheck `--severity=error`, JavaScript syntax, whitespace checks and 23 local documentation links: clean.
 - Limits: no real subscription exhausted or live worker workload benchmarked; provider/account availability still native-CLI authority. Claude mode checked at initial/resumed startup; other providers retain explicit native launch flags, not a claimed visual mode attestation. Persisted hooks/file events do not themselves wake an LLM: that requires a verified harness callback or an awaited foreground tool result. No self-modifying orchestration policy or automatic acceptance.
+
+## Sonnet orchestrators — 7 September 2026
+
+- Actual terminals, baseline `ed93278`; scratch `/private/tmp/herdr-axi-sonnet.OgpC9V`.
+- Two fresh Sonnet/medium orchestrators; eight workers. All eight native worker transcripts confirm `claude-sonnet-5`; no native subagents, at most two concurrent workers per run.
+- Initial prompts: outcome, scope, Sonnet/cap limit, explicit cancellation/review requirements and safety boundaries. No command sequence, minimum-call recipe or source-code access provided.
+- Scenario A ran before fixes; B ran after the late-proof/isolation fixes; C was an explicitly coached cancellation follow-up in B's orchestrator. Different tasks, not a controlled speed comparison or proof of universal agent efficiency.
+
+| Scenario | Tool calls / shell calls | Parsed AXI commands | Watch / inbox | Observed result |
+| --- | ---: | ---: | ---: | --- |
+| A: two JSON outputs, independent review, integration | 42 / 40 | 51 | 0 / 4 | Exact outputs and cleanup pass; four sequential workers, unnecessary help/reads/retries |
+| B: parallel work, same-worker uppercase follow-up, independent review | 38 / 32 | 35 | 3 / 0 | Exact `HELLO\n`, reuse and cleanup pass; required cancellation **failed**: alternative accepted/closed instead |
+| C: explicit cancellation-only follow-up | 9 / 8 | 7 | 1 / 0 | `cancelled` recorded, no acceptance, entire tab removed, input preserved, run archived; zero tool errors |
+
+- Measurement: native Claude tool-use/result records, not agent self-estimates. Result bytes across all tool outputs: A 34,702; B 20,667; C 4,618. AXI commands parsed from shell inputs; not backend round-trip counts. Test PATH wrapper was superseded by native shell PATH; its missing trace is not treated as zero calls.
+- Displayed orchestrator costs: A $0.97; B $0.99 before correction, $1.28 including C. Worker cost not included; no aggregate billing claim.
+- **Wake verified:** B launched native Bash `run_in_background` watch, ended its active turn, received `task-notification` at `2026-09-06T22:34:19.227Z`, then resumed without parent input. Further watches also used native callbacks. This verifies that specific Claude harness path, not an unsolicited hook-to-any-agent channel.
+
+| Finding | Correction / disposition |
+| --- | --- |
+| Existing proof not yet collected: accept failed until an extra inbox call | `accept` and `revise` collect the current proof once, then recheck live identity/settlement; preserved report, generation and evidence guards. Three `NOT_COMPLETE` responses in A; agent claimed four. B had none |
+| Git snapshot recipe offered in non-Git scratch directory | Verify commit HEAD before suggesting Git commands; otherwise explain serialization or relocation to an existing independent directory |
+| Managed settled wait directed agent to raw result reads | Next action now inbox; already-reviewed results can use accept directly with on-demand proof collection |
+| `guide start sonnet` silently retained default worker choice | Explicit Sonnet recipe; contradictory Opus/Sonnet choices rejected |
+| Close-before-accept suggested only cancellation | Review/inbox path surfaced alongside explicit abort; no automatic acceptance or deletion |
+| Accepted result then revise caused avoidable failure | Help explicitly distinguishes pre-accept revision from a matching new task that can reuse an accepted worker |
+| Shell export lost between tool calls | Init explicitly says repeat selected-run export in every fresh tool shell; no ambiguous automatic run selection |
+| Optional task accepted/closed despite explicit cancellation request | Blind scenario marked failed, never retroactively rewritten. C proves explicit cancellation works; help distinguishes the states. Agent intent adherence remains an evaluation limitation |
+| Native idle prompt suggestion mistaken for injected instruction | Agent correctly did not execute it, but added unnecessary report text. Native draft/suggestion chrome still visible in reads; no speculative filtering of terminal evidence |
+| Excess help and premature task decomposition | Still observed: A six help calls + two guides; B eleven help calls. No claim that concise CLI help alone ensures efficient model choices |
+
+- Regression validation: full Node **153/153**, Bash **55/55**; focused acceptance/revision/non-Git recovery **8/8**. Later wording refinements rechecked through the public CLI.
+- Files independently checked: A `delivery.json` exact combined JSON; B `main/greeting.txt` six bytes `HELLO\n`; `alternative/input.txt` remains `welcome\n`.
+- Cleanup verified against backend: workers `w1B:p1G/p1J/p1M/p1P/p1S/p1T/p1X/p1Z`; tabs `w1B:t12/t13/t14/t15/t17/t18/t19/t1A` all absent. Both orchestrator tabs `w1B:t11` and `w1B:t16` also absent. Original parent `w1B:p2` remains present.
+- Three runs archived; all worker records closed; both test lease directories empty. Scratch fixtures/evidence retained outside the repository; native session transcripts not deleted. No live project or foreign agent modified; no worker commits, pushes or project state/plan documents.
+- `no-mistakes`: existing official Go installation `~/go/bin/no-mistakes` v1.60.0 was missing from PATH. Added `/opt/homebrew/bin/no-mistakes` symlink; login-zsh/sh/version/help/doctor passed. No reinstall, upgrade, daemon reset, repo initialization or paid pipeline run.

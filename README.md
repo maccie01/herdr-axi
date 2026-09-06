@@ -78,6 +78,7 @@ herdr-axi run queue parser --role implementer \
 
 - **Hooks save receipts; they do not push into the orchestrator conversation.**
 - Background wakeup requires a verified harness callback; detached `&` and a Herdr toast are not enough.
+- Claude's native background Bash callback: [live-tested with Sonnet](LIVE-TEST.md#sonnet-orchestrators--7-september-2026); no universal wakeup claim.
 - `watch` default: 30 seconds; `run watch` alias; one active watcher; timeout ≠ completion.
 - Long wait: `watch --timeout-ms 1800000`; no model inference while blocked. File events + 2→10-second fallback checks; telemetry writes ignored.
 
