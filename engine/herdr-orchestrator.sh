@@ -6,7 +6,7 @@ if [[ "${HERDR_ENV:-}" != "1" ]]; then
   exit 2
 fi
 
-for dependency in herdr jq rg cut awk find mktemp stat ps; do
+for dependency in herdr jq rg cut awk find mktemp stat ps "${HERDR_AXI_NODE:-node}"; do
   command -v "$dependency" >/dev/null || {
     printf '%s\n' "herdr-orchestrator: missing dependency: $dependency" >&2
     exit 2
@@ -226,7 +226,7 @@ resolve_close_lifecycle() {
     "$registry_receipt" != "$close_receipt_file" ||
     -z "$close_tab_id" ||
     -z "$close_agent_pane" ||
-    ( -z "$close_monitor_pane" && ( "${cancel_file:-}" == "" || "$close_stage" != "created" ) ) ]]; then
+    ( -z "$close_monitor_pane" && "$close_stage" != "created" ) ]]; then
     printf '%s\n' \
       "herdr-orchestrator: registered lifecycle is malformed: $name" >&2
     return 1
@@ -463,7 +463,7 @@ case "$command_name" in
 
     if ! herdr_receipt_read "$receipt_file"; then
       # A blocked startup has a registry but no submitted task/receipt yet.
-      [[ -n "$cancel_file" && "$close_stage" == "created" && ! -e "$receipt_file" ]] ||
+      [[ ( -n "$cancel_file" || -n "$handoff_file" ) && "$close_stage" == "created" && ! -e "$receipt_file" ]] ||
         close_locked_error "close receipt is unreadable: $name"
       receipt_generation="$close_generation"
     fi
@@ -542,7 +542,8 @@ case "$command_name" in
           (.agent_session.value == $checkpoint.from.session or $checkpoint.from.session == null)' >/dev/null ||
           close_locked_error "handoff worker identity changed: $name"
         herdr agent read "$close_agent_pane" --source visible --lines 40 |
-          node "$script_dir/../src/quota.mjs" >/dev/null ||
+          "${HERDR_AXI_NODE:-node}" "$script_dir/../src/quota.mjs" |
+          jq -se 'length == 1 and (.[0] | type == "object" and .code == "QUOTA_EXHAUSTED" and (.message | type) == "string")' >/dev/null ||
           close_locked_error "handoff quota no longer confirmed: $name"
         # Proof may arrive after JS checkpointing but before retirement. Do not
         # close a completed generation merely because its hook has not settled.

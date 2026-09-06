@@ -5,6 +5,9 @@ import { fileURLToPath } from "node:url";
 // rate-limit retries are not evidence of exhausted subscription/session capacity.
 export function quotaError(text) {
   const lines = text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").split("\n");
+  // Visible history is not the active prompt. A permission/trust selector wins
+  // over any retained quota line; never turn a request for consent into closure.
+  if (lines.some((line) => /(?:do you (?:want|trust)|would you like|allow .+\?|yes,? (?:i trust|allow)|(?:enter|return) to confirm|\b(?:y\/n|yes\/no)\b|^[\s│┃]*[❯›>]\s*\S)/i.test(line))) return null;
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i].trim().replace(/\s*[│┃]$/, "");
     const match = line.match(/^(?:[✗×!●•■]\s*)?(You have exceeded your monthly quota|Session limit reached|You(?:'|’)ve (?:hit|reached) your (?:(?:usage|session|weekly|monthly) )?limit|You have reached your (?:usage|session|weekly|monthly) limit)(?:\s|[.!:(]|$)/i);
@@ -25,7 +28,7 @@ export function switchHelp(run, pane, kind) {
 }
 
 // The engine uses exactly the same bounded detector; no duplicated shell regex.
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const quota = quotaError(fs.readFileSync(0, "utf8"));
   if (quota) console.log(JSON.stringify(quota));
   else process.exitCode = 2;

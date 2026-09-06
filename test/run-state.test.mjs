@@ -5,6 +5,51 @@ import { tmpdir } from "node:os";
 import { test } from "node:test";
 import { changeRun, PHASES, loadRun, takeRunWarnings, controlActive, processStart, taskFor } from "../src/run-state.mjs";
 import { writerLease } from "../src/project.mjs";
+import { finishRun } from "../src/archive.mjs";
+
+test("read-only lock cleanup errors surface without masking the operation error", () => {
+  const dir = fs.mkdtempSync(path.join(tmpdir(), "axi-readonly-lock-"));
+  const previous = process.env.HERDR_AXI_RUN; process.env.HERDR_AXI_RUN = dir;
+  const run = { schema: 1, owner: { pane: "w:p1", tab: "w:t1" }, workspace: "w", phase: "explore", limits: PHASES, tasks: [], workers: [] };
+  fs.writeFileSync(path.join(dir, "run.json"), JSON.stringify(run));
+  const rm = fs.rmSync;
+  try {
+    fs.rmSync = (file, ...args) => { if (String(file).endsWith("/run.lock")) throw Object.assign(Error("lock cleanup failed"), { code: "EIO" }); return rm(file, ...args); };
+    assert.throws(() => changeRun(() => "ok", { readOnly: true }), { code: "EIO" });
+    rm(path.join(dir, "run.lock"));
+    assert.throws(() => changeRun(() => { throw Error("original failure"); }, { readOnly: true }), /original failure/);
+  } finally {
+    fs.rmSync = rm;
+    if (previous === undefined) delete process.env.HERDR_AXI_RUN; else process.env.HERDR_AXI_RUN = previous;
+    rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("finish retains leases on archive/publication failure and repairs postcommit failures", () => {
+  const dir = fs.mkdtempSync(path.join(tmpdir(), "axi-finish-lease-"));
+  const previous = { HERDR_AXI_RUN: process.env.HERDR_AXI_RUN, HERDR_AXI_STATE_HOME: process.env.HERDR_AXI_STATE_HOME };
+  process.env.HERDR_AXI_RUN = dir; process.env.HERDR_AXI_STATE_HOME = path.join(dir, "state");
+  const task = { id: "a", cwd: dir, state: "accepted" };
+  const run = { schema: 1, id: "finish-test", owner: { pane: "w:p1", tab: "w:t1" }, workspace: "w", phase: "explore", limits: PHASES, tasks: [task], workers: [] };
+  fs.writeFileSync(path.join(dir, "run.json"), JSON.stringify(run));
+  const rename = fs.renameSync;
+  try {
+    assert(writerLease(run, task));
+    for (const suffix of ["detail.json.gz", "run.json"]) {
+      fs.renameSync = (from, to) => { if (String(to).endsWith('/' + suffix)) throw Object.assign(Error("disk unavailable"), { code: "ENOSPC" }); return rename(from, to); };
+      assert.throws(finishRun, { code: "ENOSPC" });
+      assert(!loadRun().finishedAt);
+      assert(!writerLease({ ...run, id: "other" }, task), "other run remains excluded");
+    }
+    fs.renameSync = rename;
+    finishRun(); assert(loadRun().finishedAt);
+    assert(writerLease({ ...run, id: "other" }, task), "release only after durable archive publication");
+  } finally {
+    fs.renameSync = rename;
+    for (const [key, value] of Object.entries(previous)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("pane lookup prefers active work, explicit task IDs preserve historical selection", () => {
   const active = { id: "earlier", pane: "wTEST:p1", name: "worker", state: "running" };

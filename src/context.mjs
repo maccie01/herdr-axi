@@ -60,7 +60,7 @@ export function contextStatus(run, workers, rows) {
     const c = cache[w.pane]?.generation === w.generation ? cache[w.pane] : { generation: w.generation, source: "unknown" };
     cache[w.pane] = { ...c, probedAt: now, quotaAttemptedAt: now, quotaState: a.state };
     probes++;
-    try { screens.set(w.pane, runHerdr(["agent", "read", w.pane, "--source", "visible", "--lines", "24"], { timeoutMs: 1000, text: true })); }
+    try { screens.set(w.pane, runHerdr(["agent", "read", w.pane, "--source", "visible", "--lines", "40"], { timeoutMs: 1000, text: true })); }
     catch { /* unavailable; preserve last measurement, rotate probe priority */ }
   }
   const due = candidates.filter((w) => rows.some((a) => a.pane === w.pane) && contextDue(w) && (w.kind !== "codex" || terminalDue.includes(w)));
@@ -121,7 +121,7 @@ export function contextStatus(run, workers, rows) {
   }
   const quotas = candidates.flatMap((w) => {
     const c = cache[w.pane], a = rows.find((a) => a.pane === w.pane);
-    return a && a.state !== "working" && c?.generation === w.generation && c.quota && now - c.quotaAt < 120000 ? [{ pane: w.pane, ...c.quota }] : [];
+    return a && a.state !== "working" && c?.generation === w.generation && c.quotaState === a.state && c.quota && now - c.quotaAt < 120000 ? [{ pane: w.pane, ...c.quota }] : [];
   });
   return { warnings, lastKnown, unknown, stale, quotas, ...(error ? { error } : {}) };
 }
