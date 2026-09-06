@@ -611,3 +611,19 @@ by these tests. Existing fake backends; dependency-free Node tests.
 - Limits: no real subscription exhausted; no fresh Codex/Copilot sessions in this drill; no claim of universal hook delivery. Native background completion and one lost-worker notification were observed. Startup retry tested deterministically after reproducing the real rendering gap; no forced manipulation of provider UI rendering.
 - Code review: parent inspected implementation/error paths and reproduced report loss; separate Sonnet reviewer checked scenario output, not the package diff. Existing receipt/collection paths reused, no new dependencies, daemon or persistent polling state.
 - Validation: `npm test` **158/158**; `bash engine/test-herdr-monitor.sh` **55/55**; final focused wait/proof/report tests **5/5**; syntax, whitespace and 24 local documentation links checked.
+
+### Split-monitor routing follow-up — rounds F/G
+
+- First refinement committed/pushed as `f5e1ba9`; two further one-worker Sonnet/medium runs, same disposable project. No native children or project writes.
+- Executable regression: run the worker-generated monitor command without inherited inbox/receipt settings and with a wrong server workspace. Original code sent an owner prompt; mode-only correction then wrote outside the run. Both failures reproduced before the complete fix.
+- Fix: explicitly pass inbox mode, receipt root and workspace into the split monitor, alongside the existing Node path. Preserve legacy notification mode; no extra polling or persistent state.
+
+| Live round | Outcome |
+| --- | --- |
+| F, mode-only correction | Startup footer retry still insufficient; same-pane recovery worked. Completion report delivered, then intentional settled-agent loss wrote to global `.herdr-orchestrator` with empty generation. Failed 10-second run-inbox assertion retained as a failed test |
+| G, complete routing correction | Fresh worker started without recovery. Settled report delivered; intentional agent-pane loss published `lost` with exact generation `kdRn6AAx` in the correct run in **1,764 ms** after close returned. No matching global receipt; no unsolicited owner prompt observed |
+
+- F: `w1B:p2C` + monitor `w1B:p2D`, tab `w1B:t1H`; G: `w1B:p2E` + monitor `w1B:p2F`, tab `w1B:t1J`. Both cancelled without acceptance; managed cleanup closes the whole remaining monitor tab, preserves input and archives each run.
+- Two misrouted F files moved recoverably to scratch `misrouted-evidence/`; no foreign runtime files removed. F/G ownership manifests retained beside earlier evidence.
+- Remaining startup finding: three 250ms render backoffs reduce, but do not reliably eliminate, native-ready/Auto-footer races. Wrong mode still fails closed; no automatic trust approval.
+- Validation after complete routing fix: Bash **56/56**, syntax and whitespace clean. Live tab list contains only original `w1B:t1,t2`; no test leases remain. The existing Node **158/158** run precedes this shell-only correction, not represented as a new rerun.

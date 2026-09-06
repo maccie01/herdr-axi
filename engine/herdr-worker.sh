@@ -242,8 +242,12 @@ monitor_pane=$(printf '%s\n' "$monitor_json" | jq -r '.result.pane.pane_id // em
   printf '%s\n' "herdr-worker: lifecycle monitor pane was not created: $name" >&2
   exit 1
 }
-printf -v monitor_command '%q %q %q %q %q %q %q %q' \
-  env "HERDR_AXI_NODE=$HERDR_AXI_NODE" \
+# Split panes inherit the server environment, not necessarily the worker tab's
+# custom variables. Pin delivery mode and receipt routing for both live and lost
+# workers; a lost agent cannot supply its workspace through backend metadata.
+printf -v monitor_command '%q %q %q %q %q %q %q %q %q %q %q' \
+  env "HERDR_AXI_NODE=$HERDR_AXI_NODE" "HERDR_MONITOR_INBOX=${HERDR_MONITOR_INBOX:-0}" \
+  "HERDR_RECEIPT_ROOT=$HERDR_RECEIPT_ROOT_DIR" "HERDR_WORKSPACE_ID=$workspace_id" \
   "$script_dir/herdr-lifecycle-monitor.sh" \
   "$name" \
   "$name" \

@@ -1946,6 +1946,30 @@ test_managed_inbox_never_prompts_owner() (
   assert_eq delivered "$(receipt_read_field 4)" "inbox receipt completion"
 )
 
+test_split_monitor_preserves_delivery_mode() (
+  for mode in 1 0; do
+    setup_case "split-monitor-mode-$mode"
+    worker_prompt="$FAKE_HERDR_CASE/worker.txt"
+    printf '%s\n' 'bounded read-only task' > "$worker_prompt"
+    HERDR_MONITOR_INBOX="$mode" bash "$worker_script" --name worker --kind copilot \
+      --cwd "$FAKE_HERDR_CASE" --prompt-file "$worker_prompt" \
+      --workspace ws --orchestrator-agent orch >/dev/null
+    monitor_command=$(< "$FAKE_HERDR_CASE/monitor-command")
+    # Execute the actual generated command as a fresh split pane whose server
+    # environment did not inherit the worker tab's custom variables.
+    : > "$FAKE_HERDR_CASE/agent-get-fail"
+    env -u HERDR_MONITOR_INBOX -u HERDR_RECEIPT_ROOT HERDR_WORKSPACE_ID=foreign \
+      bash -c "${monitor_command#* }"
+    if [[ "$mode" == 1 ]]; then
+      assert_eq 0 "$(file_value "$FAKE_HERDR_CASE/prompt-attempts")" "managed split owner interruptions"
+      assert_file_present "${HERDR_MONITOR_RECEIPT}.inbox" "split durable inbox"
+      assert_eq lost "$(jq -r '.event' "${HERDR_MONITOR_RECEIPT}.inbox")" "split lost event"
+    else
+      assert_eq 1 "$(file_value "$FAKE_HERDR_CASE/prompt-attempts")" "legacy split notification"
+    fi
+  done
+)
+
 test_prompt_ack_and_no_nested_agents() (
   setup_case prompt-ack
   worker_prompt="$FAKE_HERDR_CASE/worker.txt"
@@ -2460,6 +2484,7 @@ test_created_stage_handoff_without_monitor_or_receipt() (
 )
 
 tests=(
+  test_split_monitor_preserves_delivery_mode
   test_quota_protocol_failures_preserve_reports_and_diagnose_node
   test_unknown_readiness_preserves_generation_bound_completion
   test_created_stage_handoff_without_monitor_or_receipt
