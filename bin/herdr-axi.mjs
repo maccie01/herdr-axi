@@ -29,6 +29,7 @@ const RUN_HELP = {
   Already loaded at init; no config preflight needed before queue.`,
   queue: `herdr-axi run queue <task-id> --role <role> --cwd <path> --area <relative-path> --prompt "<task and checks>" [--after task-id,task-id]
   Alternative: --prompt-file <path>. Exactly one; no task document needed in the project.
+  --area is relative to --cwd, not the repository root. Use --area . for all of --cwd; resolved paths returned.
   Legacy --kind claude|codex|copilot instead of --role. Explicit acceptance criteria. 128 tasks/run.
   Read-only investigation: choose an access:read role from init; --area . for the whole tree.
   Then: herdr-axi run next. No separate config or layout call.`,

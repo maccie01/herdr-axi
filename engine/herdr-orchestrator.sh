@@ -544,6 +544,11 @@ case "$command_name" in
         herdr agent read "$close_agent_pane" --source visible --lines 40 |
           node "$script_dir/../src/quota.mjs" >/dev/null ||
           close_locked_error "handoff quota no longer confirmed: $name"
+        # Proof may arrive after JS checkpointing but before retirement. Do not
+        # close a completed generation merely because its hook has not settled.
+        if herdr_completion_proof_valid "$receipt_file" "$receipt_generation"; then
+          close_locked_error "completion proof pending; cancel switch and collect inbox before review: $name"
+        fi
         handoff_identity_filter='.result.agent | {name,pane_id,tab_id,workspace_id,terminal_id,agent_session,agent_status}'
         handoff_identity=$(printf '%s\n' "$info" | jq -c "$handoff_identity_filter")
         refreshed_identity=$(agent_info "$close_agent_pane" | jq -c "$handoff_identity_filter") ||

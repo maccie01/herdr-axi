@@ -37,6 +37,15 @@ herdr_completion_file() {
   printf '%s.proof.%s\n' "$receipt_file" "$generation"
 }
 
+herdr_completion_proof_valid() {
+  local receipt="$1" generation="$2" file value="" size=""
+  file=$(herdr_completion_file "$receipt" "$generation") || return 1
+  [[ -r "$file" ]] || return 1
+  { IFS= read -r value < "$file"; } 2>/dev/null || true
+  size=$(wc -c < "$file" 2>/dev/null | awk '{$1=$1; print}') || return 1
+  [[ "$value" == "$generation" && "$size" == "$((${#generation} + 1))" ]]
+}
+
 herdr_append_completion_instruction() {
   local task="$1"
   local receipt_file="$2"

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { gzipSync, gunzipSync } from "node:zlib";
-import { runDir, runError, changeRun, pending } from "./run-state.mjs";
+import { runDir, runError, changeRun, pending, controlActive } from "./run-state.mjs";
 import { stateRoot, hash, DEFAULT_CONFIG, writerLease, hasRunLeases } from "./project.mjs";
 
 export const projectRuns = (project) => path.join(stateRoot(), "projects", hash(project), "runs");
@@ -18,11 +18,13 @@ function cleanupControls(dir) {
     if (match) candidates.push([path.join(dir, name), Number(match[1])]);
   }
   const directory = fs.existsSync(operations) && fs.lstatSync(operations).isDirectory();
-  if (directory) for (const name of fs.readdirSync(operations)) if (/^[1-9][0-9]*$/.test(name)) candidates.push([path.join(operations, name), Number(name)]);
+  if (directory) for (const name of fs.readdirSync(operations)) {
+    const pid = name.match(/^([1-9][0-9]*)(?:\.[a-f0-9-]{36})?$/)?.[1];
+    if (pid) candidates.push([path.join(operations, name), Number(pid)]);
+  }
   for (const [file, pid] of candidates) {
     if (!Number.isSafeInteger(pid) || pid <= 0 || !regular(file)) continue;
-    try { process.kill(pid, 0); }
-    catch (e) { if (e.code === "ESRCH") fs.unlinkSync(file); }
+    if (!controlActive(file, pid)) fs.rmSync(file, { force: true });
   }
   if (directory) try { fs.rmdirSync(operations); } catch (e) { if (!["ENOTEMPTY", "ENOENT", "EEXIST"].includes(e.code)) throw e; }
 }

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { AxiError } from "axi-sdk-js";
 
 export const PHASES = { explore: 4, build: 3, integrate: 2, verify: 2, fix: 1 };
@@ -10,9 +11,33 @@ export const runDir = () => process.env.HERDR_AXI_RUN ? path.resolve(process.env
 const maintenance = [];
 export const takeRunWarnings = () => maintenance.splice(0);
 
+// PID alone is not a process identity. Probe only on registration and rare
+// takeover/GC paths, never on every fleet poll. Missing identity stays closed.
+export function processStart(pid) {
+  const r = spawnSync("ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8", timeout: 1000 });
+  return r.status === 0 ? r.stdout.trim().replace(/\s+/g, " ") || null : null;
+}
+
+export function controlActive(file, pid) {
+  try {
+    if (!fs.lstatSync(file).isFile()) return true;
+    try { process.kill(pid, 0); } catch (e) { if (e.code === "ESRCH") return false; return true; }
+    let record;
+    try { record = JSON.parse(fs.readFileSync(file, "utf8")); } catch (e) { return e.code !== "ENOENT"; }
+    if (record?.pid !== pid || typeof record.started !== "string" || !Number.isFinite(Date.parse(record.started))) return true;
+    const current = processStart(pid);
+    return !current || current === record.started;
+  } catch (e) { if (e.code === "ENOENT") return false; throw e; }
+}
+
+export function taskFor(run, target, name) {
+  const matches = (t) => t.pane === target || (name && t.name === name);
+  return run.tasks.find((t) => t.id === target) ?? pending(run).findLast(matches) ?? run.tasks.findLast(matches);
+}
+
 function taskHints(run) {
   if (run.finishedAt || !/^[a-zA-Z0-9]+$/.test(run.workspace)) return;
-  const latest = new Map(run.tasks.filter((t) => /^axi-[a-z0-9-]+$/.test(t.name ?? "")).map((t) => [t.name, t]));
+  const latest = new Map([...run.tasks, ...pending(run)].filter((t) => /^axi-[a-z0-9-]+$/.test(t.name ?? "")).map((t) => [t.name, t]));
   for (const t of latest.values()) {
     const w = run.workers.find((w) => w.name === t.name && w.pane === t.pane);
     if (w?.closed) continue;

@@ -211,33 +211,93 @@ if [[ "$event_kind" != "lost" && "$live_status" != "working" && "${HERDR_MONITOR
   quota_json=$(herdr agent read "$agent_name" --source visible --lines 40 2>/dev/null |
     node "$script_dir/../src/quota.mjs" 2>/dev/null) || quota_json=null
 fi
-if [[ "$quota_json" != "null" ]]; then
-  event_kind=error
-elif [[ "$event_kind" == "quota" ]]; then
+if [[ "$quota_json" == "null" && "$event_kind" == "quota" ]]; then
   write_result suppressed no-quota
   exit 0
 fi
 
-# Copilot emits errorOccurred for failed subagent/tool calls during a live turn.
-if [[ "$event_kind" == "error" ]]; then
+# Capture the report before locking; classify quota only after validating the
+# current generation under the receipt lock. A final proof may precede the hook.
+settled_detail=""
+if [[ "$event_kind" == "settled" || "$quota_json" != "null" ]]; then
+  settled_detail=$(payload_value '.last_assistant_message // .lastAssistantMessage // .["last-assistant-message"]')
+  if [[ -z "$settled_detail" ]]; then
+    settled_detail=$(native_transcript_tail "$transcript_backend" "$transcript_path" || true)
+  fi
+fi
+completion_valid=false
+completion_file=""
+# Backend reads and full transcript ordinal scans must not hold a receipt lock.
+# Keep both possible messages ready; proof validation selects settlement below.
+visible_detail=""
+if [[ -z "$settled_detail" ]]; then visible_detail=$(visible_tail || true); fi
+if [[ "$event_kind" == "error" || "$quota_json" != "null" ]]; then
   live_status=$(herdr agent get "$agent_name" 2>/dev/null |
     jq -r '.result.agent.agent_status // empty' 2>/dev/null || true)
+fi
+ordinal=""
+if [[ "$event_kind" != "settled" && "$transcript_resolution" == "resolved" && "$quota_json" == "null" ]]; then
+  ordinal=$(completion_ordinal "$transcript_backend" "$transcript_path" || true)
+fi
+copilot_complete=false
+if [[ "$transcript_resolution" == "resolved" && "$transcript_backend" == "copilot" ]] && copilot_task_complete "$transcript_path"; then
+  copilot_complete=true
+fi
+if [[ "${HERDR_MONITOR_RENDER_ONLY:-}" != "1" ]]; then
+  if ! herdr_receipt_resolve "$agent_name" "" "$agent_name"; then
+    write_result error workspace-unresolved
+    exit 0
+  fi
+  receipt_file="$HERDR_RECEIPT_FILE"
+  if ! herdr_receipt_lock_acquire "$receipt_file"; then
+    write_result error lock-timeout
+    exit 0
+  fi
+  receipt_read_status=0
+  herdr_receipt_read "$receipt_file" || receipt_read_status=$?
+  if (( receipt_read_status == 2 )); then
+    write_result error unknown-receipt-schema
+    exit 0
+  fi
+  if (( receipt_read_status != 0 )); then
+    receipt_cycle=1
+    receipt_delivered_event=""
+    receipt_delivered_fingerprint=""
+    receipt_settled_fingerprint=""
+    receipt_terminal=open
+    receipt_generation=""
+  fi
+  if [[ -n "$receipt_generation" ]]; then
+    completion_file=$(herdr_completion_file "$receipt_file" "$receipt_generation" || true)
+  fi
+  if [[ -n "$receipt_generation" && "$transcript_resolution" == "resolved" &&
+    -n "$transcript_session" && ( "$live_status" == "idle" || "$live_status" == "done" ) ]] &&
+    herdr_completion_proof_valid "$receipt_file" "$receipt_generation"; then
+    if [[ "$transcript_backend" != "copilot" || "$copilot_complete" == "true" ]]; then
+      completion_valid=true
+    fi
+  fi
+fi
+if [[ "$quota_json" != "null" ]]; then
+  if [[ "$completion_valid" == "true" ]]; then event_kind=settled
+  else event_kind=error; fi
+fi
+
+# Copilot emits errorOccurred for failed subagent/tool calls during a live turn.
+if [[ "$event_kind" == "error" ]]; then
   if [[ "$live_status" == "working" ]]; then
     suppression_reason=transient-worker-error
   fi
 fi
 
 detail=""
-if [[ "$quota_json" != "null" ]]; then
+if [[ "$event_kind" == "settled" ]]; then
+  detail="$settled_detail"
+elif [[ "$quota_json" != "null" ]]; then
   detail=$(printf '%s\n' "$quota_json" | jq -r '.message')
-elif [[ "$event_kind" == "settled" ]]; then
-  detail=$(payload_value '.last_assistant_message // .lastAssistantMessage // .["last-assistant-message"]')
-  if [[ -z "$detail" ]]; then
-    detail=$(native_transcript_tail "$transcript_backend" "$transcript_path" || true)
-  fi
 fi
 if [[ -z "$detail" ]]; then
-  detail=$(visible_tail || true)
+  detail="$visible_detail"
 fi
 
 title=$(payload_value '.title')
@@ -270,7 +330,6 @@ fi
 if [[ "$event_kind" == "settled" ]]; then
   fingerprint=""
 elif [[ "$transcript_resolution" == "resolved" && "$quota_json" == "null" ]]; then
-  ordinal=$(completion_ordinal "$transcript_backend" "$transcript_path" || true)
   if [[ -n "$ordinal" && "$ordinal" != "0" ]]; then
     fingerprint="${transcript_backend}:${transcript_session}:${ordinal}"
   else
@@ -285,37 +344,6 @@ fi
 if [[ "${HERDR_MONITOR_RENDER_ONLY:-}" == "1" ]]; then
   printf '%s\n' "$message"
   exit 0
-fi
-
-if ! herdr_receipt_resolve "$agent_name" "" "$agent_name"; then
-  write_result error workspace-unresolved
-  exit 0
-fi
-receipt_file="$HERDR_RECEIPT_FILE"
-
-if ! herdr_receipt_lock_acquire "$receipt_file"; then
-  write_result error lock-timeout
-  exit 0
-fi
-
-receipt_exists=false
-receipt_read_status=0
-if herdr_receipt_read "$receipt_file"; then
-  receipt_exists=true
-else
-  receipt_read_status=$?
-fi
-if (( receipt_read_status == 2 )); then
-  write_result error unknown-receipt-schema
-  exit 0
-fi
-if [[ "$receipt_exists" != "true" ]]; then
-  receipt_cycle=1
-  receipt_delivered_event=""
-  receipt_delivered_fingerprint=""
-  receipt_settled_fingerprint=""
-  receipt_terminal=open
-  receipt_generation=""
 fi
 
 if [[ "$event_kind" == "settled" && -n "$receipt_generation" ]]; then
@@ -335,30 +363,7 @@ if [[ "$event_kind" == "settled" && -n "$receipt_settled_fingerprint" &&
 fi
 
 if [[ "$event_kind" == "settled" && -z "$suppression_reason" ]]; then
-  completion_file=""
-  completion_value=""
-  completion_size=""
-  if [[ -n "$receipt_generation" ]]; then
-    completion_file=$(herdr_completion_file "$receipt_file" "$receipt_generation" || true)
-  fi
-  if [[ -r "$completion_file" ]]; then
-    { IFS= read -r completion_value < "$completion_file"; } 2>/dev/null || true
-    completion_size=$(wc -c < "$completion_file" 2>/dev/null |
-      awk '{$1=$1; print}')
-  fi
-  expected_size=$((${#receipt_generation} + 1))
-  if [[ -z "$receipt_generation" ||
-    "$transcript_resolution" != "resolved" ||
-    -z "$transcript_session" ||
-    "$live_status" == "working" ||
-    "$live_status" == "blocked" ||
-    "$completion_value" != "$receipt_generation" ||
-    "$completion_size" != "$expected_size" ]]; then
-    suppression_reason=no-completion-proof
-  elif [[ "$transcript_backend" == "copilot" ]] &&
-    ! copilot_task_complete "$transcript_path"; then
-    suppression_reason=no-completion-proof
-  fi
+  [[ "$completion_valid" == "true" ]] || suppression_reason=no-completion-proof
 fi
 
 if [[ -n "$suppression_reason" ]]; then

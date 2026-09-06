@@ -31,7 +31,8 @@ notify_reason=""
 displayed_state=""
 retry_delay=1
 cleanup() {
-  for child_pid in "$wait_pid_one" "$wait_pid_two"; do
+  # Include a helper spawned just before its PID was assigned.
+  for child_pid in $(jobs -pr); do
     if [[ -n "$child_pid" ]] && kill -0 "$child_pid" 2>/dev/null; then
       kill "$child_pid" 2>/dev/null || true
       wait "$child_pid" 2>/dev/null || true
@@ -103,7 +104,7 @@ wait_for_transition() {
   local baseline="$2"
   local marker="$3"
   local role="$4"
-  local observed wait_command_pid=""
+  local observed wait_command_pid="" wait_interrupted=false wait_status=0
   local wait_args=(agent wait "$name")
   case "$baseline" in
     working)
@@ -122,23 +123,23 @@ wait_for_transition() {
       wait_args+=(--until working --until idle --until done --until blocked)
       ;;
   esac
+  # Defer exit until spawn/PID registration finishes. A trap that exits before
+  # $! is assigned loses the backend child; ignoring the signal loses shutdown.
+  trap 'wait_interrupted=true; if [[ -n "$wait_command_pid" ]]; then kill "$wait_command_pid" 2>/dev/null || true; fi' HUP INT TERM
   # Invoke the executable directly: the HERDR_BIN shell-function adapter would
   # otherwise add an intermediate process and leave the real waiter orphaned.
   command "${HERDR_BIN:-herdr}" "${wait_args[@]}" >/dev/null 2>&1 &
   wait_command_pid=$!
-  trap '
-    if [[ -n "$wait_command_pid" ]] && kill -0 "$wait_command_pid" 2>/dev/null; then
-      kill "$wait_command_pid" 2>/dev/null || true
-    fi
+  if [[ "$wait_interrupted" == "true" ]]; then kill "$wait_command_pid" 2>/dev/null || true; fi
+  wait "$wait_command_pid" || wait_status=$?
+  # A signal interrupts Bash wait before the child is reaped.
+  if [[ "$wait_interrupted" == "true" ]]; then
     wait "$wait_command_pid" 2>/dev/null || true
     exit 143
-  ' HUP INT TERM
-  if ! wait "$wait_command_pid"; then
-    trap - HUP INT TERM
-    return 1
   fi
   wait_command_pid=""
   trap - HUP INT TERM
+  (( wait_status == 0 )) || return 1
   observed=$(state "$name" || true)
   [[ -n "$observed" && "$observed" != "$baseline" ]] || return 1
   printf '%s\t%s\n' "$role" "$observed" > "$marker"
