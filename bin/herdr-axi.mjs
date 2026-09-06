@@ -1,38 +1,33 @@
 #!/usr/bin/env node
 import { runAxiCli, AxiError } from "axi-sdk-js";
 import { home, agents, fleetCmd, read, wait, dispatch, watch, run } from "../src/commands.mjs";
+import { guide } from "../src/guide.mjs";
 
-const HELP = `Run \`herdr-axi <command>\` - commands: agents, fleet, read, dispatch, wait, watch, run
-Bare \`herdr-axi\`: fleet state + next action. Target pane IDs (w1:pP), never titles.
-Starting/delegating agents: herdr-axi run init --project <path>; owner/policy automatic, no fleet/config/layout preflight.
-Export returned HERDR_AXI_RUN; run queue -> run next -> independent work -> run inbox -> run accept/revise.
-While workers run: continue independent work. Arm ONE watch using a harness-native background job with completion notification, if supported.
-Do not duplicate an active watch. A detached shell/PID/UI toast is not agent notification. Without callback support, block only when dependent.
-Inbox is for results/attention, read for a specific diagnosis. Do not repeat status after inbox; it already includes needed state.
+const HELP = `Start: herdr-axi run init --project <path>; next tool call: returned export + queue --start together.
+Optional TOON help: herdr-axi guide "start opus" | "quota switch" | "stop worker"; no keywords = full compact workflow. Alias: --skill.
+Commands: guide, run, watch, agents, fleet, read, dispatch, wait. Bare herdr-axi: fleet + next action.
+Target owned pane IDs (w1:pP), never titles or self. Global discovery != ownership. One writer/worktree.
+Running: independent work; one notification-backed watch if supported, otherwise block only when dependent. No repeated inbox/read polls.
+Review returned reports -> accept/revise -> close accepted tabs -> finish. Unfinished stop: run cancel --help.
 Do not create worker panes or call raw herdr agent start/prompt. run next owns startup, layout and limits.
-Selected runs scope fleet/read/wait to owned workers; self is excluded. --all lists globally.
-Without a selected run: global discovery, not ownership. Never assign work to an arbitrary listed idle agent.
-Phase caps explore/build/integrate/verify/fix: 4/3/2/2/1. One writer/worktree; configured native reviewers only.
-read <pane>: compact text; --raw for layout, --full for history (combinable).
-dispatch <pane> "<task>": submit + wait. --no-wait confirms submission only.
-wait <pane>: idle or background done; unknown never proves completion.
-Inspect blocked input with read --raw before dispatch --keys; never auto-approve.
-Details: herdr-axi <command> --help; herdr-axi run <action> --help (one step only). Raw herdr only for authorized workspace/worktree/session operations not covered here.`;
+read: compact; --raw layout; --full history. Inspect dialogs; no automatic trust approval.
+Details only when needed: herdr-axi run <action> --help; or guide with 2-3 intent keywords.`;
 
 const RUN_HELP = {
   init: `herdr-axi run init [--project <path>] [--dir <external-run-dir>] [--owner <pane>]
   Start directly from the owner pane; no fleet/config/layout preflight. Owner auto-detected, never focus.
-  Loads project .herdr-axi.json; returns worker roles, queue syntax and HERDR_AXI_RUN export.
+  Loads nearest .herdr-axi.json through Git root; returns worker roles, queue syntax and HERDR_AXI_RUN export.
   External state by default: ~/.local/state/herdr-axi (override HERDR_AXI_STATE_HOME). Does not start workers.`,
   config: `herdr-axi run config [--full]
   Default: worker roles and current limits. --full: complete effective snapshot, including owner, native review contracts, context and retention.
   Already loaded at init; no config preflight needed before queue.`,
-  queue: `herdr-axi run queue <task-id> --role <role> --cwd <path> --area <relative-path> --prompt "<task and checks>" [--after task-id,task-id]
-  Alternative: --prompt-file <path>. Exactly one; no task document needed in the project.
-  --area is relative to --cwd, not the repository root. Use --area . for all of --cwd; resolved paths returned.
-  Legacy --kind claude|codex|copilot instead of --role. Explicit acceptance criteria. 128 tasks/run.
-  Read-only investigation: choose an access:read role from init; --area . for the whole tree.
-  Then: herdr-axi run next. No separate config or layout call.`,
+  queue: `herdr-axi run queue TASK --role ROLE --cwd WORKTREE --area AREA --prompt "task; checks" [--after ID,ID] [--start]
+  --prompt-file FILE instead of --prompt; exactly one. 128 tasks/run.
+  Runtime override: --kind claude --model claude-opus-5 --effort high; role access/native limits retained. No config edit/new run.
+  Legacy --kind claude|codex|copilot without --role: write access, no native children.
+  --area relative to --cwd; . = whole tree, not isolation. Read-only: choose access:read role from init.
+  --start schedules ALL eligible queued tasks within caps; follow returned help, do not call next again.
+  Batch: omit --start, queue tasks, then run next once. No config/layout preflight.`,
   move: `herdr-axi run move <queued-task-id> --cwd <existing-worktree> [--area <relative-path>]
   Preserve prompt, role, dependencies and phase; relocate the relative area. Queued tasks without resources only.
   No copy or startup; next rechecks conflicts. Check absolute paths in the preserved prompt.
@@ -106,6 +101,7 @@ const RUN_HELP = {
 };
 
 const COMMAND_HELP = {
+  guide: 'herdr-axi guide [keywords]  # alias: herdr-axi --skill\n  TOON: no keywords = full compact workflow; e.g. guide "start opus", guide "quota switch", guide "stop worker".\n  Local routing; precise recipes only; no backend/model call or action executed.',
   agents: "herdr-axi agents [--state working|blocked|idle|done|unknown] [--kind claude|codex|copilot] [--all]\n  Selected run by default; --all lists globally. Fields: name, kind, state, pane.\n  No selected run: discovery only, not ownership. New agents: herdr-axi run init, then run queue/next; never raw agent start.",
   fleet: "herdr-axi fleet [--all]\n  Selected run: owned tasks, review queue, capacity. --all: global discovery, not ownership.\n  New agents: herdr-axi run init, then run queue/next. Titles: herdr-axi agents.",
   read: "herdr-axi read <pane> [--raw] [--full] [--lines N] [--chars N]\n  Default: compact text; 60 visible lines, 8000 characters.\n  --raw preserves layout (diagrams, tables, approval menus); limits still apply.\n  --full reads history, still compact unless --raw; 2000-line cap, no default character cap. May require a settled agent.\n  --lines and --chars override defaults; --full never exceeds 2000 lines.\n  --compact remains a compatibility alias for the default; cannot combine with --raw.",
@@ -127,6 +123,7 @@ Details: herdr-axi run <action> --help. All actions: herdr-axi run --help --full
 };
 
 const argv = process.argv.slice(2);
+if (argv[0] === "--skill") argv[0] = "guide";
 await runAxiCli({
   argv,
   initialize: () => {
@@ -135,19 +132,25 @@ await runAxiCli({
       "VALIDATION_ERROR", [...(process.env.HERDR_AXI_RUN ? [] : ["herdr-axi run init"]), "herdr-axi run queue --help"]);
   },
   version: "0.1.0",
-  description: "Herdr fleet control; target pane IDs. Reads compact by default: --raw for layout, --full for history. Use herdr-axi --help for workflow.",
+  description: "Herdr fleet control: init -> returned queue --start. Optional TOON help: guide <intent keywords>. Owned pane IDs only.",
   topLevelHelp: HELP,
   getCommandHelp: (c) => {
     if (c === "run") {
       const action = argv[1];
-      if (action && !action.startsWith("--")) return Object.hasOwn(RUN_HELP, action) ? `${RUN_HELP[action]}\n` : null;
+      if (action && !action.startsWith("--")) return Object.hasOwn(RUN_HELP, action) ? `${RUN_HELP[action]}\nTOON help: herdr-axi guide <intent keywords>; e.g. "start opus".\n` : null;
       if (argv.includes("--full")) return Object.values(RUN_HELP).join("\n") + "\n";
     }
-    return Object.hasOwn(COMMAND_HELP, c) ? `${COMMAND_HELP[c]}\n` : null;
+    return Object.hasOwn(COMMAND_HELP, c) ? `${COMMAND_HELP[c]}\nTOON help: herdr-axi guide "start opus" (or 2-3 intent keywords).\n` : null;
   },
   home: () => home(),
   commands: {
     __proto__: null,
+    guide: (a) => {
+      if (a.some((arg) => arg.startsWith("--"))) throw new AxiError("guide accepts intent keywords, not native flags", "INVALID_VALUE", ["herdr-axi guide"]);
+      const result = guide(a);
+      if (result.error) throw new AxiError(result.error, result.code, result.examples ?? ["herdr-axi guide"]);
+      return result;
+    },
     agents: (a) => agents(a),
     fleet: (a) => fleetCmd(a),
     read: (a) => read(a),

@@ -1,6 +1,8 @@
 # Operator guide
 
 - Quickstart and visual overview: [README](../README.md).
+- Two-call onboarding: `run init`; returned export + `run queue --start` together. No help/config/fleet preflight.
+- Optional TOON recipes: `guide "start opus"`, `guide "quota switch"`, `guide "wait notification"`; no keywords = full compact workflow. Zero backend/model calls.
 
 Low-context fleet supervision for [herdr](https://herdr.dev): Claude, Codex and
 Copilot workers, owned by one orchestrator. Compact TOON output, precomputed
@@ -39,9 +41,14 @@ herdr-axi run init --project /path/to/project
 export HERDR_AXI_RUN='/path/returned/by/init'
 herdr-axi run phase build
 herdr-axi run queue parser --role implementer --cwd /path/to/worktree \
-  --area src/parser --prompt 'Fix parser edge cases; run parser tests; report checks.'
-herdr-axi run next
+  --area src/parser --prompt 'Fix parser edge cases; run parser tests; report checks.' --start
 ```
+
+- `--start`: queue then schedule all eligible tasks within caps; follow returned help, no second `next`.
+- Batch: omit `--start`, queue independent tasks, then `run next` once.
+- Explicit user-requested worker: `--role implementer --kind claude --model claude-opus-5 --effort high`; no config edit/re-init.
+- Override retains role access/native-child limits; changed model clears the old model's context-window estimate.
+- Application AWS/API budgets and coding-agent subscriptions: separate scopes; no inferred budget transfer or cheaper-model fallback.
 
 `next` reserves available slots and starts eligible workers concurrently; matching
 accepted workers can be reused. Worker tabs: `<task-id> · <kind>`, 75% agent / 25%
@@ -65,6 +72,22 @@ or Herdr toast does not guarantee an agent wakeup. `watch` defaults to 30 second
 `run watch` is an equivalent alias. One active watcher per run; duplicates fail
 with `WATCH_ACTIVE`. Watch collects late completion proofs and includes review reports—no separate
 inbox fetch needed. Act on returned help, then continue independent work.
+
+### Efficient supervision contract
+
+| Pattern | Contract |
+| --- | --- |
+| Run until blocked | Queue bounded independent work; `next` once to fill available slots; do own useful work |
+| Suspend, then resume | No useful work left: one long blocking/tracked watch; no model loop around status/read |
+| Durable inbox | File events wake watch; reread authoritative state; review report returned in the same response |
+| Reconciliation | Native changes without hooks/lost filesystem events: fallback checks back off 2→4→8→10 seconds |
+| Backpressure | Caps, dependencies, worktree leases; no automatic acceptance or phase escalation |
+| Unresolved attention | Follow the specific action or escalate once; repeating the same watch/read cannot resolve a permission or ownership problem |
+| Continuous improvement | Regression budgets for frontend calls, response bytes, quiet backend probes, duplicate watchers and report delivery; no additional project logs/plans |
+
+- Events are hints, not completion evidence; receipt/generation/ownership checks remain authoritative.
+- Telemetry/lock/temp-file writes do not trigger reconciliation; event bursts coalesced; unavailable filesystem notifications fall back to timed checks.
+- Pattern references: [GitHub: events over polling](https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api), [Temporal: execute until waiting, then resume](https://github.com/temporalio/documentation/blob/main/docs/encyclopedia/architecture/how-temporal-works.mdx). Principles only; no new service/dependency.
 
 **Subscription/session exhausted:** `fleet`, `run inbox`, `watch` and visible `read`
 recognize explicit quota errors, including Copilot's monthly-quota message even
@@ -277,8 +300,10 @@ remain reclaimable, but live/recycled identities require explicit inspection.
 
 ## Project policy
 
-Track one [`.herdr-axi.json`](../.herdr-axi.json) at the Git worktree root. `run init`
-snapshots it; `run config` shows worker roles and current limits (first eight roles,
+Track [`.herdr-axi.json`](../.herdr-axi.json) at the project or subproject directory. `run init --project PATH`
+selects the nearest file from PATH upward through the Git worktree root, never above it;
+one complete file, not a parent merge. The selected path is returned. Lease/history identity
+remains the canonical worktree root. `run init` snapshots the policy; `run config` shows worker roles and current limits (first eight roles,
 with an overflow count). `run config --full` shows the complete effective policy,
 including native review contracts and owner settings. No config call is required
 before queueing. Edits apply to **new runs**.
@@ -300,6 +325,17 @@ The checked-in example pins the verifier to `claude-opus-5` and allows one optio
 native verifier per implementer. Model/effort support depends on the installed
 runtime; report unavailable contracts rather than silently substituting. The
 orchestrator role cannot change an already-running owner's model.
+
+| Managed worker | Launch contract | Verification |
+| --- | --- | --- |
+| Claude | `--permission-mode auto`; auto-capable Opus/Sonnet/Fable | Explicit Auto footer before initial/resumed task submission; missing/manual mode preserves an unsubmitted tab for inspection/cancel |
+| Codex | `--approve-for-me`; workspace sandbox + automatic review | Native flag only; no claim of observed runtime mode |
+| Copilot | `--autopilot --allow-all`; existing Git deny rules | Native flag only; no claim of observed runtime mode |
+
+- Model validation before allocation; known incompatible Claude choices (Haiku, older models, `opusplan`) refused; never substitute or bypass permissions.
+- Account/admin restrictions can still disable Auto; trust/explicit approval prompts remain protected. [Claude mode requirements](https://code.claude.com/docs/en/permission-modes).
+- Native blocked → working changes the status cycle, not the assignment generation; current proof retained. Explicit followup creates a new generation.
+- Legacy unsubmitted startup with a blank-generation hook receipt: narrowly cancellable after checkpoint/identity/topology checks. Nonempty generation drift: `GENERATION_DRIFT`; retain evidence/reservation, inspect rather than retry unchanged.
 
 Native children: no recursion or extra Herdr tabs. Child limits and read-only access
 are agent instructions, **not an OS security boundary**.

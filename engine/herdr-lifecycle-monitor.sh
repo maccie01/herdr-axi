@@ -27,6 +27,7 @@ transition_state=""
 pending_rearm=false
 pending_cycle=""
 pending_settled=""
+pending_generation=""
 notify_reason=""
 displayed_state=""
 retry_delay=1
@@ -324,20 +325,32 @@ remember_rearm_boundary() {
   pending_rearm=false
   pending_cycle=""
   pending_settled=""
+  pending_generation=""
   if herdr_receipt_read "$receipt_file"; then
     pending_rearm=true
     pending_cycle="$receipt_cycle"
     pending_settled="$receipt_settled_fingerprint"
+    pending_generation="$receipt_generation"
   fi
 }
 
 apply_pending_rearm() {
   [[ "$pending_rearm" == "true" ]] || return 0
-  herdr_receipt_rearm_if_unchanged \
-    "$receipt_file" "$pending_cycle" "$pending_settled" monitor-working
+  # A native state transition cannot invent an assignment for a legacy receipt.
+  if [[ -n "$pending_generation" ]] && ! herdr_receipt_rearm_if_unchanged \
+    "$receipt_file" "$pending_cycle" "$pending_settled" monitor-working "$pending_generation"; then
+    local notice="Lifecycle receipt rearm failed; inspect receipt/lock before restarting supervision"
+    local temporary="${receipt_file}.monitor-error.$$"
+    if printf '%s\t%s\n' "$pending_generation" "$notice" > "$temporary"; then
+      mv -f "$temporary" "${receipt_file}.monitor-error" || true
+    fi
+    printf '%s\n' "$notice" >&2
+    return 1
+  fi
   pending_rearm=false
   pending_cycle=""
   pending_settled=""
+  pending_generation=""
 }
 
 while true; do
@@ -345,7 +358,7 @@ while true; do
     if report_lost; then exit 0; else exit 1; fi
   }
   if [[ "$current_state" == "working" && "$pending_rearm" == "true" ]]; then
-    apply_pending_rearm || exit 0
+    apply_pending_rearm || exit 1
   fi
   display_status "$current_state"
 
@@ -358,7 +371,7 @@ while true; do
           remember_rearm_boundary
           wait_worker_transition "$current_state" || exit 0
           if [[ "$transition_state" == "working" ]]; then
-            apply_pending_rearm || exit 0
+            apply_pending_rearm || exit 1
           fi
           ;;
         10)
@@ -368,7 +381,7 @@ while true; do
           wait_worker_transition "$current_state" || exit 0
           if [[ "$transition_state" == "working" &&
             "$pending_rearm" == "true" ]]; then
-            apply_pending_rearm || exit 0
+            apply_pending_rearm || exit 1
           fi
           ;;
         11) remember_rearm_boundary ;;
@@ -383,7 +396,7 @@ while true; do
           remember_rearm_boundary
           wait_worker_transition blocked || exit 0
           if [[ "$transition_state" == "working" ]]; then
-            apply_pending_rearm || exit 0
+            apply_pending_rearm || exit 1
           fi
           ;;
         11) remember_rearm_boundary ;;
@@ -393,7 +406,7 @@ while true; do
     working)
       wait_worker_transition "$current_state" || exit 0
       if [[ "$transition_state" == "working" && "$pending_rearm" == "true" ]]; then
-        apply_pending_rearm || exit 0
+        apply_pending_rearm || exit 1
       fi
       ;;
     *)

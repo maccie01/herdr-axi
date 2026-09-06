@@ -55,7 +55,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       // Keep first startup in flight so concurrent `next` exercises reservations.
       await new Promise((resolve) => setTimeout(resolve, 150));
       emit({ agent: a });
-    } else if (action === "read") console.log(fs.existsSync(path.join(dir, `screen-${args[0]}`)) ? fs.readFileSync(path.join(dir, `screen-${args[0]}`), "utf8") : fs.existsSync(path.join(dir, "context-footer")) ? fs.readFileSync(path.join(dir, "context-footer"), "utf8") : "Worker result");
+    } else if (action === "read") console.log(fs.existsSync(path.join(dir, `screen-${args[0]}`)) ? fs.readFileSync(path.join(dir, `screen-${args[0]}`), "utf8") : fs.existsSync(path.join(dir, "context-footer")) ? fs.readFileSync(path.join(dir, "context-footer"), "utf8") : find(args[0])?.agent === "claude" ? "Worker result\n⏵⏵ auto mode on (shift+tab to cycle) · for agents" : "Worker result");
     else if (action === "wait") emit({ agent: find(args[0]) ?? missing("agent") });
     else if (action === "send-keys") { const a = find(args[0]); a.agent_status = "idle"; save(a); emit({ sent: true }); }
     else throw Error(`unexpected agent ${action}`);
@@ -99,7 +99,9 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
     const bin = path.join(dir, "bin"); fs.mkdirSync(bin);
     for (const [name, target] of [["herdr", self], ["node", process.execPath], ["jq", "/opt/homebrew/bin/jq"], ["rg", "/opt/homebrew/bin/rg"]]) fs.symlinkSync(target, path.join(bin, name));
     const env = { ...process.env, PATH: `${bin}:/usr/bin:/bin`, HERDR_BIN: self, HERDR_ENV: "1", HERDR_PANE_ID: owner.pane_id, HERDR_TAB_ID: owner.tab_id, HERDR_AXI_RUN: path.join(dir, "run"), HERDR_AXI_STATE_HOME: path.join(dir, "state"), AXI_RUN_TEST: dir };
+    const cliCalls = [];
     const execute = (args, extra = {}) => {
+      cliCalls.push(args);
       const r = spawnSync(process.execPath, [cli, ...args], { encoding: "utf8", timeout: 20000, env: { ...env, ...extra } });
       assert.ifError(r.error); return { ...r, output: r.stdout + r.stderr };
     };
@@ -125,7 +127,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
     fs.writeFileSync(path.join(dir, "prompt"), "Write hello. Check its contents. Report file and check.");
     const project = path.join(dir, "project"); fs.mkdirSync(project);
     const initialized = ok(["run", "init", "--dir", env.HERDR_AXI_RUN, "--project", project]);
-    return { dir, env, execute, ok, asyncRun, state, write, calls, queue, complete, initialized, clean: () => fs.rmSync(dir, { recursive: true, force: true }) };
+    return { dir, env, execute, ok, asyncRun, state, write, calls, cliCalls, queue, complete, initialized, clean: () => fs.rmSync(dir, { recursive: true, force: true }) };
   }
 
   function exhaustedWorker(f) {
@@ -137,6 +139,85 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
     fs.writeFileSync(path.join(f.dir, `screen-${w.pane}`), "● Partial implementation; checks pending\n✗ You have exceeded your monthly quota (Request ID: fixture)\n /commands · autopilot");
     return w;
   }
+
+  test("one queue-start call selects the requested Opus worker, verifies auto and completes the owned lifecycle", () => {
+    const f = fixture();
+    try {
+      const output = f.ok(["run", "queue", "opus-task", "--role", "implementer", "--kind", "claude", "--model", "claude-opus-5", "--effort", "xhigh", "--cwd", f.state().project, "--area", ".", "--prompt", "Implement a bounded change; report checks; application AWS budget is separate", "--start"]);
+      assert.match(output, /mode: auto/); assert.match(output, /,running/);
+      assert.deepEqual(f.cliCalls.map((args) => args.slice(0, 2)), [["run", "init"], ["run", "queue"]], "two CLI calls to a running worker; no guide/help/config/fleet preflight");
+      assert(Buffer.byteLength(output) < 1500, "startup reply stays bounded without expanding docs");
+      const r = f.state(), t = r.tasks[0], w = r.workers[0];
+      assert.equal(t.model, "claude-opus-5"); assert.equal(t.access, "write");
+      assert.equal(r.config.roles.implementer.kind, "copilot", "per-task choice does not rewrite project/run defaults");
+      const calls = f.calls(), start = calls.find((c) => c.action === "start");
+      assert(start.args.includes("claude-opus-5")); assert(start.args.includes("xhigh"));
+      assert.equal(start.args[start.args.indexOf("--permission-mode") + 1], "auto");
+      assert.equal(calls.filter((c) => c.action === "prompt").length, 1);
+      assert(calls.findIndex((c) => c.action === "read") < calls.findIndex((c) => c.action === "prompt"));
+      const prompt = calls.find((c) => c.action === "prompt").args[1];
+      assert.match(prompt, /Application\/model-call budgets are separate/);
+      assert(!calls.some((c) => ["layout", "current"].includes(c.action)));
+      f.complete(w); f.ok(["run", "accept", w.pane, "--evidence", "Fixture completion/checks independently inspected"]);
+      f.ok(["run", "close", w.pane]); f.ok(["run", "finish"]);
+      assert.equal(f.calls().filter((c) => c.action === "close").length, 1);
+    } finally { f.clean(); }
+  });
+
+  test("queue rejects manual and incompatible model requests without allocation; runtime downgrade leaves an inspectable cancellable tab", () => {
+    const f = fixture();
+    try {
+      const args = ["run", "queue", "bad", "--role", "implementer", "--cwd", f.state().project, "--area", ".", "--prompt", "Do work", "--start"];
+      for (const extra of [["--permission-mode", "manual"], ["--kind", "claude", "--model", "haiku"], ["--kind", "claude"]]) {
+        assert.equal(f.execute([...args, ...extra]).status, 1);
+        assert.equal(f.state().tasks.length, 0);
+      }
+      assert(!f.calls().some((c) => c.action === "create"));
+      fs.writeFileSync(path.join(f.dir, "context-footer"), "⏸ manual mode on");
+      const output = f.ok([...args, "--kind", "claude", "--model", "claude-opus-5"]);
+      assert.match(output, /AUTO_MODE_UNSUPPORTED/); assert.match(output, /submitted: false/);
+      const w = f.state().workers[0]; assert.equal(w.stage, "created");
+      assert(!f.calls().some((c) => ["split", "prompt", "close"].includes(c.action)));
+      f.ok(["run", "cancel", "bad", "--evidence", "Mode mismatch; no submitted work; authorized stop"]);
+      assert.equal(f.state().tasks[0].state, "cancelled");
+    } finally { f.clean(); }
+  });
+
+  test("queue-start failure reports durable queued task; invalid legacy models consume no slot or lease", () => {
+    const f = fixture();
+    try {
+      const code = `import fs from 'node:fs'; import assert from 'node:assert/strict';
+        import {runCommand} from ${JSON.stringify(new URL("../src/runs.mjs", import.meta.url).href)};
+        const rename = fs.renameSync; let commits=0;
+        fs.renameSync = (a,b) => { if (b.endsWith('/run.json') && ++commits === 2) throw Error('next publication failed'); return rename(a,b); };
+        await assert.rejects(runCommand('queue',{_:['persisted'],role:'implementer',cwd:${JSON.stringify(f.state().project)},area:'.',prompt:'bounded task',start:true}), /already queued; do not queue again/);`;
+      const result = spawnSync(process.execPath, ["--input-type=module", "-e", code], { env: f.env, encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr); assert.equal(f.state().tasks[0].state, "queued");
+      const r = f.state(); r.tasks[0].kind = "claude"; r.tasks[0].model = "haiku"; f.write(r);
+      const output = f.ok(["run", "next"]); assert.match(output, /auto-capable/);
+      assert(!f.calls().some((c) => c.action === "create")); assert.equal(f.state().tasks[0].state, "queued");
+    } finally { f.clean(); }
+  });
+
+  test("queue-start retains actionable deferral and generation drift never suggests a blind cancellation retry", () => {
+    const f = fixture();
+    try {
+      const w = exhaustedWorker(f);
+      const queued = f.ok(["run", "queue", "later", "--role", "implementer", "--cwd", f.state().project, "--area", ".", "--prompt", "Later task", "--start"]);
+      assert.match(queued, /queued: later/); assert.match(queued, /primary capacity/);
+      assert.equal(f.calls().filter((c) => c.action === "start").length, 1);
+      const fields = fs.readFileSync(w.receipt, "utf8").trimEnd().split("\t"); fields[9] = "different-assignment";
+      fs.writeFileSync(w.receipt, fields.join("\t") + "\n");
+      const failed = f.execute(["run", "cancel", "quota-task", "--evidence", "Authorized stop; observed partial state"]);
+      assert.equal(failed.status, 1); assert.match(failed.output, /GENERATION_DRIFT/);
+      assert.match(failed.output, /not retriable unchanged/);
+      assert.doesNotMatch(failed.output, /herdr-axi run cancel quota-task/);
+      const status = f.ok(["run", "status"]);
+      assert.match(status, /GENERATION_DRIFT/); assert.doesNotMatch(status, /herdr-axi run cancel quota-task/);
+      assert.equal(f.state().tasks[0].state, "cancelling");
+      assert(!f.calls().some((c) => c.action === "close"));
+    } finally { f.clean(); }
+  });
 
   test("failed startup without registry can be explicitly cancelled without closing inferred resources", async () => {
     const f = fixture(); let orphan;
@@ -460,6 +541,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       assert.equal(result.status, 1); assert.match(result.output, /SWITCH_PENDING/); assert.match(result.output, /run switch quota-task --cancel/);
       assert.equal(f.calls().filter((c) => c.action === "close").length, closes);
       f.ok(["run", "switch", "quota-task", "--cancel"]);
+      assert.equal(f.state().tasks[0].errorCode, undefined, "abandoned switch clears stale diagnostics");
       const report = f.ok(["watch", "--timeout-ms", "100"]);
       assert.match(report, /SWITCH_LATE_REPORT/); assert.match(report, /review/);
       f.ok(["run", "accept", w.pane, "--evidence", "Late report reviewed"]);
@@ -584,13 +666,15 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
     } finally { f.clean(); }
   });
 
-  test("cancellation can retire blocked startup before a monitor or receipt exists", () => {
+  for (const legacy of [false, true]) test(`cancellation can retire blocked startup before a monitor exists${legacy ? " with legacy missing receipt" : " with its armed receipt"}`, () => {
     const f = fixture();
     try {
       fs.writeFileSync(path.join(f.dir, "startup-blocked"), "");
       f.queue("startup"); f.ok(["run", "next"]);
       const w = f.state().workers[0];
-      assert.equal(w.monitor, null); assert(!fs.existsSync(w.receipt));
+      assert.equal(w.monitor, null);
+      assert.equal(fs.readFileSync(w.receipt, "utf8").trimEnd().split("\t")[9], w.generation);
+      if (legacy) fs.unlinkSync(w.receipt); // Pre-fix worker never armed before native startup.
       f.ok(["run", "cancel", "startup", "--evidence", "User cancelled unapproved startup; no task submitted."]);
       assert.equal(f.state().workers[0].closed, true);
       assert.equal(f.calls().filter((c) => c.action === "prompt").length, 0);
@@ -759,6 +843,25 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       const reads = f.calls().filter((c) => c.action === "read").length;
       f.ok(["fleet"]);
       assert.equal(f.calls().filter((c) => c.action === "read").length, reads);
+    } finally { if (watching) await watching; f.clean(); }
+  });
+
+  test("quiet watch backs off backend probes yet persisted reports wake it without another orchestrator call", async () => {
+    const f = fixture(); let watching;
+    try {
+      f.queue("task"); f.ok(["run", "next"]);
+      const w = f.state().workers[0];
+      const before = f.calls().filter((c) => c.action === "list").length;
+      watching = f.asyncRun(["watch", "--timeout-ms", "16000"]);
+      await new Promise((r) => setTimeout(r, 8500));
+      const probes = f.calls().filter((c) => c.action === "list").length - before;
+      assert(probes >= 2 && probes <= 3, `quiet run: initial + 2s + 4s reconciliation, got ${probes}`);
+      const started = Date.now(); f.complete(w);
+      const result = await watching;
+      assert.equal(result.status, 0, result.output);
+      assert.match(result.output, /checks passed/); assert.match(result.output, /run accept/);
+      assert(Date.now() - started < 3000, "receipt wake must not wait for the next 8s reconciliation");
+      assert(!fs.existsSync(path.join(f.env.HERDR_AXI_RUN, "watch.json")));
     } finally { if (watching) await watching; f.clean(); }
   });
 
@@ -1194,7 +1297,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       const r = f.state();
       r.limits.explore = 2;
       r.config.roles.implementer.subagents = [{ role: "verifier", max: 1, when: "review only" }];
-      for (let i = 0; i < 10; i++) r.config.roles[`reviewer${i}`] = { ...r.config.roles.verifier, model: `model-${i}` };
+      for (let i = 0; i < 10; i++) r.config.roles[`reviewer${i}`] = { ...r.config.roles.verifier, model: "claude-opus-5" };
       f.write(r);
       const compact = f.ok(["run", "config"]);
       assert.match(compact, /roles\[8\]/);
@@ -1207,7 +1310,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       assert.match(full, /review only/);
       assert.deepEqual(f.state(), r, "summaries never trim or rewrite stored contracts");
       f.ok(["run", "queue", "last", "--role", "reviewer9", "--cwd", r.project, "--area", ".", "--prompt-file", path.join(f.dir, "prompt")]);
-      assert.equal(f.state().tasks[0].model, "model-9");
+      assert.equal(f.state().tasks[0].model, "claude-opus-5");
     } finally { f.clean(); }
   });
 
@@ -1297,6 +1400,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       assert.equal(f.execute(["run", "recover", "a"]).status, 1);
       f.ok(["dispatch", w.pane, "--keys", "enter"]);
       assert.match(f.ok(["run", "recover", "a"]), /running/);
+      assert.equal(f.state().tasks[0].errorCode, undefined, "successful launch clears the old startup error");
       assert.equal(f.calls().filter((c) => c.action === "create").length, 1);
       assert.equal(f.calls().filter((c) => c.action === "prompt").length, 1);
     } finally { f.clean(); }
