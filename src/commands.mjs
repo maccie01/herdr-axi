@@ -194,7 +194,7 @@ export function run(args) {
     takeover: { from: "string", evidence: "string" },
     switch: { role: "string", kind: "string", model: "string", effort: "string", summary: "string", cancel: "boolean" },
     phase: { cap: "string" }, accept: { evidence: "string", "result-file": "string" }, revise: { prompt: "string", "prompt-file": "string" },
-    cancel: {}, close: {}, recover: {},
+    cancel: { evidence: "string" }, close: {}, recover: {},
   };
   if (!Object.hasOwn(specs, action)) throw runError(`Unknown run action: ${action}`);
   const o = parseArgs(rest, specs[action]);

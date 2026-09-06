@@ -48,7 +48,7 @@ export function runHerdr(args, { timeoutMs = 30_000, text = false } = {}) {
 }
 
 function mapErrorCode(msg = "", wireCode = "") {
-  if (["agent_not_found", "pane_not_found", "agent_not_running"].includes(wireCode)) return "UNKNOWN_AGENT";
+  if (["agent_not_found", "pane_not_found", "tab_not_found", "agent_not_running"].includes(wireCode)) return "UNKNOWN_AGENT";
   if (wireCode === "agent_blocked") return "AGENT_BLOCKED";
   if (wireCode === "agent_prompt_stalled") return "PROMPT_STALLED";
   if (wireCode === "timeout") return "TIMEOUT";

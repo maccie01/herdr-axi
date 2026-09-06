@@ -2012,7 +2012,53 @@ test_quota_hook_records_error_without_completion_or_owner_input() (
   assert_eq completed-task-quota "$(receipt_read_field 11)" "completed quota suppression reason"
 )
 
+test_cancel_monitor_orphan_requires_checkpoint_and_preserves_foreign_panes() (
+  setup_case cancel-monitor-orphan
+  source "$receipt_script"
+  mkdir -p "$(dirname -- "$HERDR_MONITOR_RECEIPT")"
+  herdr_receipt_lock_acquire "$HERDR_MONITOR_RECEIPT"
+  herdr_receipt_rearm_locked "$HERDR_MONITOR_RECEIPT" cancel testgen
+  herdr_receipt_lock_release
+  write_worker_registry worker ws testgen
+  export HERDR_AXI_MANAGED_TASK=1
+  run_file="$FAKE_HERDR_CASE/run.json"
+  if bash "$orchestrator_script" close worker --cancel "$run_file" >/dev/null 2>&1; then
+    fail "cancel closed without checkpoint"
+  fi
+  jq -nc --arg receipt "$HERDR_MONITOR_RECEIPT" '{schema:1,workspace:"ws",owner:{pane:"owner",tab:"owner-tab"},tasks:[{name:"worker",pane:"pane-1",state:"cancelling",cancellation:{from:{name:"worker",pane:"pane-1",tab:"tab-1",generation:"testgen",session:"session-1",receipt:$receipt},evidence:"User authorized stop; saved partial state",output:"partial result"}}]}' > "$run_file"
+  printf '%s\n' changed-session > "$FAKE_HERDR_CASE/session"
+  if bash "$orchestrator_script" close worker --cancel "$run_file" >/dev/null 2>&1; then
+    fail "cancel closed changed session"
+  fi
+  printf '%s\n' session-1 > "$FAKE_HERDR_CASE/session"
+  : > "$FAKE_HERDR_CASE/agent-get-fail"
+  if bash "$orchestrator_script" close worker --cancel "$run_file" >/dev/null 2>&1; then
+    fail "cancel treated unreadable live pane as absent"
+  fi
+  rm -f "$FAKE_HERDR_CASE/pane-1-alive"
+  : > "$FAKE_HERDR_CASE/extra-pane"
+  if bash "$orchestrator_script" close worker --cancel "$run_file" >/dev/null 2>&1; then
+    fail "cancel closed foreign pane in monitor-only tab"
+  fi
+  rm -f "$FAKE_HERDR_CASE/extra-pane"
+  if HERDR_AXI_OWNER_TAB=tab-1 bash "$orchestrator_script" close worker --cancel "$run_file" >/dev/null 2>&1; then
+    fail "cancel closed owner tab"
+  fi
+  assert_eq 0 "$(call_count '^tab close')" "failed validations never close"
+  bash "$orchestrator_script" close worker --cancel "$run_file" >/dev/null
+  assert_file_absent "$FAKE_HERDR_CASE/tab-alive" "cancel closes orphan tab"
+  assert_file_absent "$FAKE_HERDR_CASE/monitor-1-alive" "cancel closes monitor"
+  assert_file_absent "$HERDR_RECEIPT_ROOT/ws/worker.json" "cancel removes registry"
+  assert_eq "" "$(receipt_read_field 8)" "cancel never fabricates proof"
+  assert_eq cancelled "$(receipt_read_field 11)" "cancel tombstone reason"
+  bash "$orchestrator_script" close worker --cancel "$run_file" >/dev/null
+  assert_eq 1 "$(call_count '^tab close')" "cancel retry idempotent"
+  run_hook lost '{}'
+  assert_eq 0 "$(file_value "$FAKE_HERDR_CASE/prompt-attempts")" "intentional closure suppresses lost notification"
+)
+
 tests=(
+  test_cancel_monitor_orphan_requires_checkpoint_and_preserves_foreign_panes
   test_quota_hook_records_error_without_completion_or_owner_input
   test_quota_handoff_requires_checkpoint_identity_and_paused_worker
   test_claude_report_survives_receipt_ack_but_not_new_task

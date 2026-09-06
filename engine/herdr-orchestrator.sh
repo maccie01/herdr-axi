@@ -213,6 +213,7 @@ resolve_close_lifecycle() {
   close_agent_pane=$(jq -r '.agent_pane // empty' "$close_registry_file" 2>/dev/null || true)
   close_monitor_pane=$(jq -r '.monitor_pane // empty' "$close_registry_file" 2>/dev/null || true)
   close_generation=$(jq -r '.generation // empty' "$close_registry_file" 2>/dev/null || true)
+  close_stage=$(jq -r '.stage // empty' "$close_registry_file" 2>/dev/null || true)
   if [[ "$close_agent_pane" == "${HERDR_PANE_ID:-}" ||
     "$close_agent_pane" == "${HERDR_AXI_OWNER_PANE:-}" ||
     "$close_tab_id" == "${HERDR_TAB_ID:-}" ||
@@ -225,7 +226,7 @@ resolve_close_lifecycle() {
     "$registry_receipt" != "$close_receipt_file" ||
     -z "$close_tab_id" ||
     -z "$close_agent_pane" ||
-    -z "$close_monitor_pane" ]]; then
+    ( -z "$close_monitor_pane" && ( "${cancel_file:-}" == "" || "$close_stage" != "created" ) ) ]]; then
     printf '%s\n' \
       "herdr-orchestrator: registered lifecycle is malformed: $name" >&2
     return 1
@@ -284,7 +285,8 @@ validate_registered_resources() {
     [[ "$pane_tab" == "$close_tab_id" ]] || return 1
   fi
 
-  probe_resource pane "$close_monitor_pane"
+  resource_state=absent
+  [[ -z "$close_monitor_pane" ]] || probe_resource pane "$close_monitor_pane"
   monitor_pane_state="$resource_state"
   if [[ "$monitor_pane_state" == "present" ]]; then
     known_panes=$((known_panes + 1))
@@ -313,7 +315,8 @@ registered_resources_absent() {
   [[ "$resource_state" == "absent" ]] || return 1
   probe_resource pane "$close_agent_pane"
   [[ "$resource_state" == "absent" ]] || return 1
-  probe_resource pane "$close_monitor_pane"
+  resource_state=absent
+  [[ -z "$close_monitor_pane" ]] || probe_resource pane "$close_monitor_pane"
   [[ "$resource_state" == "absent" ]]
 }
 
@@ -432,14 +435,19 @@ case "$command_name" in
     name="$1"
     handoff_file=""
     handoff_json=""
+    cancel_file=""
+    cancel_json=""
     close_event=settled
     close_reason=close
     if (( $# == 3 )); then
-      [[ "$2" == "--handoff" && "${HERDR_AXI_MANAGED_TASK:-}" == "1" ]] || usage
-      handoff_file="$3"
-      [[ "$handoff_file" == "${HERDR_RECEIPT_ROOT%/receipts}/run.json" ]] || usage
+      [[ ( "$2" == "--handoff" || "$2" == "--cancel" ) && "${HERDR_AXI_MANAGED_TASK:-}" == "1" ]] || usage
+      [[ "$3" == "${HERDR_RECEIPT_ROOT%/receipts}/run.json" ]] || usage
       close_event=lost
-      close_reason=handoff
+      if [[ "$2" == "--handoff" ]]; then
+        handoff_file="$3"; close_reason=handoff
+      else
+        cancel_file="$3"; close_reason=cancelled
+      fi
     fi
     resolve_close_lifecycle "$name"
     if [[ "$close_already_closed" == "true" ]]; then
@@ -453,9 +461,26 @@ case "$command_name" in
       exit 1
     }
 
-    herdr_receipt_read "$receipt_file" ||
-      close_locked_error "close receipt is unreadable: $name"
-    if [[ -n "$handoff_file" ]]; then
+    if ! herdr_receipt_read "$receipt_file"; then
+      # A blocked startup has a registry but no submitted task/receipt yet.
+      [[ -n "$cancel_file" && "$close_stage" == "created" && ! -e "$receipt_file" ]] ||
+        close_locked_error "close receipt is unreadable: $name"
+      receipt_generation="$close_generation"
+    fi
+    if [[ -n "$cancel_file" ]]; then
+      cancel_json=$(jq -ce --arg name "$name" --arg pane "$close_agent_pane" \
+        --arg tab "$close_tab_id" --arg generation "$close_generation" \
+        --arg workspace "$close_workspace_id" --arg receipt "$close_receipt_file" '
+        select(.schema == 1 and .workspace == $workspace and .owner.pane != $pane and .owner.tab != $tab) |
+        [.tasks[] | select(.state == "cancelling" and .pane == $pane and .name == $name) |
+          .cancellation | select(.from.pane == $pane and .from.tab == $tab and .from.name == $name and
+            .from.generation == $generation and .from.receipt == $receipt and
+            (.evidence | type) == "string" and (.evidence | length) > 0 and (.output | type) == "string")] |
+        if length == 1 then {from: (.[0].from | {terminal,session})} else error("missing checkpoint") end' "$cancel_file") ||
+        close_locked_error "cancellation checkpoint missing or mismatched: $name"
+      [[ -n "$close_generation" && "$close_generation" == "$receipt_generation" ]] ||
+        close_locked_error "cancellation requires the current registered generation: $name"
+    elif [[ -n "$handoff_file" ]]; then
       [[ "$receipt_settled_fingerprint" != "generation:$receipt_generation" ]] ||
         close_locked_error "worker completed; cancel switch and review before normal close: $name"
       handoff_json=$(jq -ce --arg name "$name" --arg pane "$close_agent_pane" \
@@ -498,7 +523,15 @@ case "$command_name" in
       if [[ -n "$live_name" && "$live_name" != "$name" ]]; then
         close_locked_error "live agent does not match registry: $name"
       fi
-      if [[ -n "$handoff_file" ]]; then
+      if [[ -n "$cancel_file" ]]; then
+        [[ "$live_name" == "$name" && "$live_workspace" == "$close_workspace_id" &&
+          "$live_tab" == "$close_tab_id" && "$live_pane" == "$close_agent_pane" ]] ||
+          close_locked_error "cancellation live topology changed: $name"
+        printf '%s\n' "$info" | jq -e --argjson checkpoint "$cancel_json" '
+          .result.agent | (.terminal_id == $checkpoint.from.terminal or $checkpoint.from.terminal == null) and
+          (.agent_session.value == $checkpoint.from.session or $checkpoint.from.session == null)' >/dev/null ||
+          close_locked_error "cancellation worker identity changed: $name"
+      elif [[ -n "$handoff_file" ]]; then
         [[ "$live_name" == "$name" && "$live_workspace" == "$close_workspace_id" &&
           "$live_tab" == "$close_tab_id" && "$live_pane" == "$close_agent_pane" ]] ||
           close_locked_error "handoff live topology changed: $name"
@@ -530,12 +563,17 @@ case "$command_name" in
       if [[ -n "$live_pane" && "$live_pane" != "$close_agent_pane" ]]; then
         close_locked_error "live agent pane does not match registry: $name"
       fi
+    elif [[ -n "$cancel_file" ]]; then
+      # Monitor-only orphan: do not mistake a new occupant or an unreadable
+      # worker pane for absence. Full tab topology is checked below as usual.
+      probe_resource pane "$close_agent_pane"
+      [[ "$resource_state" == "absent" ]] || close_locked_error "cancellation worker cannot be verified: $name"
     elif [[ -n "$handoff_file" ]]; then
       registered_resources_absent || close_locked_error "handoff worker cannot be verified: $name"
     fi
 
     rendered_result=""
-    if [[ -z "$handoff_file" ]]; then
+    if [[ -z "$handoff_file" && -z "$cancel_file" ]]; then
       rendered_result=$(env \
       HERDR_MONITOR_ENABLED=1 \
       HERDR_MONITOR_RENDER_ONLY=1 \

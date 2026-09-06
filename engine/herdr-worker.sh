@@ -204,7 +204,7 @@ monitor_json=$(herdr pane split \
   --pane "$agent_pane" \
   --direction down \
   --ratio "${HERDR_AXI_AGENT_RATIO:-0.75}" \
-  --cwd "$worker_cwd" \
+  --cwd "$receipt_dir" \
   --no-focus)
 monitor_pane=$(printf '%s\n' "$monitor_json" | jq -r '.result.pane.pane_id // empty')
 [[ -n "$monitor_pane" ]] || {

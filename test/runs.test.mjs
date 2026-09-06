@@ -19,13 +19,14 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
   fs.appendFileSync(path.join(dir, "calls"), JSON.stringify({ group, action, args, time: Date.now() }) + "\n");
   const emit = (result) => console.log(JSON.stringify({ result }));
   const all = () => fs.readdirSync(dir).filter((n) => n.endsWith(".agent")).map((n) => JSON.parse(fs.readFileSync(path.join(dir, n))));
+  const monitors = () => fs.readdirSync(dir).filter((n) => n.endsWith(".monitor")).map((n) => JSON.parse(fs.readFileSync(path.join(dir, n))));
   const save = (a) => {
     const file = path.join(dir, `${a.pane_id}.agent`), temp = `${file}.${process.pid}.tmp`;
     fs.writeFileSync(temp, JSON.stringify(a)); fs.renameSync(temp, file);
   };
   const currentOwner = () => fs.existsSync(path.join(dir, "owner-gone")) ? [] : [fs.existsSync(path.join(dir, "owner.json")) ? JSON.parse(fs.readFileSync(path.join(dir, "owner.json"))) : owner];
   const find = (id) => [...currentOwner(), ...all()].find((a) => a.pane_id === id || a.name === id);
-  const missing = (kind) => { console.error(JSON.stringify({ error: { code: `${kind}_not_found`, message: "not found" } })); process.exit(1); };
+  const missing = (kind) => { console.error(JSON.stringify({ error: { code: `${kind}_not_found`, message: "resource absent" } })); process.exit(1); };
   if (group === "agent") {
     if (action === "list") emit({ agents: [...currentOwner(), ...all().filter((a) => a.agent)] });
     else if (action === "get") emit({ agent: find(args[0]) ?? missing("agent") });
@@ -64,8 +65,9 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       const a = { ...owner, pane_id: `wTEST:p${id}`, tab_id: `wTEST:t${id}`, terminal_id: id, name: "", label: args[args.indexOf("--label") + 1], agent: "", agent_status: "idle", cwd: args[args.indexOf("--cwd") + 1] };
       save(a); emit({ tab: { tab_id: a.tab_id }, root_pane: { pane_id: a.pane_id } });
     } else if (action === "get") {
-      const a = [...currentOwner(), ...all()].find((a) => a.tab_id === args[0]) ?? missing("tab");
-      emit({ tab: { tab_id: a.tab_id, workspace_id: a.workspace_id, pane_count: 2 } });
+      const panes = [...currentOwner(), ...all(), ...monitors()].filter((a) => a.tab_id === args[0]);
+      const a = panes[0] ?? missing("tab");
+      emit({ tab: { tab_id: a.tab_id, workspace_id: a.workspace_id, pane_count: panes.length + (fs.existsSync(path.join(dir, "extra-pane")) ? 1 : 0) } });
     } else if (action === "rename") {
       assert.notEqual(args[0], owner.tab_id);
       if (fs.existsSync(path.join(dir, "rename-delay"))) await new Promise((r) => setTimeout(r, 5000));
@@ -76,15 +78,17 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       assert.notEqual(args[0], owner.tab_id);
       if (fs.existsSync(path.join(dir, "close-fail"))) { console.error("temporary close failure"); process.exit(1); }
       for (const a of all().filter((a) => a.tab_id === args[0])) fs.unlinkSync(path.join(dir, `${a.pane_id}.agent`));
+      for (const a of monitors().filter((a) => a.tab_id === args[0])) fs.unlinkSync(path.join(dir, `${a.pane_id}.monitor`));
       emit({ closed: true });
     } else throw Error(`unexpected tab ${action}`);
   } else if (action === "current") {
     assert(args.includes("--current")); emit({ pane: owner });
   } else if (action === "split") {
     const a = find(args[args.indexOf("--pane") + 1]);
+    fs.writeFileSync(path.join(dir, `${a.pane_id}MONITOR.monitor`), JSON.stringify({ pane_id: a.pane_id + "MONITOR", tab_id: a.tab_id, workspace_id: a.workspace_id }));
     emit({ pane: { pane_id: a.pane_id + "MONITOR" } });
   } else if (action === "get") {
-    const a = find(args[0].replace(/MONITOR$/, "")) ?? missing("pane");
+    const a = [...currentOwner(), ...all(), ...monitors()].find((a) => a.pane_id === args[0]) ?? missing("pane");
     emit({ pane: { pane_id: args[0], tab_id: a.tab_id } });
   } else if (["run", "wait-output"].includes(action)) emit({ ok: true });
   else throw Error(`unexpected pane ${action}`);
@@ -132,6 +136,140 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
     fs.writeFileSync(path.join(f.dir, `screen-${w.pane}`), "● Partial implementation; checks pending\n✗ You have exceeded your monthly quota (Request ID: fixture)\n /commands · autopilot");
     return w;
   }
+
+  test("explicit cancellation closes working worker AND monitor; saves partial work without acceptance", () => {
+    const f = fixture();
+    try {
+      f.queue("stop"); f.ok(["run", "next"]);
+      const w = f.state().workers[0], task = f.state().tasks[0];
+      // Launch already published running; a long-lived caller/reused old PID
+      // is not an active launch and must not strand cancellation.
+      const running = f.state(); running.tasks[0].launcher = process.pid; f.write(running);
+      const partial = path.join(task.cwd, "partial.txt"); fs.writeFileSync(partial, "unfinished");
+      const args = ["run", "cancel", w.pane, "--evidence", "User authorized stop; partial files retained, no detached jobs."];
+      assert.match(f.execute(["run", "cancel", w.pane]).output, /CANCEL_EVIDENCE_REQUIRED/);
+      assert.match(f.execute(["run", "close", w.pane]).output, /herdr-axi run cancel/);
+      assert.match(f.execute(["run", "recover", w.pane]).output, /herdr-axi run cancel/);
+      assert.equal(f.calls().filter((c) => c.action === "close").length, 0);
+      fs.writeFileSync(path.join(f.dir, `screen-${w.pane}`), "partial terminal history ".repeat(2000));
+      const output = f.ok(args); assert.match(output, /cancelled: stop/);
+      assert(!fs.existsSync(path.join(f.dir, `${w.pane}.agent`)));
+      assert(!fs.existsSync(path.join(f.dir, `${w.monitor}.monitor`)));
+      assert.equal(f.state().workers[0].closed, true);
+      assert.equal(f.state().tasks[0].state, "cancelled");
+      assert.equal(f.state().tasks[0].cancellation.output.length, 32000);
+      assert.equal(fs.readFileSync(partial, "utf8"), "unfinished");
+      assert.deepEqual(fs.readdirSync(path.join(f.env.HERDR_AXI_STATE_HOME, "writers")), []);
+      assert.notEqual(fs.readFileSync(w.receipt, "utf8").split("\t")[7], `generation:${w.generation}`);
+      f.ok(["run", "cancel", "stop"]);
+      assert.equal(f.calls().filter((c) => c.action === "close").length, 1);
+      const split = f.calls().find((c) => c.action === "split");
+      assert.equal(split.args[split.args.indexOf("--cwd") + 1], path.dirname(w.receipt));
+      f.ok(["run", "finish"]);
+      const archive = JSON.parse(gunzipSync(fs.readFileSync(path.join(f.env.HERDR_AXI_RUN, "detail.json.gz"))));
+      assert.equal(archive.tasks[0].cancellation.output.length, 32000);
+      assert.match(f.ok(["run", "history", "--task", "stop"]), /User authorized stop/);
+    } finally { f.clean(); }
+  });
+
+  test("cancellation repairs a monitor-only orphan after its worktree was externally deleted", () => {
+    const f = fixture();
+    try {
+      f.queue("orphan"); f.ok(["run", "next"]);
+      const w = f.state().workers[0];
+      fs.unlinkSync(path.join(f.dir, `${w.pane}.agent`));
+      fs.rmdirSync(f.state().tasks[0].cwd);
+      assert.match(f.execute(["run", "recover", w.pane]).output, /RESOURCES_REMAIN/);
+      assert.match(f.ok(["run", "cancel", w.pane, "--evidence", "Authorized cleanup; prior agent and empty worktree already removed."]), /capture: unavailable/);
+      assert.equal(f.state().tasks[0].state, "cancelled");
+      assert(!fs.existsSync(path.join(f.dir, `${w.monitor}.monitor`)));
+      assert.match(f.state().tasks[0].cancellation.gitStatus, /unavailable/);
+      assert.equal(f.calls().filter((c) => c.group === "tab" && c.action === "close").length, 1);
+    } finally { f.clean(); }
+  });
+
+  test("failed cancellation reserves slot and lease; retry closes once without another prompt", () => {
+    const f = fixture();
+    try {
+      const w = exhaustedWorker(f);
+      const leases = path.join(f.env.HERDR_AXI_STATE_HOME, "writers"), lease = path.join(leases, fs.readdirSync(leases)[0]);
+      const savedLease = fs.readFileSync(lease, "utf8");
+      fs.writeFileSync(path.join(f.dir, "close-fail"), "");
+      assert.match(f.execute(["run", "cancel", w.pane, "--evidence", "Authorized cancellation"]).output, /CANCEL_PENDING/);
+      const checkpoint = f.state().tasks[0].cancellation;
+      assert.equal(f.state().tasks[0].state, "cancelling");
+      assert.equal(fs.readFileSync(lease, "utf8"), savedLease);
+      assert.match(f.ok(["run", "status"]), /herdr-axi run cancel quota-task/);
+      assert.match(f.execute(["run", "finish"]).output, /RUN_ACTIVE/);
+      fs.unlinkSync(path.join(f.dir, "close-fail"));
+      f.ok(["run", "cancel", "quota-task"]);
+      assert.deepEqual(f.state().tasks[0].cancellation, checkpoint);
+      assert(!fs.existsSync(lease));
+      assert.equal(f.calls().filter((c) => c.action === "prompt").length, 1);
+    } finally { f.clean(); }
+  });
+
+  test("cancellation refuses changed identities, extra panes, owner tab and live controls", () => {
+    const f = fixture();
+    try {
+      const w = exhaustedWorker(f), args = ["run", "cancel", w.pane, "--evidence", "Authorized stop"];
+      const state = f.state(), file = path.join(f.dir, `${w.pane}.agent`), a = JSON.parse(fs.readFileSync(file));
+      state.tasks[0].state = "starting"; state.tasks[0].launcher = process.pid; f.write(state);
+      assert.match(f.execute(args).output, /RUN_BUSY/);
+      state.tasks[0].state = "running"; delete state.tasks[0].launcher; f.write(state);
+      a.terminal_id = "replacement"; fs.writeFileSync(file, JSON.stringify(a));
+      assert.match(f.execute(args).output, /WORKER_CHANGED/);
+      a.terminal_id = w.terminal; fs.writeFileSync(file, JSON.stringify(a));
+      state.workers[0].tab = owner.tab_id; f.write(state);
+      assert.match(f.execute(args).output, /SELF_TARGET/);
+      state.workers[0].tab = w.tab; f.write(state);
+      fs.writeFileSync(path.join(f.dir, "extra-pane"), "");
+      assert.match(f.execute(args).output, /CANCEL_PENDING/);
+      assert.equal(f.calls().filter((c) => c.action === "close").length, 0);
+      fs.unlinkSync(path.join(f.dir, "extra-pane"));
+      f.ok(["run", "cancel", "quota-task"]);
+    } finally { f.clean(); }
+  });
+
+  test("cancellation can retire blocked startup before a monitor or receipt exists", () => {
+    const f = fixture();
+    try {
+      fs.writeFileSync(path.join(f.dir, "startup-blocked"), "");
+      f.queue("startup"); f.ok(["run", "next"]);
+      const w = f.state().workers[0];
+      assert.equal(w.monitor, null); assert(!fs.existsSync(w.receipt));
+      f.ok(["run", "cancel", "startup", "--evidence", "User cancelled unapproved startup; no task submitted."]);
+      assert.equal(f.state().workers[0].closed, true);
+      assert.equal(f.calls().filter((c) => c.action === "prompt").length, 0);
+    } finally { f.clean(); }
+  });
+
+  test("cancellation publishes checkpoint before closure and resumes after failed final publication", () => {
+    const f = fixture();
+    try {
+      const w = exhaustedWorker(f);
+      const source = `import fs from 'node:fs'; import assert from 'node:assert/strict';
+        import {runCommand} from ${JSON.stringify(new URL("../src/runs.mjs", import.meta.url).href)};
+        import {loadRun} from ${JSON.stringify(new URL("../src/run-state.mjs", import.meta.url).href)};
+        const rename = fs.renameSync;
+        const args = {_:['quota-task'], evidence:'User authorized stop; partial state retained'};
+        fs.renameSync = (a,b) => { if (b.endsWith('/run.json')) throw Error('checkpoint failed'); return rename(a,b); };
+        await assert.rejects(runCommand('cancel',args), /checkpoint failed/);
+        assert.equal(loadRun().tasks[0].state, 'running');
+        assert(fs.existsSync(${JSON.stringify(path.join(f.dir, `${w.pane}.agent`))}));
+        fs.renameSync = (a,b) => { if (b.endsWith('/run.json') && JSON.parse(fs.readFileSync(a)).tasks[0].state === 'cancelled') throw Error('publication failed'); return rename(a,b); };
+        await assert.rejects(runCommand('cancel',args), {code:'CANCEL_PENDING'});
+        assert.equal(loadRun().tasks[0].state, 'cancelling');
+        assert(!fs.existsSync(${JSON.stringify(path.join(f.dir, `${w.monitor}.monitor`))}));
+        fs.renameSync = rename;
+        await runCommand('cancel',{_:['quota-task']});
+        assert.equal(loadRun().tasks[0].state, 'cancelled');`;
+      const result = spawnSync(process.execPath, ["--input-type=module", "-e", source], { env: f.env, encoding: "utf8", timeout: 20000 });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(f.calls().filter((c) => c.action === "close").length, 1);
+      assert.deepEqual(fs.readdirSync(path.join(f.env.HERDR_AXI_STATE_HOME, "writers")), []);
+    } finally { f.clean(); }
+  });
 
   test("quota wakes fleet/inbox/watch and switches the same unfinished task without losing files or its lease", () => {
     const f = fixture();
@@ -817,6 +955,8 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       assert.equal(f.state().tasks[0].state, "running");
       assert.equal(f.calls().filter((c) => c.action === "prompt").length, 1);
       fs.unlinkSync(path.join(f.dir, `${w.pane}.agent`));
+      assert.match(f.execute(["run", "recover", w.pane]).output, /RESOURCES_REMAIN/);
+      fs.unlinkSync(path.join(f.dir, `${w.monitor}.monitor`));
       assert.match(f.ok(["run", "recover", w.pane]), /requeued/);
       assert.equal(f.state().tasks[0].state, "queued");
     } finally { f.clean(); }
