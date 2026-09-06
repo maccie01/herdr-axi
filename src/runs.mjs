@@ -27,6 +27,24 @@ function taskPrompt(o) {
   return prompt;
 }
 
+// Preserve the current generation's evidence before accepting OR replacing it.
+function workerReport(worker, replacement) {
+  try {
+    let report;
+    if (replacement) {
+      const stat = fs.statSync(replacement);
+      if (!stat.isFile() || stat.size > 14000) throw Error("Replacement report must be a regular file, at most 3500 characters");
+      const detail = fs.readFileSync(replacement, "utf8");
+      if (!detail.trim() || detail.length > 3500) throw Error("Replacement report must contain 1..3500 characters");
+      report = { generation: worker.generation, summary: detail.slice(0, 600), detail };
+    } else report = JSON.parse(fs.readFileSync(worker.receipt + ".inbox", "utf8"));
+    if (report?.generation !== worker.generation || typeof report.summary !== "string" || typeof (report.detail ?? report.summary) !== "string" || !(report.detail ?? report.summary).trim()) throw Error("missing/mismatched current report");
+    return { summary: report.summary.slice(0, 600), result: (report.detail ?? report.summary).slice(0, 3500), ...(report.truncated || (report.detail ?? report.summary).length > 3500 ? { truncated: true } : {}), ...(replacement ? { resultSource: "coordinator-replacement" } : {}) };
+  } catch (e) {
+    throw runError(`Report unavailable at ${worker.receipt}.inbox: ${e.message}. Retry inbox; if unrecoverable, preserve a reviewed replacement with --result-file FILE. No acceptance or new generation.`, "RESULT_UNAVAILABLE", ["herdr-axi run inbox", `herdr-axi read ${worker.pane} --full`]);
+  }
+}
+
 function taskLocation(cwd, relativeArea) {
   cwd = fs.realpathSync(cwd);
   if (!fs.statSync(cwd).isDirectory()) throw runError("--cwd must be a directory");
@@ -267,6 +285,7 @@ export function runStatus() {
   const cancelling = tasks.find((t) => t.state === "cancelling");
   const blocked = tasks.find((t) => t.state === "blocked");
   const ready = tasks.find((t) => t.delivery === "not_submitted" && ["idle", "done"].includes(t.state));
+  const lost = tasks.find((t) => ["lost", "unverified"].includes(t.state));
   let help;
   const drifted = tasks.find((t) => t.code === "GENERATION_DRIFT");
   if (drifted) help = [`herdr-axi run history --task ${drifted.task}`, `herdr-axi read ${drifted.pane} --raw`];
@@ -275,6 +294,7 @@ export function runStatus() {
   else if (switching) help = [`herdr-axi run switch ${switching.task}`];
   else if (blocked) help = [`herdr-axi read ${blocked.pane} --raw`];
   else if (ready) help = [`herdr-axi run recover ${ready.pane}`];
+  else if (lost) help = [`herdr-axi run recover ${lost.task}`, `herdr-axi run cancel ${lost.task} --evidence 'Authorized stop; partial state and background jobs reviewed'`];
   else if (parkedAttention.length) help = [parkedAttention[0].help];
   else if (tasks.some((t) => !["working", "starting"].includes(t.state))) help = ["herdr-axi run inbox"];
   else if (context?.warnings.length) help = [`herdr-axi read ${context.warnings[0].pane}`];
@@ -295,6 +315,7 @@ export function runStatus() {
     ...(!tasks.length && queued.length ? { backlog: queued.slice(0, 8).map((t) => ({ task: t.id, phase: t.phase, after: t.deps })), ...(queued.length > 8 ? { more: queued.length - 8 } : {}) } : {}),
     ...(!tasks.length && !queued.length && !parked.length ? { complete: true } : {}),
     ...(exhausted ? { quota: "Provider capacity exhausted, not task completion. Switch in this run; preserve worktree and lease. No WIP commit or new run needed." } : {}),
+    ...(lost && tasks.some((t) => ["working", "starting"].includes(t.state)) ? { independentWait: `herdr-axi watch --task ${tasks.find((t) => ["working", "starting"].includes(t.state)).task}`, waitNote: "Lost task still needs an explicit recovery/cancellation decision. To await independent work meanwhile, use the task-scoped watch; no fleet/read polling." } : {}),
     help };
 }
 
@@ -303,9 +324,23 @@ const watchKey = (s) => JSON.stringify({ phase: s.phase, capacity: s.capacity, o
 const needsAttention = (s) => s.contextWarnings?.length || s.contextError || s.ownershipIssues?.length || s.tasks?.some((t) => !["working", "starting"].includes(t.state));
 const waitingNote = "Continue independent work. Use one notification-backed background watch if supported; otherwise wait only when dependent. No inbox/read polling.";
 
-export async function watchRun(timeout = 30000) {
+export async function watchRun(timeout = 30000, task) {
   const selected = loadRun();
   if (!selected?.finishedAt) ownerCheck(selected);
+  if (task && !selected.tasks.some((t) => t.id === task)) throw runError(`Unknown task: ${task}`, "UNKNOWN_TASK", ["herdr-axi run status"]);
+  // Task-scoped waits leave other unresolved work visible, but it must not
+  // repeatedly wake a coordinator waiting on an independent dependency.
+  const focus = (s) => {
+    if (!task) return s;
+    let current = s.tasks?.find((t) => t.task === task);
+    if (current && ["idle", "done"].includes(current.state) && !current.delivery && !current.code) {
+      const w = loadRun().workers.find((w) => w.pane === current.pane && !w.closed);
+      // Intermediate native settlement isn't a result. A late proof IS a
+      // reason to wake and collect through inbox, even before the hook ran.
+      if (w && !fs.existsSync(`${w.receipt}.proof.${w.generation}`)) current = { ...current, state: "working" };
+    }
+    return { owner: s.owner, finished: s.finished, tasks: current ? [current] : [], contextWarnings: s.contextWarnings?.filter((w) => w.pane === current?.pane), ownershipIssues: s.ownershipIssues?.filter((i) => i.task === task) };
+  };
   const file = path.join(runDir() ?? ".", "watch.json");
   changeRun(() => {
     let previous;
@@ -320,9 +355,9 @@ export async function watchRun(timeout = 30000) {
   const wake = runWake(runDir());
   try {
     const first = runStatus();
-    const attention = async (s, changed, reason) => ({ changed, reason, ...(s.tasks?.some((t) => ["review", "idle", "done"].includes(t.state) || t.quota) && s.owner === callerPane() ? await runCommand("inbox", { _: [] }) : s) });
-    if (!first.tasks?.length || needsAttention(first)) return await attention(first, false, "attention");
-    const key = watchKey(first);
+    const attention = async (s, changed, reason) => ({ changed, reason, ...(task ? { watching: task } : {}), ...(focus(s).tasks?.some((t) => ["review", "idle", "done"].includes(t.state) || t.quota) && s.owner === callerPane() ? await runCommand("inbox", { _: [], task }) : s) });
+    if (!focus(first).tasks?.length || needsAttention(focus(first))) return await attention(first, false, "attention");
+    const key = watchKey(focus(first));
     let latest = first;
     const start = Date.now();
     let interval = 2000, lastProbe = start;
@@ -334,9 +369,9 @@ export async function watchRun(timeout = 30000) {
       lastProbe = Date.now();
       interval = Math.min(interval * 2, 10000);
       if (!latest.finished && latest.owner !== first.owner) return { changed: true, reason: "owner-changed", owner: latest.owner, note: "Stop old-owner supervision; replacement owns this run." };
-      if (key !== watchKey(latest)) return await attention(latest, true, "state-change");
+      if (key !== watchKey(focus(latest))) return await attention(latest, true, "state-change");
     }
-    return { changed: false, reason: "timeout", pending: latest.occupied, note: waitingNote, help: latest.help };
+    return { changed: false, reason: "timeout", ...(task ? { watching: task } : {}), pending: focus(latest).tasks.length, note: waitingNote, help: task ? [`herdr-axi watch --task ${task}`] : latest.help };
   } finally { wake.close(); fs.rmSync(file, { force: true }); }
 }
 
@@ -486,11 +521,11 @@ async function executeRunCommand(action, o) {
     }
     if (!events.length && !errors.length && status.occupied && !needsAttention(status))
       return { events: [], pending: status.occupied, queued: status.queued, note: waitingNote, help: status.help };
-    const first = status.tasks.find((t) => t.state === "blocked") ?? status.tasks.find((t) => !["working", "starting"].includes(t.state) && t.pane !== "pending");
+    const first = status.tasks.find((t) => t.task === o.task) ?? status.tasks.find((t) => t.state === "blocked") ?? status.tasks.find((t) => t.state === "review") ?? status.tasks.find((t) => !["working", "starting"].includes(t.state) && t.pane !== "pending");
     const report = events.find((e) => e.pane === first?.pane);
     const help = status.tasks.some((t) => t.quota || t.state === "switching") ? status.help : errors.length ? [`herdr-axi read ${errors[0].pane} --raw`, "herdr-axi run --help"]
       : first?.state === "review" && report ? [report.truncated ? `herdr-axi read ${first.pane}` : `herdr-axi run accept ${first.pane} --evidence "<verified checks>"`]
-      : ["lost", "unverified"].includes(first?.state) ? ["herdr-axi agents --all", "herdr-axi run --help"]
+      : ["lost", "unverified"].includes(first?.state) ? [`herdr-axi run recover ${first.task}`, `herdr-axi run cancel ${first.task} --evidence 'Authorized stop; partial state and background jobs reviewed'`]
       : first ? [`herdr-axi read ${first.pane} --raw`] : status.help;
     return { ...status, events, ...(errors.length ? { errors: errors.slice(0, 8), ...(errors.length > 8 ? { moreErrors: errors.length - 8 } : {}), note: "Collection/report error: inspect and repair before acceptance; do not repeatedly fetch the same error." } : report ? { note: "Review result/checks, then accept or revise. Read only if evidence is insufficient; do not re-fetch the same report." } : {}), help };
   }
@@ -837,23 +872,12 @@ async function executeRunCommand(action, o) {
       const quota = live && live.state !== "working" ? quotaError(runHerdr(["agent", "read", pane, "--source", "visible", "--lines", "24"], { timeoutMs: 1000, text: true })) : null;
       throw runError(quota ? "Quota exhausted, not completed. Switch the existing task; no acceptance or new run needed." : "Acceptance requires live settlement and this generation's completion receipt. To stop unfinished work instead, use cancel with explicit evidence.", quota ? "QUOTA_EXHAUSTED" : "NOT_COMPLETE", quota ? switchHelp(run, pane, worker.kind) : ["herdr-axi run inbox", `herdr-axi run cancel ${pane} --evidence 'Authorized stop; partial state and background jobs reviewed'`]);
     }
-    let report;
-    try {
-      if (o["result-file"]) {
-        const file = o["result-file"], stat = fs.statSync(file);
-        if (!stat.isFile() || stat.size > 14000) throw Error("Replacement report must be a regular file, at most 3500 characters");
-        const detail = fs.readFileSync(file, "utf8");
-        if (!detail.trim() || detail.length > 3500) throw Error("Replacement report must contain 1..3500 characters");
-        report = { generation: worker.generation, summary: detail.slice(0, 600), detail };
-      } else report = JSON.parse(fs.readFileSync(worker.receipt + ".inbox", "utf8"));
-      if (report?.generation !== worker.generation || typeof report.summary !== "string" || typeof (report.detail ?? report.summary) !== "string" || !(report.detail ?? report.summary).trim()) throw Error("missing/mismatched current report");
-    } catch (e) { throw runError(`Report unavailable at ${worker.receipt}.inbox: ${e.message}. Retry run inbox; if unrecoverable, explicitly preserve a reviewed replacement with accept --result-file FILE.`, "RESULT_UNAVAILABLE"); }
+    const report = workerReport(worker, o["result-file"]);
     changeRun((r, { afterCommit }) => {
       const t = r.tasks.find((t) => t.id === task.id);
       if (t.state !== "running" || r.workers.find((w) => w.pane === pane)?.generation !== worker.generation) throw runError("Task changed or delivery uncertain; inspect before accepting");
       t.state = "accepted"; t.evidence = o.evidence.slice(0, 1000);
-      t.summary = report.summary.slice(0, 600); t.result = String(report.detail ?? report.summary).slice(0, 3500);
-      if (o["result-file"]) t.resultSource = "coordinator-replacement";
+      Object.assign(t, report);
       const commit = spawnSync("git", ["-C", t.cwd, "rev-parse", "HEAD"], { encoding: "utf8", timeout: 2000 });
       if (commit.status === 0) t.commit = commit.stdout.trim();
       afterCommit.push(() => writerLease(r, t, true));
@@ -862,6 +886,7 @@ async function executeRunCommand(action, o) {
   }
   if (action === "revise") {
     if (!live || !["idle", "done"].includes(live.state) || !receipt(worker)?.complete) throw runError("revise needs a completed current generation");
+    const report = workerReport(worker, o["result-file"]);
     const prompt = revisionPrompt;
     const next = changeRun((r) => {
       const t = r.tasks.find((t) => t.id === task.id);
@@ -869,9 +894,7 @@ async function executeRunCommand(action, o) {
       if (r.workers.find((w) => w.pane === pane)?.generation !== worker.generation) throw runError("Generation changed; inspect again");
       t.revisions ??= [];
       if (t.revisions.length >= 8) throw runError("Eight revisions reached; accept/re-scope explicitly instead of an unbounded fix loop");
-      let summary;
-      try { const e = JSON.parse(fs.readFileSync(worker.receipt + ".inbox")); if (e.generation === worker.generation) summary = String(e.summary).slice(0, 600); } catch { /* prior prompt retained */ }
-      t.revisions.push({ at: new Date().toISOString(), prompt: t.prompt, summary });
+      t.revisions.push({ at: new Date().toISOString(), generation: worker.generation, prompt: t.prompt, ...report });
       const handoff = t.handoffs?.findLast((h) => h.state === "retired");
       if (handoff) { handoff.completedGeneration = worker.generation; handoff.completedBy = worker.name; }
       t.prompt = prompt; t.state = "starting"; t.launcher = process.pid;

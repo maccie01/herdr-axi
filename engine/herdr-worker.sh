@@ -204,11 +204,24 @@ done
 if [[ "$kind" == "claude" ]]; then
   # Passing --permission-mode auto is not proof that the provider enabled it.
   # Keep an unsupported or unverified session inspectable, without sending work.
-  if ! herdr agent read "$agent_pane" --source visible --lines 40 |
-    "$HERDR_AXI_NODE" "$script_dir/../src/launch-policy.mjs" --check-screen >/dev/null; then
-    cleanup_created_tab=false
-    exit 1
-  fi
+  # Native readiness may precede the first footer render. Retry only missing
+  # evidence, with at most 750ms backoff; a wrong mode fails immediately.
+  for mode_attempt in 1 2 3 4; do
+    if ! mode_screen=$(herdr agent read "$agent_pane" --source visible --lines 40); then
+      cleanup_created_tab=false
+      exit 1
+    fi
+    if mode_error=$(printf '%s\n' "$mode_screen" |
+      "$HERDR_AXI_NODE" "$script_dir/../src/launch-policy.mjs" --check-screen 2>&1); then
+      break
+    fi
+    if [[ "$mode_error" != AUTO_MODE_UNVERIFIED:* || "$mode_attempt" == 4 ]]; then
+      printf '%s\n' "$mode_error" >&2
+      cleanup_created_tab=false
+      exit 1
+    fi
+    sleep 0.25
+  done
 fi
 
 task=$(< "$prompt_file")

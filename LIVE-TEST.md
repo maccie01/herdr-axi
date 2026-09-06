@@ -574,3 +574,40 @@ by these tests. Existing fake backends; dependency-free Node tests.
 - Cleanup verified against backend: workers `w1B:p1G/p1J/p1M/p1P/p1S/p1T/p1X/p1Z`; tabs `w1B:t12/t13/t14/t15/t17/t18/t19/t1A` all absent. Both orchestrator tabs `w1B:t11` and `w1B:t16` also absent. Original parent `w1B:p2` remains present.
 - Three runs archived; all worker records closed; both test lease directories empty. Scratch fixtures/evidence retained outside the repository; native session transcripts not deleted. No live project or foreign agent modified; no worker commits, pushes or project state/plan documents.
 - `no-mistakes`: existing official Go installation `~/go/bin/no-mistakes` v1.60.0 was missing from PATH. Added `/opt/homebrew/bin/no-mistakes` symlink; login-zsh/sh/version/help/doctor passed. No reinstall, upgrade, daemon reset, repo initialization or paid pipeline run.
+
+## Deeper Sonnet failure drill — 7 September 2026
+
+- Pushed baseline `9269418` to `origin/fix/quota-recovery-boundaries` before testing.
+- Disposable project: `/private/tmp/herdr-axi-deep.Varl2o/project`; external state beside it. No real project changes or foreign pane control.
+- One fresh Sonnet orchestrator, three Sonnet workers; outcome-only delegation prompt, no prescribed CLI sequence. Additional parent-operated run: two Sonnet workers for precise wait/recovery checks. Native transcripts confirm `claude-sonnet-5` for all five workers; medium effort; max two concurrent, no native children.
+
+| Real scenario | Observed result |
+| --- | --- |
+| Parallel tiny writer + optional read-only investigation | Separate scratch directories; cap two respected |
+| Revise before acceptance | Same writer, new generation; `total.json` independently asserted as `{count:3,sum:10,mean:10/3}` |
+| Independent reviewer with full parked pool | Deferred with exact close hint; orchestrator retired the accepted writer, then started reviewer |
+| Controlled worker-pane loss | Closed only settled test pane; monitor remained; live status reported lost |
+| Explicit cancellation after loss | Orchestrator cancelled, not accepted; whole monitor tab removed, input preserved |
+| Genuine busy / timeout errors | Parent dispatch refused with `AGENT_BUSY`; one-second state wait returned `TIMEOUT`, not completion |
+| Visual terminal structure | Actual layout: 41 agent rows / 14 monitor rows, ratio 0.75; meaningful task labels |
+| Startup render race in second run | Native ready before Auto footer; no prompt sent; inspected actual Auto footer and recovered same pane |
+| Task-scoped watch, unrelated lost task | One-second timeout instead of immediate unrelated attention; lost task/lease retained |
+| Late proof in task-scoped watch | First implementation incorrectly timed out despite proof; corrected and retested on same live worker: report collected, `review`, exact accept hint |
+| Cleanup | All six created tabs absent; both runs archived; zero leases; only `run.json` + `detail.json.gz` remain per run |
+
+- Blind orchestrator trace: **43 tool calls / 33 shell calls / 36 parsed explicit AXI commands / 25,785 tool-result bytes**; includes five help calls, four watches, five reads, two inbox calls, two global agent listings. Command parser counts only lines beginning `herdr-axi`; piped/batched failures can have outer shell exit zero. Confirmed intermediate errors: `UNKNOWN_AGENT`, `READ_UNAVAILABLE`.
+- First/last tool timestamps: `2026-09-06T22:55:45.160Z` / `23:02:15.135Z`; includes waiting for parent cancellation authority. Not a controlled performance comparison with earlier scenarios. Extra discovery and redundant reads remain agent-behavior limitations, not a claimed solved efficiency score.
+
+| Confirmed defect | Refinement / regression check |
+| --- | --- |
+| Lost task makes unrelated watch return immediately; inbox suggests global discovery | `watch --task TASK`; task-specific recovery/cancel hints; independent wait hint; existing one-watcher/ownership rules retained |
+| New targeted wait initially missed late proof | Published proof wakes filesystem watcher; targeted wait collects late proof through existing inbox path; native idle without proof still waits |
+| `revise` silently discards unreadable previous report | Reproduced failing test before fix; shared accept/revise report validation; prior generation/report/truncation retained; explicit reviewed replacement available |
+| Missing selected run suggests repeating same failure | `RUN_INVALID`, restore existing run selection; no replacement-run recommendation |
+| `agents working` silently lists all agents | Reject positional filters before backend call; explicit `--state`/`--kind` guidance |
+| Native-ready / Auto-footer render gap | Four read checks, at most three 250ms backoffs for missing evidence only; wrong mode fails immediately; delayed-auto/delayed-manual and retry-budget assertions in Bash suite |
+
+- Test-only identities: orchestrator `w1B:p21` / `w1B:t1B`; workers `w1B:p22,p24,p26,p28,p29`; tabs `w1B:t1C,t1D,t1E,t1F,t1G`. Only original tabs `w1B:t1,t2` remain; parent `w1B:p2` untouched.
+- Limits: no real subscription exhausted; no fresh Codex/Copilot sessions in this drill; no claim of universal hook delivery. Native background completion and one lost-worker notification were observed. Startup retry tested deterministically after reproducing the real rendering gap; no forced manipulation of provider UI rendering.
+- Code review: parent inspected implementation/error paths and reproduced report loss; separate Sonnet reviewer checked scenario output, not the package diff. Existing receipt/collection paths reused, no new dependencies, daemon or persistent polling state.
+- Validation: `npm test` **158/158**; `bash engine/test-herdr-monitor.sh` **55/55**; final focused wait/proof/report tests **5/5**; syntax, whitespace and 24 local documentation links checked.

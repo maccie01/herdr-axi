@@ -44,7 +44,7 @@ const RUN_HELP = {
   inbox: `herdr-axi run inbox
   Owned fleet, context warnings, summaries <=600 chars/worker. Collection/ownership errors remain visible.
   Inbox already includes needed status. Empty while working: independent work or watch, not repeated inbox/read.`,
-  watch: `herdr-axi run watch [--timeout-ms N]
+  watch: `herdr-axi run watch [--task TASK] [--timeout-ms N]
   Alias of herdr-axi watch. One active watcher/run. Review results included; act on returned help, do not fetch inbox again.
   Continue independent work with a harness-native tracked background watch; no detached shell or duplicate polling.`,
   takeover: `herdr-axi run takeover --from <current-owner-pane> --evidence "authorization; remaining work"
@@ -59,6 +59,7 @@ const RUN_HELP = {
   Missing/corrupt inbox: retry inbox, or supply a reviewed replacement (1..3500 chars); recorded as coordinator-replacement.`,
   revise: `herdr-axi run revise <pane> --prompt "<fix and checks>"  # or --prompt-file <file>
   Before acceptance only: same worker/slot; retain revision history. Max eight revisions.
+  Prior report required and preserved. Unrecoverable report: --result-file FILE supplies an explicitly reviewed replacement (1..3500 chars).
   Already accepted: queue a new task with the same role/cwd; next can reuse the worker.`,
   phase: `herdr-axi run phase explore|build|integrate|verify|fix [--cap 1..16]
   Defaults 4/3/2/2/1. Never narrow below outstanding work; retire surplus accepted workers.
@@ -108,7 +109,7 @@ const COMMAND_HELP = {
   read: "herdr-axi read <pane> [--raw] [--full] [--lines N] [--chars N]\n  Default: compact text; 60 visible lines, 8000 characters.\n  --raw preserves layout (diagrams, tables, approval menus); limits still apply.\n  --full reads history, still compact unless --raw; 2000-line cap, no default character cap. May require a settled agent.\n  --lines and --chars override defaults; --full never exceeds 2000 lines.\n  --compact remains a compatibility alias for the default; cannot combine with --raw.",
   dispatch: 'herdr-axi dispatch <pane> "<task>" [--no-wait] [--timeout-ms N]\n  Submit and wait for a post-submission settled state. Refuses a working agent.\n  --no-wait confirms submission only; a separate wait may match pre-start idle.\nherdr-axi dispatch <pane> --keys <key> [<key>...]\n  Send explicit UI keys (e.g. down enter) and return immediately. Inspect the dialog before answering; never automatically approve it.',
   wait: "herdr-axi wait <pane> --until <state> [--timeout-ms N]\n  Wait for a state (default idle, also matches background done). Reports actual reached state. Unknown is not completion. Settled state does not prove background work has finished.",
-  watch: "herdr-axi watch [--timeout-ms N]  # alias: herdr-axi run watch\n  Owner only; one blocking wait/run, default 30s. Duplicate watcher: WATCH_ACTIVE. No prompt injection.\n  Use one watch --timeout-ms 1800000 in a harness-native tracked background job with completion delivery; then continue independent work.\n  Retain its handle; never start a duplicate. A detached PID/session ID/toast does not prove notification delivery.\n  Without callback support, do independent work first; block only when results are needed. No nohup or shell &.\n  reason:timeout = no relevant change, not completion. reason:owner-changed = stop old-owner supervision.\n  reason:attention/state-change = act on returned help; review reports included, no duplicate inbox fetch.\n  Telemetry timestamp/percentage churn alone does not wake watch; new warning levels do.",
+  watch: "herdr-axi watch [--task TASK] [--timeout-ms N]  # alias: herdr-axi run watch\n  Owner only; one blocking wait/run, default 30s. Duplicate watcher: WATCH_ACTIVE. No prompt injection.\n  --task TASK waits for one assignment while another needs a human decision; other tasks remain visible, never accepted or ignored automatically.\n  Use one watch --timeout-ms 1800000 in a harness-native tracked background job with completion delivery; then continue independent work.\n  Retain its handle; never start a duplicate. A detached PID/session ID/toast does not prove notification delivery.\n  Without callback support, do independent work first; block only when results are needed. No nohup or shell &.\n  reason:timeout = no relevant change, not completion. reason:owner-changed = stop old-owner supervision.\n  reason:attention/state-change = act on returned help; review reports included, no duplicate inbox fetch.\n  Telemetry timestamp/percentage churn alone does not wake watch; new warning levels do.",
   run: `herdr-axi run init --project <path>    # auto-detect owner; load policy; return roles
 Export returned HERDR_AXI_RUN; keep it in subsequent calls.
 herdr-axi run queue <task-id> --role <role> --cwd <worktree> --area <relative-path> --prompt "<task and checks>"

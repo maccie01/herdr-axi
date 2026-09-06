@@ -100,6 +100,12 @@ if (process.argv[2] === "agent") {
     assert.equal(denied.calls.length, 0);
   });
 
+  test("agents rejects positional filters instead of silently returning the entire fleet", () => {
+    const r = run(["agents", "working"]);
+    assert.equal(r.status, 1); assert.match(r.output, /INVALID_VALUE/);
+    assert.equal(r.calls.length, 0);
+  });
+
   test("no-wait submits once without claiming settlement", () => {
     const r = run(["dispatch", pane, "hello", "--no-wait"]);
     assert.equal(r.status, 0, r.output);

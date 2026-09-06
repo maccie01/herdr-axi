@@ -7,6 +7,22 @@ import { changeRun, PHASES, loadRun, takeRunWarnings, controlActive, processStar
 import { writerLease } from "../src/project.mjs";
 import { finishRun } from "../src/archive.mjs";
 
+test("invalid selected run explains restoration, not an identical failing status retry", () => {
+  const dir = fs.mkdtempSync(path.join(tmpdir(), "axi-selection-"));
+  const previous = process.env.HERDR_AXI_RUN;
+  try {
+    for (const selected of [path.join(dir, "missing"), dir]) {
+      process.env.HERDR_AXI_RUN = selected;
+      assert.throws(() => loadRun(), (e) => e.code === "RUN_INVALID" && /Restore the existing/.test(e.message) && !e.suggestions.some((s) => /run status|run init/.test(s)));
+    }
+    fs.writeFileSync(path.join(dir, "run.json"), "null");
+    assert.throws(() => loadRun(), { code: "RUN_INVALID" });
+  } finally {
+    if (previous === undefined) delete process.env.HERDR_AXI_RUN; else process.env.HERDR_AXI_RUN = previous;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("read-only lock cleanup errors surface without masking the operation error", () => {
   const dir = fs.mkdtempSync(path.join(tmpdir(), "axi-readonly-lock-"));
   const previous = process.env.HERDR_AXI_RUN; process.env.HERDR_AXI_RUN = dir;

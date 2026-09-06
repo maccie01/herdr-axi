@@ -8,7 +8,11 @@ export const runError = (message, code = "RUN_ERROR", help) => new AxiError(mess
   ? ["herdr-axi run init", "herdr-axi run init --help"] : ["NOT_RUN_OWNER", "OWNER_CHANGED"].includes(code)
     ? ["herdr-axi run status", "herdr-axi run takeover --help"] : ["herdr-axi run status", "herdr-axi run --help"]));
 export const canonicalDir = (dir) => dir ? fs.realpathSync(dir) : null;
-export const runDir = () => canonicalDir(process.env.HERDR_AXI_RUN);
+const selectionError = (dir, error) => runError(`Cannot read selected run at ${dir}: ${error.message}. Restore the existing HERDR_AXI_RUN path; do not initialize a replacement run to bypass this error.`, "RUN_INVALID", ['printf \'%s\\n\' "$HERDR_AXI_RUN"', "export HERDR_AXI_RUN='/existing/run-directory'"]);
+export function runDir() {
+  try { return canonicalDir(process.env.HERDR_AXI_RUN); }
+  catch (e) { throw selectionError(process.env.HERDR_AXI_RUN, e); }
+}
 const maintenance = [];
 export const takeRunWarnings = () => maintenance.splice(0);
 
@@ -58,7 +62,7 @@ export function loadRun(dir = runDir()) {
     const run = JSON.parse(fs.readFileSync(path.join(dir, "run.json"), "utf8"));
     if (run.schema !== 1 || !run.owner?.pane || !run.owner.tab || !run.workspace || !Object.hasOwn(PHASES, run.phase) || !run.limits || Object.keys(PHASES).some((p) => !Number.isInteger(run.limits[p]) || run.limits[p] < 1 || run.limits[p] > 16) || !Array.isArray(run.tasks) || !Array.isArray(run.workers)) throw Error("invalid schema");
     return run;
-  } catch (e) { throw runError(`Cannot read run at ${dir}: ${e.message}`, "RUN_INVALID"); }
+  } catch (e) { throw selectionError(dir, e); }
 }
 
 // Short local transaction only: never hold this lock across a backend call.

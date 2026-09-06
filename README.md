@@ -71,6 +71,7 @@ herdr-axi run queue parser --role implementer \
 | Independent work available | Continue it; no repeated status/inbox/read calls |
 | Guaranteed background-job callback available | One tracked `herdr-axi watch`; handle its completion, then re-arm |
 | Result now a dependency; no callback | Blocking `herdr-axi watch` |
+| Another task awaits a decision | `watch --task TASK`; wait for independent work without resolving the other task |
 | Watch returns a report | Review it directly; no extra inbox fetch |
 | Insufficient evidence | Targeted `herdr-axi read <pane>` and inspect actual changes/checks |
 | Accept / request fixes | `run accept <pane> --evidence "review and checks"` / `run revise <pane> --prompt "fix and recheck"` |
