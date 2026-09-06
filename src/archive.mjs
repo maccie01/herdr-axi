@@ -59,12 +59,12 @@ export function projectHistory(project) {
 
 export function finishRun() {
   const dir = runDir();
-  const result = changeRun((r) => {
+  const result = changeRun((r, { afterCommit }) => {
+    // Retry cleanup even for an already published archive. Until publication,
+    // every reservation remains intact, including on archive/rename failure.
+    for (const t of r.tasks) afterCommit.push(() => writerLease(r, t, true));
     if (r.finishedAt) return { finished: r.finishedAt, archived: true };
     if (pending(r).length || r.tasks.some((t) => t.state === "queued") || r.workers.some((w) => !w.closed)) throw runError("Finish requires accepted/cancelled tasks and closed owned workers", "RUN_ACTIVE");
-    // These tasks are already terminal. Repair owned reservations before
-    // archiving; an unverifiable lease leaves finish retryable and visible.
-    for (const t of r.tasks) writerLease(r, t, true);
     r.finishedAt = new Date().toISOString();
     const archive = path.join(dir, "detail.json.gz");
     const inboxes = {};

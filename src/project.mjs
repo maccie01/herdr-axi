@@ -3,7 +3,7 @@ import path from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { PHASES, runError } from "./run-state.mjs";
+import { PHASES, runError, runDir, canonicalDir } from "./run-state.mjs";
 
 export const stateRoot = () => path.resolve(process.env.HERDR_AXI_STATE_HOME || path.join(homedir(), ".local/state/herdr-axi"));
 export const hash = (value) => createHash("sha256").update(value).digest("hex").slice(0, 24);
@@ -89,7 +89,8 @@ function leaseRecord(file) {
   if (!record?.run || !Object.hasOwn(record, "directory") || (!Array.isArray(record.holders) && !record.task)) throw runError(`Cannot verify lease ${file}: invalid record; inspect with herdr-axi run leases`, "LEASE_UNVERIFIED");
   const holders = record.holders ?? [{ task: record.task, access: "write", shared: false }];
   if (!Array.isArray(holders) || !holders.length || holders.some((h) => !h?.task || !["read", "write"].includes(h.access) || typeof h.shared !== "boolean")) throw runError(`Cannot verify lease ${file}: invalid holders`, "LEASE_UNVERIFIED");
-  return { ...record, holders };
+  try { return { ...record, directory: canonicalDir(record.directory), holders }; }
+  catch (e) { throw runError(`Cannot resolve lease owner ${file}: ${e.message}`, "LEASE_UNVERIFIED"); }
 }
 
 // One owner run per worktree. Its run.lock serializes holder changes; other runs
@@ -99,7 +100,7 @@ export function writerLease(run, task, release = false, rollback) {
   const file = leasePath(task);
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const holder = { task: task.id, access: task.access || "write", shared: !!run.config?.sharedReadWorktree };
-  const value = { schema: 2, run: run.id, directory: process.env.HERDR_AXI_RUN ? path.resolve(process.env.HERDR_AXI_RUN) : null, worktree: task.worktree || task.cwd, holders: [holder] };
+  const value = { schema: 2, run: run.id, directory: runDir(), worktree: task.worktree || task.cwd, holders: [holder] };
   if (!release) {
     try {
       fs.writeFileSync(file, JSON.stringify(value), { flag: "wx", mode: 0o600 });
@@ -134,7 +135,7 @@ export function leaseStatus(run) {
   for (const file of new Set(run.tasks.map(leasePath))) {
     try {
       const r = leaseRecord(file);
-      if (r) entries.push({ file, owner: r.run, tasks: r.holders.map((h) => h.task).slice(0, 8), state: r.run === run.id && r.directory === path.resolve(process.env.HERDR_AXI_RUN) ? "owned" : "foreign" });
+      if (r) entries.push({ file, owner: r.run, tasks: r.holders.map((h) => h.task).slice(0, 8), state: r.run === run.id && r.directory === runDir() ? "owned" : "foreign" });
     } catch (e) { entries.push({ file, state: "unverified", error: e.message.slice(0, 400) }); }
   }
   return { leases: entries.slice(0, 8), ...(entries.length > 8 ? { more: entries.length - 8 } : {}), note: "Unknown ownership: inspect the exact file; never auto-delete. Completed own tasks: run recover <task-id>, including archived runs.", help: ["herdr-axi run --help"] };
@@ -142,7 +143,7 @@ export function leaseStatus(run) {
 
 export function hasRunLeases(run, directory) {
   return run.tasks.some((t) => {
-    try { const lease = leaseRecord(leasePath(t)); return !!lease && lease.run === run.id && lease.directory === directory; }
+    try { const lease = leaseRecord(leasePath(t)); return !!lease && lease.run === run.id && lease.directory === canonicalDir(directory); }
     catch { return true; } // Keep provenance when ownership cannot be established.
   });
 }

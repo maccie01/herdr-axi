@@ -40,6 +40,12 @@ write_result() {
   mv -f "$result_tmp" "$result_file"
 }
 
+if ! command -v "${HERDR_AXI_NODE:-node}" >/dev/null; then
+  printf '%s\n' 'herdr-hook-notify: missing dependency: node (HERDR_AXI_NODE)' >&2
+  write_result error missing-node
+  exit 1
+fi
+
 agent_name="${HERDR_MONITOR_AGENT:-${HERDR_PANE_ID:-}}"
 [[ -n "$agent_name" ]] || {
   write_result error missing-agent
@@ -207,9 +213,11 @@ completion_ordinal() {
 resolve_native_transcript
 suppression_reason=""
 quota_json=null
-if [[ "$event_kind" != "lost" && "$live_status" != "working" && "${HERDR_MONITOR_INBOX:-0}" == "1" ]]; then
+if [[ "$event_kind" != "lost" && "$event_kind" != "input" && "$live_status" != "working" && "${HERDR_MONITOR_INBOX:-0}" == "1" ]]; then
   quota_json=$(herdr agent read "$agent_name" --source visible --lines 40 2>/dev/null |
-    node "$script_dir/../src/quota.mjs" 2>/dev/null) || quota_json=null
+    "${HERDR_AXI_NODE:-node}" "$script_dir/../src/quota.mjs" 2>/dev/null) || quota_json=null
+  # Empty success is not quota evidence; report collection must still succeed.
+  quota_json=$(printf '%s\n' "$quota_json" | jq -cse 'if length == 1 then .[0] | select(type == "object" and .code == "QUOTA_EXHAUSTED" and (.message | type) == "string") else empty end') || quota_json=null
 fi
 if [[ "$quota_json" == "null" && "$event_kind" == "quota" ]]; then
   write_result suppressed no-quota
@@ -271,7 +279,7 @@ if [[ "${HERDR_MONITOR_RENDER_ONLY:-}" != "1" ]]; then
     completion_file=$(herdr_completion_file "$receipt_file" "$receipt_generation" || true)
   fi
   if [[ -n "$receipt_generation" && "$transcript_resolution" == "resolved" &&
-    -n "$transcript_session" && ( "$live_status" == "idle" || "$live_status" == "done" ) ]] &&
+    -n "$transcript_session" && "$live_status" != "working" && "$live_status" != "blocked" ]] &&
     herdr_completion_proof_valid "$receipt_file" "$receipt_generation"; then
     if [[ "$transcript_backend" != "copilot" || "$copilot_complete" == "true" ]]; then
       completion_valid=true
@@ -423,6 +431,8 @@ if [[ "$delivered" == "true" ]]; then
     "$receipt_file" "$receipt_cycle" "$event_kind" delivered "$fingerprint" \
     "$event_kind" "$fingerprint" "$receipt_settled_fingerprint" \
     "$receipt_terminal" "$receipt_generation" delivered
+  # Successful delivery supersedes a prior transient monitor failure.
+  rm -f "${receipt_file}.monitor-error" || true
   if [[ "$event_kind" == "settled" && -n "${completion_file:-}" ]]; then
     rm -f "$completion_file"
   fi

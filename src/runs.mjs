@@ -40,6 +40,15 @@ const launcherAlive = (pid) => {
   try { process.kill(pid, 0); return true; } catch (e) { return e.code !== "ESRCH"; }
 };
 
+function startupProcessAbsent(task) {
+  if (launcherAlive(task.launcher)) throw runError("Launcher still active", "RUN_BUSY");
+  // A killed CLI can leave its engine child running before registry creation.
+  // Check only this unique launch name; no signals or global fleet operations.
+  const processes = spawnSync("ps", ["-ax", "-o", "command="], { encoding: "utf8", timeout: 2000, maxBuffer: 4194304 });
+  if (processes.status !== 0) throw runError("Cannot verify startup process absence; retain reservation", "STARTUP_UNVERIFIED");
+  if (processes.stdout.split("\n").some((line) => line.includes(path.dirname(engine) + "/herdr-") && line.split(/\s+/).includes(task.name))) throw runError("Startup engine still active after launcher exit; retain reservation until it stops", "RUN_BUSY");
+}
+
 export function ownerCheck(run) {
   if (!run) throw runError("Initialize/select a run first", "RUN_REQUIRED");
   if (callerPane() !== run.owner.pane)
@@ -129,7 +138,7 @@ function engineCall(args, run) {
   return new Promise((resolve, reject) => {
     const child = spawn("bash", [engine, ...args], {
       cwd: runDir(),
-      env: { ...process.env, HERDR_ENV: "1", HERDR_RECEIPT_ROOT: path.join(runDir(), "receipts"), HERDR_WORKSPACE_ID: run.workspace, HERDR_MONITOR_INBOX: "1", HERDR_AXI_MANAGED_TASK: "1", HERDR_AXI_AGENT_RATIO: String(run.config?.agentRatio ?? 0.75), HERDR_AXI_OWNER_PANE: run.owner.pane, HERDR_AXI_OWNER_TAB: run.owner.tab },
+      env: { ...process.env, HERDR_AXI_NODE: process.execPath, HERDR_ENV: "1", HERDR_RECEIPT_ROOT: path.join(runDir(), "receipts"), HERDR_WORKSPACE_ID: run.workspace, HERDR_MONITOR_INBOX: "1", HERDR_AXI_MANAGED_TASK: "1", HERDR_AXI_AGENT_RATIO: String(run.config?.agentRatio ?? 0.75), HERDR_AXI_OWNER_PANE: run.owner.pane, HERDR_AXI_OWNER_TAB: run.owner.tab },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let out = "", err = "";
@@ -149,6 +158,15 @@ function workerRecord(run, task) {
   w.terminal = a.terminal_id; w.session = a.agent_session?.value;
   safeWorker(run, w, []);
   return w;
+}
+
+async function retireWorker(run, worker, mode) {
+  await engineCall(["close", worker.name, mode, path.join(runDir(), "run.json")], run);
+  for (const [kind, id] of [["tab", worker.tab], ["pane", worker.pane], ["pane", worker.monitor]]) {
+    if (!id && kind === "pane" && worker.stage === "created") continue;
+    try { runHerdr([kind, "get", id]); throw runError("Registered resources remain", mode === "--cancel" ? "CANCEL_PENDING" : "SWITCH_PENDING"); }
+    catch (e) { if (e.code !== "UNKNOWN_AGENT") throw e; }
+  }
 }
 
 function taskFile(task, run) {
@@ -232,7 +250,7 @@ export function runStatus() {
   const parked = run.workers.filter((w) => !w.closed && !pending(run).some((t) => t.pane === w.pane)).map((w) => w.pane);
   const parkedAttention = run.workers.filter((w) => parked.includes(w.pane)).flatMap((w) => {
     const live = safeWorker(run, w, rows, { observe: true });
-    return live && ["idle", "done"].includes(live.state) ? [] : [{ pane: w.pane, state: live?.state ?? "unverified", help: live ? `herdr-axi read ${w.pane} --raw` : `env HERDR_AXI_RUN= herdr-axi read ${w.pane} --raw` }];
+    return live && ["idle", "done"].includes(live.state) ? [] : [{ pane: w.pane, state: live?.state ?? "unverified", help: live && ["working", "blocked"].includes(live.state) ? `herdr-axi read ${w.pane} --raw` : `herdr-axi run close ${w.pane}` }];
   });
   const verified = rows.filter((a) => workers.some((w) => w.pane === a.pane && !w.closed && safeWorker(run, w, rows, { observe: true })));
   const context = run.config ? contextStatus(run, workers, verified) : null;
@@ -245,6 +263,19 @@ export function runStatus() {
   const cancelling = tasks.find((t) => t.state === "cancelling");
   const blocked = tasks.find((t) => t.state === "blocked");
   const ready = tasks.find((t) => t.delivery === "not_submitted" && ["idle", "done"].includes(t.state));
+  let help;
+  if (cancelling) help = [`herdr-axi run cancel ${cancelling.task}`];
+  else if (exhausted) help = switchHelp(run, exhausted.pane, workers.find((w) => w.pane === exhausted.pane)?.kind);
+  else if (switching) help = [`herdr-axi run switch ${switching.task}`];
+  else if (blocked) help = [`herdr-axi read ${blocked.pane} --raw`];
+  else if (ready) help = [`herdr-axi run recover ${ready.pane}`];
+  else if (parkedAttention.length) help = [parkedAttention[0].help];
+  else if (tasks.some((t) => !["working", "starting"].includes(t.state))) help = ["herdr-axi run inbox"];
+  else if (context?.warnings.length) help = [`herdr-axi read ${context.warnings[0].pane}`];
+  else if (queued.length && tasks.length < limit(run)) help = ["herdr-axi run next"];
+  else if (tasks.length) help = ["herdr-axi watch"];
+  else if (parked.length) help = [`herdr-axi run close ${parked[0]}`];
+  else help = [run.tasks.length ? "herdr-axi run finish" : "herdr-axi run --help"];
   return { owner: run.owner.pane, phase: run.phase, capacity: limit(run), occupied: tasks.length, queued: queued.length, tasks,
     ...(run.config ? { nativeReserved: pending(run).reduce((n, t) => n + (t.nativeSlots ?? 0), 0), nativeCapacity: run.config.nativeSubagentLimit } : {}),
     ...(context?.warnings.length ? { contextWarnings: context.warnings, contextAction: "Checkpoint at a safe boundary; review, then replace/compact the accepted worker. Never interrupt unfinished work automatically." } : {}),
@@ -258,12 +289,12 @@ export function runStatus() {
     ...(!tasks.length && queued.length ? { backlog: queued.slice(0, 8).map((t) => ({ task: t.id, phase: t.phase, after: t.deps })), ...(queued.length > 8 ? { more: queued.length - 8 } : {}) } : {}),
     ...(!tasks.length && !queued.length && !parked.length ? { complete: true } : {}),
     ...(exhausted ? { quota: "Provider capacity exhausted, not task completion. Switch in this run; preserve worktree and lease. No WIP commit or new run needed." } : {}),
-    help: cancelling ? [`herdr-axi run cancel ${cancelling.task}`] : exhausted ? switchHelp(run, exhausted.pane, workers.find((w) => w.pane === exhausted.pane)?.kind) : switching ? [`herdr-axi run switch ${switching.task}`] : [blocked ? `herdr-axi read ${blocked.pane} --raw` : ready ? `herdr-axi run recover ${ready.pane}` : parkedAttention[0]?.help ?? (tasks.some((t) => !["working", "starting"].includes(t.state)) ? "herdr-axi run inbox" : context?.warnings.length ? `herdr-axi read ${context.warnings[0].pane}` : queued.length && tasks.length < limit(run) ? "herdr-axi run next" : tasks.length ? "herdr-axi watch" : parked.length ? `herdr-axi run close ${parked[0]}` : run.tasks.length ? "herdr-axi run finish" : "herdr-axi run --help")] };
+    help };
 }
 
 // Compare actionable state, not telemetry timestamps/percentages or display text.
 const watchKey = (s) => JSON.stringify({ phase: s.phase, capacity: s.capacity, occupied: s.occupied, queued: s.queued, tasks: s.tasks, parked: s.parked, parkedAttention: s.parkedAttention, ownershipIssues: s.ownershipIssues, finished: s.finished, contextError: s.contextError, contextWarnings: s.contextWarnings?.map(({ pane, level }) => ({ pane, level })) });
-const needsAttention = (s) => s.contextWarnings?.length || s.contextError || s.ownershipIssues?.length || s.parkedAttention?.length || s.tasks?.some((t) => !["working", "starting"].includes(t.state));
+const needsAttention = (s) => s.contextWarnings?.length || s.contextError || s.ownershipIssues?.length || s.tasks?.some((t) => !["working", "starting"].includes(t.state));
 const waitingNote = "Continue independent work. Use one notification-backed background watch if supported; otherwise wait only when dependent. No inbox/read polling.";
 
 export async function watchRun(timeout = 30000) {
@@ -273,10 +304,10 @@ export async function watchRun(timeout = 30000) {
   changeRun(() => {
     let previous;
     try { previous = JSON.parse(fs.readFileSync(file, "utf8")); } catch (e) { if (e.code !== "ENOENT") throw runError("Unverifiable watch record; inspect watch.json", "WATCH_ACTIVE"); }
-    if (previous && (!Number.isSafeInteger(previous.pid) || previous.pid <= 0 || launcherAlive(previous.pid))) throw runError("One watch is active or its identity is unverifiable; keep the existing job handle and continue independent work", "WATCH_ACTIVE", ["herdr-axi watch --help"]);
+    if (previous && (!Number.isSafeInteger(previous.pid) || previous.pid <= 0 || controlActive(file, previous.pid))) throw runError("One watch is active or its identity is unverifiable; keep the existing job handle and continue independent work", "WATCH_ACTIVE", ["herdr-axi watch --help"]);
     const temp = `${file}.${process.pid}.tmp`;
     try {
-      fs.writeFileSync(temp, JSON.stringify({ pid: process.pid }), { mode: 0o600 });
+      fs.writeFileSync(temp, JSON.stringify({ pid: process.pid, started: processStart(process.pid), action: "watch" }), { mode: 0o600 });
       fs.renameSync(temp, file);
     } finally { fs.rmSync(temp, { force: true }); }
   }, { readOnly: true, allowFinished: true });
@@ -379,7 +410,9 @@ async function executeRunCommand(action, o) {
     if ((run.ownerHandoffs?.length ?? 0) >= 8) throw runError("Eight owner transfers reached; inspect the run", "TAKEOVER_LIMIT");
     const pane = callerPane(), a = liveAgent(pane);
     if (!a || a.pane_id !== pane || a.workspace_id !== run.workspace || !a.tab_id || !a.terminal_id || !["claude", "codex", "copilot"].includes(a.agent)) throw runError("Replacement must be a live agent in the same workspace", "INVALID_TAKEOVER");
-    if (pane === run.owner.pane || a.tab_id === run.owner.tab || ownedWorkers(run).some((w) => !w.closed && (w.pane === pane || w.tab === a.tab_id))) throw runError("Replacement must be a separate non-worker pane/tab", "SELF_TARGET");
+    const workers = ownedWorkers(run, { issues: [] });
+    const workerTabs = listAgents({ all: true }).filter((row) => run.tasks.some((t) => t.name && t.name === row.backendName)).map((row) => row.tab);
+    if (pane === run.owner.pane || a.tab_id === run.owner.tab || workerTabs.includes(a.tab_id) || run.tasks.some((t) => t.pane === pane || (t.name && t.name === a.name)) || workers.some((w) => !w.closed && (w.pane === pane || w.tab === a.tab_id))) throw runError("Replacement must be a separate non-worker pane/tab", "SELF_TARGET");
     let old, quota, output = "", absent = false;
     try { old = liveAgent(run.owner.pane); }
     catch (e) { if (e.code !== "UNKNOWN_AGENT") throw e; }
@@ -419,7 +452,7 @@ async function executeRunCommand(action, o) {
     let status = runStatus();
     // Native hooks can precede the final idle snapshot/session metadata. Pull
     // late proofs on demand instead of waiting for another lifecycle change.
-    const late = status.tasks.filter((t) => ["idle", "done"].includes(t.state) || t.quota)
+    const late = status.tasks.filter((t) => ["idle", "done", "unknown"].includes(t.state) || t.quota)
       .map((t) => run.workers.find((w) => w.pane === t.pane))
       .filter((w) => w && fs.existsSync(`${w.receipt}.proof.${w.generation}`));
     const collected = await Promise.allSettled(late.map((w) => engineCall(["collect", w.name], run)));
@@ -435,15 +468,15 @@ async function executeRunCommand(action, o) {
       } catch (e) { if (e.code !== "ENOENT") errors.push({ pane: w.pane, error: e.message.slice(0, 300) }); }
       try {
         const notice = fs.readFileSync(`${w.receipt}.monitor-error`, "utf8");
-        if (notice.startsWith(`${w.generation}\t`) || notice.startsWith("-\t")) errors.push({ pane: w.pane, error: notice.split("\t").slice(1).join("\t").trim().slice(0, 300) });
+        const settled = events.some((e) => e.pane === w.pane && e.event === "settled") && receipt(w)?.complete;
+        if (!settled && (notice.startsWith(`${w.generation}\t`) || notice.startsWith("-\t"))) errors.push({ pane: w.pane, error: notice.split("\t").slice(1).join("\t").trim().slice(0, 300) });
       } catch (e) { if (e.code !== "ENOENT") errors.push({ pane: w.pane, error: e.message.slice(0, 300) }); }
     }
     if (!events.length && !errors.length && status.occupied && !needsAttention(status))
       return { events: [], pending: status.occupied, queued: status.queued, note: waitingNote, help: status.help };
     const first = status.tasks.find((t) => t.state === "blocked") ?? status.tasks.find((t) => !["working", "starting"].includes(t.state) && t.pane !== "pending");
     const report = events.find((e) => e.pane === first?.pane);
-    const quotaEvent = events.find((e) => e.reportedQuota && status.tasks.some((t) => t.pane === e.pane && !["working", "starting", "review"].includes(t.state)));
-    const help = status.tasks.some((t) => t.quota || t.state === "switching") ? status.help : quotaEvent ? switchHelp(run, quotaEvent.pane, run.workers.find((w) => w.pane === quotaEvent.pane)?.kind) : errors.length ? [`herdr-axi read ${errors[0].pane} --raw`, "herdr-axi run --help"]
+    const help = status.tasks.some((t) => t.quota || t.state === "switching") ? status.help : errors.length ? [`herdr-axi read ${errors[0].pane} --raw`, "herdr-axi run --help"]
       : first?.state === "review" && report ? [report.truncated ? `herdr-axi read ${first.pane}` : `herdr-axi run accept ${first.pane} --evidence "<verified checks>"`]
       : ["lost", "unverified"].includes(first?.state) ? ["herdr-axi agents --all", "herdr-axi run --help"]
       : first ? [`herdr-axi read ${first.pane} --raw`] : status.help;
@@ -521,7 +554,22 @@ async function executeRunCommand(action, o) {
     if (task.state !== "cancelling" && (!o.evidence?.trim() || o.evidence.length > 4000)) throw runError("Stopping unfinished work requires --evidence (1..4000 chars): authorization, saved partial state and background jobs. No acceptance required.", "CANCEL_EVIDENCE_REQUIRED", [`${retry} --evidence 'Authorized stop; partial state and background jobs reviewed'`]);
     if (task.state === "cancelling" && o.evidence && o.evidence !== task.cancellation.evidence) throw runError("Cancellation already checkpointed; resume without changing evidence", "CANCEL_PENDING", [retry]);
     const rows = listAgents({ all: true });
-    const worker = task.cancellation?.from ?? ownedWorkers(run).find((w) => w.name === task.name && !w.closed);
+    const worker = task.cancellation?.from ?? ownedWorkers(run, { issues: [] }).find((w) => w.name === task.name && !w.closed);
+    if (!worker && !task.pane && ["starting", "uncertain"].includes(task.state)) {
+      // Missing is not corrupt. Never adopt or close inferred topology. Startup
+      // writes its registry before starting an agent; verify no named agent is
+      // present and require explicit cancellation evidence after launcher exit.
+      startupProcessAbsent(task);
+      if (registeredWorker(run, task) || rows.some((a) => a.backendName === task.name)) throw runError("Unregistered worker may still exist; inspect before cancellation", "WORKER_CHANGED");
+      changeRun((r, { afterCommit }) => {
+        const t = r.tasks.find((t) => t.id === task.id);
+        if (t.state !== task.state || t.launcher !== task.launcher || t.pane || registeredWorker(r, t)) throw runError("Startup changed; inspect before cancellation", "RUN_BUSY");
+        t.cancellation = { at: new Date().toISOString(), evidence: o.evidence, capture: { source: "no-registry", truncated: true } };
+        t.state = "cancelled"; t.evidence = o.evidence.slice(0, 1000); delete t.launcher;
+        afterCommit.push(() => writerLease(r, t, true));
+      });
+      return { cancelled: task.id, closed: [], note: "Launcher absent; no registry or named agent. Reservation released after cancellation. No topology inferred or tabs closed; inspect any shell-only startup tab separately.", help: ["herdr-axi run next"] };
+    }
     const live = safeWorker(run, worker, rows);
     let checkpoint = task.cancellation;
     if (!checkpoint) {
@@ -532,7 +580,7 @@ async function executeRunCommand(action, o) {
       }
       const git = spawnSync("git", ["-C", task.cwd, "status", "--porcelain=v1", "--untracked-files=all"], { encoding: "utf8", timeout: 3000, maxBuffer: 262144, env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } });
       if (git.error) throw runError(`Cannot checkpoint worktree status: ${git.error.message}`, "CHECKPOINT_FAILED");
-      checkpoint = { at: new Date().toISOString(), from: worker, evidence: o.evidence, output: output.slice(-32000), capture: { source, truncated: true }, gitStatus: git.status === 0 ? git.stdout.slice(0, 8000) : `unavailable: ${git.stderr.slice(0, 600)}` };
+      checkpoint = { at: new Date().toISOString(), from: worker, evidence: o.evidence, output: output.slice(-32000), capture: { source, truncated: true }, gitStatus: git.status === 0 ? git.stdout.slice(0, 8000) : `unavailable: ${git.stderr.slice(0, 600)}`, gitStatusTruncated: git.stdout.length > 8000 };
     }
     changeRun((r) => {
       const t = r.tasks.find((t) => t.id === task.id);
@@ -541,12 +589,7 @@ async function executeRunCommand(action, o) {
       if (!r.workers.some((w) => w.name === worker.name)) r.workers.push(worker);
     });
     try {
-      await engineCall(["close", worker.name, "--cancel", path.join(runDir(), "run.json")], run);
-      for (const [kind, id] of [["tab", worker.tab], ["pane", worker.pane], ["pane", worker.monitor]]) {
-        if (!id && kind === "pane" && worker.stage === "created") continue;
-        try { runHerdr([kind, "get", id]); throw runError("Registered resources remain", "CANCEL_PENDING"); }
-        catch (e) { if (e.code !== "UNKNOWN_AGENT") throw e; }
-      }
+      await retireWorker(run, worker, "--cancel");
       await publishRun((r, { afterCommit }) => {
         const t = r.tasks.find((t) => t.id === task.id);
         if (t.state !== "cancelling" || t.cancellation.from.generation !== worker.generation) throw runError("Cancellation changed", "CANCEL_PENDING");
@@ -563,14 +606,14 @@ async function executeRunCommand(action, o) {
   }
   const rows = listAgents({ all: true });
   if (action === "keys") {
-    const worker = ownedWorkers(run).find((w) => w.pane === o._[0] && !w.closed);
+    const worker = ownedWorkers(run, { issues: [] }).find((w) => w.pane === o._[0] && !w.closed);
     const live = safeWorker(run, worker, rows);
     if (!live || live.state === "working") throw runError("Worker absent or busy; inspect before sending UI keys", "AGENT_BUSY");
     runHerdr(["agent", "send-keys", live.pane, ...o._.slice(1)]);
     return { pane: live.pane, keys: o._.slice(1), help: [`herdr-axi read ${live.pane}`] };
   }
   if (action === "switch") {
-    const workers = ownedWorkers(run);
+    const workers = ownedWorkers(run, { issues: [] });
     const targetWorker = workers.find((w) => w.pane === o._[0] && !w.closed);
     const task = taskFor(run, o._[0], targetWorker?.name);
     if (!task || !["running", "uncertain", "switching"].includes(task.state)) throw runError("Switch requires an unfinished quota-blocked task", "NOT_SWITCHABLE", ["herdr-axi run switch --help"]);
@@ -627,11 +670,7 @@ async function executeRunCommand(action, o) {
       t.state = "switching"; t.launcher = process.pid;
     });
     try {
-      await engineCall(["close", handoff.from.name, "--handoff", path.join(runDir(), "run.json")], run);
-      for (const [kind, id] of [["tab", handoff.from.tab], ["pane", handoff.from.pane], ["pane", handoff.from.monitor]]) {
-        try { runHerdr([kind, "get", id]); throw runError("Old worker resources remain; replacement not queued", "SWITCH_PENDING"); }
-        catch (e) { if (e.code !== "UNKNOWN_AGENT") throw e; }
-      }
+      await retireWorker(run, handoff.from, "--handoff");
       await publishRun((r, effects) => {
         const t = r.tasks.find((t) => t.id === task.id);
         if (t.state !== "switching" || t.handoffs.at(-1).from.generation !== handoff.from.generation) throw runError("Switch generation changed", "SWITCH_PENDING");
@@ -665,6 +704,7 @@ async function executeRunCommand(action, o) {
       catch (e) { if (e.code !== "ESRCH") throw e; }
     }
     const recorded = registeredWorker(run, t);
+    if (!recorded && !t.pane) throw runError("No recorded startup topology. Inspect partial startup, then cancel explicitly; no blind resend or inferred closure.", "STARTUP_UNRECORDED", [`herdr-axi run cancel ${t.id} --evidence 'Startup and background jobs inspected; authorized cancellation'`]);
     if (recorded) {
       safeWorker(run, recorded, []);
       const absent = (kind, id) => {

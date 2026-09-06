@@ -6,12 +6,14 @@ if [[ "${HERDR_ENV:-}" != "1" ]]; then
   exit 2
 fi
 
-for dependency in herdr jq uuidgen rg awk find mktemp stat ps date; do
+for dependency in herdr jq uuidgen rg awk find mktemp stat ps date "${HERDR_AXI_NODE:-node}"; do
   command -v "$dependency" >/dev/null || {
     printf '%s\n' "herdr-worker: missing dependency: $dependency" >&2
     exit 2
   }
 done
+
+export HERDR_AXI_NODE="$(command -v "${HERDR_AXI_NODE:-node}")"
 
 usage() {
   printf '%s\n' "usage: $0 --name NAME --kind copilot|claude|codex --cwd PATH --prompt-file PATH [--label LABEL] [--model MODEL] [--effort LEVEL] [--max-autopilot-continues N] [--workspace ID] [--orchestrator-agent NAME]" >&2
@@ -100,6 +102,7 @@ else
   --env "HERDR_AXI_RUN=" \
   --env "HERDR_AXI_WORKER=1" \
   --env "HERDR_AXI_BIN=$script_dir/../bin/herdr-axi.mjs" \
+  --env "HERDR_AXI_NODE=$HERDR_AXI_NODE" \
   --env "PATH=$script_dir/../bin:$PATH" \
   --no-focus)
 agent_pane=$(printf '%s\n' "$tab_json" | jq -r '.result.root_pane.pane_id')
@@ -211,7 +214,8 @@ monitor_pane=$(printf '%s\n' "$monitor_json" | jq -r '.result.pane.pane_id // em
   printf '%s\n' "herdr-worker: lifecycle monitor pane was not created: $name" >&2
   exit 1
 }
-printf -v monitor_command '%q %q %q %q %q %q' \
+printf -v monitor_command '%q %q %q %q %q %q %q %q' \
+  env "HERDR_AXI_NODE=$HERDR_AXI_NODE" \
   "$script_dir/herdr-lifecycle-monitor.sh" \
   "$name" \
   "$name" \

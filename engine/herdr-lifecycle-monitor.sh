@@ -265,6 +265,9 @@ report_lost() {
   retry_delay=1
   if notify lost; then return 0; fi
   herdr_receipt_read "$receipt_file" || true
+  if [[ -z "$receipt_generation" ]]; then
+    receipt_generation=$(jq -r '.generation // empty' "${receipt_file%.event}.json" 2>/dev/null || true)
+  fi
   local notice="Lost notification failed after 3 attempts; inspect receipt/hook availability"
   local temporary="${receipt_file}.monitor-error.$$"
   if mkdir -p "$(dirname -- "$receipt_file")" && printf '%s\t%s\n' "${receipt_generation:--}" "$notice" > "$temporary"; then

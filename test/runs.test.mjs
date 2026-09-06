@@ -61,6 +61,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
     else throw Error(`unexpected agent ${action}`);
   } else if (group === "tab") {
     if (action === "create") {
+      if (fs.existsSync(path.join(dir, "create-fail"))) { console.error("backend unavailable before tab create"); process.exit(1); }
       const id = randomUUID().slice(0, 8);
       const a = { ...owner, pane_id: `wTEST:p${id}`, tab_id: `wTEST:t${id}`, terminal_id: id, name: "", label: args[args.indexOf("--label") + 1], agent: "", agent_status: "idle", cwd: args[args.indexOf("--cwd") + 1] };
       save(a); emit({ tab: { tab_id: a.tab_id }, root_pane: { pane_id: a.pane_id } });
@@ -136,6 +137,125 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
     fs.writeFileSync(path.join(f.dir, `screen-${w.pane}`), "● Partial implementation; checks pending\n✗ You have exceeded your monthly quota (Request ID: fixture)\n /commands · autopilot");
     return w;
   }
+
+  test("failed startup without registry can be explicitly cancelled without closing inferred resources", async () => {
+    const f = fixture(); let orphan;
+    try {
+      f.queue("never-started"); fs.writeFileSync(path.join(f.dir, "create-fail"), "1");
+      f.ok(["run", "next"]);
+      assert.equal(f.state().tasks[0].state, "uncertain");
+      assert.equal(f.state().workers.length, 0);
+      assert.match(f.execute(["run", "recover", "never-started"]).output, /STARTUP_UNRECORDED/);
+      assert.match(f.execute(["run", "cancel", "never-started"]).output, /CANCEL_EVIDENCE_REQUIRED/);
+      orphan = spawn(process.execPath, ["-e", "console.log('ready'); setInterval(()=>{},1000)", fileURLToPath(new URL("../engine/herdr-worker.sh", import.meta.url)), "--name", f.state().tasks[0].name]);
+      await new Promise((resolve, reject) => { orphan.stdout.once("data", resolve); orphan.once("error", reject); });
+      assert.match(f.execute(["run", "cancel", "never-started", "--evidence", "Inspect startup"]).output, /RUN_BUSY/);
+      assert.equal(f.state().tasks[0].state, "uncertain");
+      const stopped = new Promise((resolve) => orphan.once("exit", resolve)); orphan.kill(); await stopped; orphan = null;
+      f.ok(["run", "cancel", "never-started", "--evidence", "Failed startup inspected; no background work; cancel authorized"]);
+      assert.equal(f.state().tasks[0].state, "cancelled");
+      assert.equal(fs.readdirSync(path.join(f.env.HERDR_AXI_STATE_HOME, "writers")).length, 0);
+      assert(!f.calls().some((c) => c.action === "close" || c.action === "prompt"));
+      f.ok(["run", "finish"]);
+    } finally {
+      if (orphan) { const stopped = new Promise((resolve) => orphan.once("exit", resolve)); orphan.kill(); await stopped; }
+      f.clean();
+    }
+  });
+
+  test("blocked dialog plus old quota never offers or executes a provider switch", () => {
+    const f = fixture();
+    try {
+      const w = exhaustedWorker(f), file = path.join(f.dir, `${w.pane}.agent`);
+      const a = JSON.parse(fs.readFileSync(file)); a.agent_status = "blocked"; fs.writeFileSync(file, JSON.stringify(a));
+      fs.appendFileSync(path.join(f.dir, `screen-${w.pane}`), "\nDo you want to proceed?\n❯ 1. Yes\n  2. No");
+      const inbox = f.ok(["run", "inbox"]); assert.doesNotMatch(inbox, /run switch/);
+      const result = f.execute(["run", "switch", w.pane, "--kind", "codex", "--model", "gpt-5.6-sol"]);
+      assert.match(result.output, /QUOTA_NOT_CONFIRMED/); assert.equal(f.state().tasks[0].state, "running");
+      assert(!f.calls().some((c) => c.action === "close"));
+    } finally { f.clean(); }
+  });
+
+  test("startup quota handoff retires a created tab with no monitor or receipt", () => {
+    const f = fixture();
+    try {
+      fs.writeFileSync(path.join(f.dir, "startup-blocked"), "1");
+      f.queue("startup"); f.ok(["run", "next"]);
+      const w = f.state().workers[0]; assert.equal(w.stage, "created"); assert.equal(w.monitor, null);
+      fs.writeFileSync(path.join(f.dir, `screen-${w.pane}`), "You've hit your session limit");
+      f.ok(["run", "switch", w.pane, "--kind", "copilot", "--model", "gpt-5.6-sol"]);
+      assert.equal(f.state().tasks[0].state, "queued"); assert(f.state().workers[0].closed);
+      assert.equal(f.calls().filter((c) => c.action === "close").length, 1);
+      assert(!f.calls().some((c) => c.group === "pane" && c.action === "get" && !c.args[0]));
+    } finally { f.clean(); }
+  });
+
+  for (const action of ["keys", "switch", "cancel"]) test(`corrupt unrelated registry does not block healthy worker ${action}`, () => {
+    const f = fixture();
+    try {
+      const w = exhaustedWorker(f);
+      const run = f.state(); run.tasks.push({ ...run.tasks[0], id: "broken", name: "axi-broken", pane: undefined, state: "uncertain" }); f.write(run);
+      fs.writeFileSync(path.join(f.env.HERDR_AXI_RUN, "receipts/wTEST/axi-broken.json"), "partial");
+      if (action === "keys") f.ok(["dispatch", w.pane, "--keys", "enter"]);
+      else if (action === "switch") f.ok(["run", "switch", w.pane, "--kind", "codex", "--model", "gpt-5.6-sol"]);
+      else f.ok(["run", "cancel", w.pane, "--evidence", "Authorized stop; partial work and background jobs inspected"]);
+      const create = f.calls().find((c) => c.group === "tab" && c.action === "create");
+      assert(create.args.includes(`HERDR_AXI_NODE=${process.execPath}`), "worker environment pins the initiating Node binary");
+      assert(f.calls().some((c) => c.group === "pane" && c.action === "run" && c.args[1].includes("HERDR_AXI_NODE=")), "monitor command retains pinned Node across shell startup");
+      assert.equal(f.state().tasks[0].state, action === "keys" ? "running" : action === "switch" ? "queued" : "cancelled");
+      assert.equal(f.state().tasks[1].state, "uncertain");
+      assert.match(f.execute(["run", "cancel", "broken", "--evidence", "inspect"]).output, /JSON|Unexpected|partial/);
+    } finally { f.clean(); }
+  });
+
+  for (const reused of [false, true]) test(`parked diagnostics do not spin a working run${reused ? " with recycled watch PID" : ""}`, () => {
+    const f = fixture();
+    try {
+      f.queue("parked"); f.queue("active"); f.ok(["run", "next"]);
+      const w = f.state().workers.find((w) => w.name === f.state().tasks[0].name);
+      f.complete(w); f.ok(["run", "accept", w.pane, "--evidence", "checked"]);
+      const file = path.join(f.dir, `${w.pane}.agent`), a = JSON.parse(fs.readFileSync(file)); a.agent_status = "unknown"; fs.writeFileSync(file, JSON.stringify(a));
+      if (reused) fs.writeFileSync(path.join(f.env.HERDR_AXI_RUN, "watch.json"), JSON.stringify({ pid: process.pid, started: "Mon Jan 1 00:00:00 2001", action: "watch" }));
+      for (let i = 0; i < 2; i++) assert.match(f.ok(["watch", "--timeout-ms", "200"]), /reason: timeout/);
+      assert.match(f.ok(["run", "status"]), /parkedAttention/);
+      f.ok(["run", "close", w.pane]);
+    } finally { f.clean(); }
+  });
+
+  test("corrupt unrelated registry permits owner takeover but still fences worker tabs", () => {
+    const f = fixture();
+    try {
+      f.queue("broken");
+      const run = f.state(); Object.assign(run.tasks[0], { state: "uncertain", name: "axi-broken" }); f.write(run);
+      const registryDir = path.join(f.env.HERDR_AXI_RUN, "receipts/wTEST"); fs.mkdirSync(registryDir, { recursive: true });
+      fs.writeFileSync(path.join(registryDir, "axi-broken.json"), "partial");
+      fs.writeFileSync(path.join(f.dir, "owner.json"), JSON.stringify({ ...owner, agent_status: "idle" }));
+      fs.writeFileSync(path.join(f.dir, `screen-${owner.pane_id}`), "You've hit your session limit");
+      const env = replacementOwner(f);
+      const args = ["run", "takeover", "--from", owner.pane_id, "--evidence", "Authorized transfer; inspect broken worker"];
+      const replacementFile = path.join(f.dir, `${env.HERDR_PANE_ID}.agent`), a = JSON.parse(fs.readFileSync(replacementFile));
+      fs.writeFileSync(replacementFile, JSON.stringify({ ...a, name: "axi-broken" }));
+      assert.match(f.execute(args, env).output, /SELF_TARGET/);
+      fs.writeFileSync(replacementFile, JSON.stringify(a));
+      const result = f.execute(args, env); assert.equal(result.status, 0, result.output);
+      assert.equal(f.state().owner.pane, env.HERDR_PANE_ID);
+      assert(!f.calls().some((c) => c.action === "close"));
+    } finally { f.clean(); }
+  });
+
+  test("valid settled report takes precedence over a stale monitor failure", () => {
+    const f = fixture();
+    try {
+      f.queue("task"); f.ok(["run", "next"]); const w = f.state().workers[0];
+      for (const generation of ["-", w.generation]) {
+        fs.writeFileSync(w.receipt + ".monitor-error", `${generation}\ttransient monitor failure`);
+        f.complete(w);
+        const inbox = f.ok(["run", "inbox"]);
+        assert.match(inbox, /run accept/); assert.doesNotMatch(inbox, /transient monitor failure/);
+      }
+      f.ok(["run", "accept", w.pane, "--evidence", "reviewed saved report"]);
+    } finally { f.clean(); }
+  });
 
   test("control markers survive PID reuse and concurrent same-process calls without clobbering", () => {
     const f = fixture();
@@ -650,6 +770,8 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       watching = f.asyncRun(["run", "watch", "--timeout-ms", "6000"]);
       const marker = path.join(f.env.HERDR_AXI_RUN, "watch.json"), deadline = Date.now() + 2000;
       while (!fs.existsSync(marker) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+      const registered = JSON.parse(fs.readFileSync(marker));
+      assert.equal(registered.action, "watch"); assert(Number.isFinite(Date.parse(registered.started)));
       const duplicate = f.execute(["watch", "--timeout-ms", "100"]);
       assert.equal(duplicate.status, 1); assert.match(duplicate.output, /WATCH_ACTIVE/);
       f.complete(w);
@@ -805,14 +927,14 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
     } finally { f.clean(); }
   });
 
-  test("durable quota inbox gives a switch hint without authorizing a stale quota close", () => {
+  test("durable quota inbox preserves history without suggesting a stale quota switch", () => {
     const f = fixture();
     try {
       const w = exhaustedWorker(f);
       fs.writeFileSync(path.join(f.dir, `screen-${w.pane}`), "ordinary idle output");
       fs.writeFileSync(w.receipt + ".inbox", JSON.stringify({ generation: w.generation, event: "error", quota: { code: "QUOTA_EXHAUSTED", scope: "monthly" }, summary: "Monthly quota was reached" }));
       const inbox = f.ok(["run", "inbox"]);
-      assert.match(inbox, /reportedQuota/); assert.match(inbox, /herdr-axi run switch/);
+      assert.match(inbox, /reportedQuota/); assert.doesNotMatch(inbox, /herdr-axi run switch/);
       assert.match(f.execute(["run", "switch", w.pane, "--kind", "codex", "--model", "gpt-5.6-sol"]).output, /QUOTA_NOT_CONFIRMED/);
       assert(!f.calls().some((c) => c.action === "close"));
     } finally { f.clean(); }
@@ -1618,7 +1740,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       assert(f.ok(["run", "leases"]).includes(lease));
       f.ok(["run", "close", w.pane]);
       assert.match(f.execute(["run", "finish"]).output, /LEASE_UNVERIFIED/);
-      assert(!f.state().finishedAt, "failed release must leave finish retryable");
+      assert(f.state().finishedAt, "archive published; lease cleanup warning must not misreport rollback");
       fs.writeFileSync(lease, original); f.ok(["run", "finish"]); assert(!fs.existsSync(lease));
       const archived = JSON.parse(gunzipSync(fs.readFileSync(path.join(f.env.HERDR_AXI_RUN, "detail.json.gz"))));
       assert.equal(JSON.parse(archived.inboxes[w.name]).summary, "checks passed");

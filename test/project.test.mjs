@@ -5,9 +5,30 @@ import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
-import { validateConfig, projectConfig, worktree, writerLease, leasePath } from "../src/project.mjs";
+import { validateConfig, projectConfig, worktree, writerLease, leasePath, leaseStatus, hasRunLeases } from "../src/project.mjs";
 import { contextValue } from "../src/context.mjs";
 import { collectArchives, projectRuns } from "../src/archive.mjs";
+
+test("run directory aliases preserve lease ownership, repair legacy paths and fence GC", () => {
+  const dir = fs.mkdtempSync(path.join(tmpdir(), "axi-lease-alias-"));
+  const previous = { HERDR_AXI_RUN: process.env.HERDR_AXI_RUN, HERDR_AXI_STATE_HOME: process.env.HERDR_AXI_STATE_HOME };
+  const real = path.join(dir, "real"), alias = path.join(dir, "alias");
+  fs.mkdirSync(real); fs.symlinkSync(real, alias); process.env.HERDR_AXI_STATE_HOME = path.join(dir, "state");
+  const task = { id: "a", cwd: dir }, run = { id: "alias-test", tasks: [task] };
+  try {
+    process.env.HERDR_AXI_RUN = alias; assert(writerLease(run, task));
+    const file = leasePath(task), saved = JSON.parse(fs.readFileSync(file));
+    assert.equal(saved.directory, fs.realpathSync(real));
+    saved.directory = alias; fs.writeFileSync(file, JSON.stringify(saved)); // pre-fix lease
+    process.env.HERDR_AXI_RUN = fs.realpathSync(real);
+    assert.equal(leaseStatus(run).leases[0].state, "owned");
+    assert(hasRunLeases(run, alias)); assert(hasRunLeases(run, real));
+    assert(writerLease(run, task, true)); assert(!fs.existsSync(file));
+  } finally {
+    for (const [key, value] of Object.entries(previous)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("project config rejects typos, recursive/write delegates and impossible budgets", () => {
   const c = validateConfig({ roles: { implementer: { subagents: [{ role: "verifier", max: 1, when: "review" }] } } });

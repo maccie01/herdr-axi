@@ -7,7 +7,8 @@ export const PHASES = { explore: 4, build: 3, integrate: 2, verify: 2, fix: 1 };
 export const runError = (message, code = "RUN_ERROR", help) => new AxiError(message, code, help ?? (code === "RUN_REQUIRED"
   ? ["herdr-axi run init", "herdr-axi run init --help"] : ["NOT_RUN_OWNER", "OWNER_CHANGED"].includes(code)
     ? ["herdr-axi run status", "herdr-axi run takeover --help"] : ["herdr-axi run status", "herdr-axi run --help"]));
-export const runDir = () => process.env.HERDR_AXI_RUN ? path.resolve(process.env.HERDR_AXI_RUN) : null;
+export const canonicalDir = (dir) => dir ? fs.realpathSync(dir) : null;
+export const runDir = () => canonicalDir(process.env.HERDR_AXI_RUN);
 const maintenance = [];
 export const takeRunWarnings = () => maintenance.splice(0);
 
@@ -71,13 +72,13 @@ export function changeRun(fn, { allowFinished = false, readOnly = false } = {}) 
   catch (e) { if (e.code === "EEXIST") throw runError("Run transaction busy; retry. After a crash: herdr-axi run unlock", "RUN_BUSY"); throw e; }
   const temp = path.join(dir, `run.${process.pid}.tmp`);
   const rollback = [], afterCommit = [];
-  let committed = false;
+  let committed = false, succeeded = false;
   try {
     fs.writeFileSync(fd, String(process.pid));
     if (fs.existsSync(path.join(dir, "run.unlock"))) throw runError("Run lock recovery in progress; retry", "RUN_BUSY");
     const run = loadRun(dir);
     if (run.finishedAt && !allowFinished) throw runError("Archived run is read-only", "RUN_FINISHED");
-    if (readOnly) return fn(run);
+    if (readOnly) { const result = fn(run); succeeded = true; return result; }
     const before = new Map(run.tasks.map((t) => [t.id, t.state]));
     const phase = run.phase;
     const result = fn(run, { rollback, afterCommit });
@@ -98,10 +99,12 @@ export function changeRun(fn, { allowFinished = false, readOnly = false } = {}) 
   } finally {
     // Undo reservations before unlocking; crashes remain fail-closed.
     if (!committed) for (const undo of rollback.reverse()) { try { undo(); } catch { /* lease retained */ } }
+    let cleanupError;
     for (const cleanup of [() => fs.closeSync(fd), () => fs.rmSync(temp, { force: true }), () => fs.rmSync(lock, { force: true })]) {
       try { cleanup(); }
-      catch (e) { if (committed) maintenance.push({ code: e.code || "MAINTENANCE_FAILED", error: e.message.slice(0, 600) }); }
+      catch (e) { if (committed) maintenance.push({ code: e.code || "MAINTENANCE_FAILED", error: e.message.slice(0, 600) }); else cleanupError ??= e; }
     }
+    if (succeeded && cleanupError) throw cleanupError;
   }
 }
 
@@ -126,8 +129,8 @@ export function registeredWorker(run, task) {
   const file = path.join(runDir(), "receipts", run.workspace, `${task.name}.json`);
   let r;
   try { r = JSON.parse(fs.readFileSync(file, "utf8")); }
-  catch (e) { if (e.code === "ENOENT") return null; throw e; }
-  if (r.name !== task.name || r.workspace_id !== run.workspace || !r.agent_pane || !r.tab_id || !r.generation || r.receipt_file !== path.join(path.dirname(file), `${task.name}.event`)) throw runError("Malformed worker registry", "WORKER_CHANGED");
+  catch (e) { if (e.code === "ENOENT") return null; throw runError(`Cannot verify worker registry ${file}: ${e.message}`, "WORKER_CHANGED"); }
+  if (!r || r.name !== task.name || r.workspace_id !== run.workspace || !r.agent_pane || !r.tab_id || !r.generation || r.receipt_file !== path.join(path.dirname(file), `${task.name}.event`)) throw runError(`Malformed worker registry: ${file}`, "WORKER_CHANGED");
   return { name: task.name, pane: r.agent_pane, tab: r.tab_id, monitor: r.monitor_pane, workspace: run.workspace, kind: task.kind, cwd: task.cwd, model: task.model, effort: task.effort, policy: task.policy, contextWindowTokens: task.contextWindowTokens, receipt: r.receipt_file, generation: r.generation, stage: r.stage };
 }
 

@@ -488,3 +488,28 @@ receipt lock; executable probes cover both quota and non-quota paths.
 The probe itself has a negative control: a real receipt lock plus an intentional
 transcript scan must be detected. Four focused Opus rounds reviewed the deltas;
 the last test-probe defect was corrected and independently exercised.
+
+## Adversarial follow-up — 2026-09-06 (isolated regressions, not a live run)
+
+Baseline: `75a83d1`. No live worker, tab, subscription or global agent config changed
+by these tests. Existing fake backends; dependency-free Node tests.
+
+| Review IDs | Correction | Executable evidence |
+| --- | --- | --- |
+| 1 | Permission/trust UI and input hooks override retained quota text; historical quota no longer suggests a switch | Native banner + active selector through detector, inbox and switch; zero tab-close calls |
+| 2–4 | Canonical CLI entrypoint; explicit JSON protocol validation in hook and final close guard | Relative/symlink invocation; empty-success, null, malformed and wrong-code parser outputs; saved report and protected tab |
+| 5 | Initiating Node executable pinned into worker env and monitor command; missing dependency diagnosed | Actual launch arguments; missing-node machine result; restored collection with pinned executable |
+| 6 | Explicit cancellation for failed startup without a registry; no inferred closure | Failed tab create; dead launcher; live orphan-engine refusal; cancellation then released lease and finish |
+| 7 | Missing monitor/receipt allowed by `created` lifecycle stage, with checkpoint and identity guards intact | Startup quota handoff through both CLI and Bash close; entire recorded tab retired once |
+| 8–9 | Lease release after durable archive/run publication; read-only cleanup failures propagated | Injected archive/run rename ENOSPC; foreign acquisition blocked; lock-removal EIO; original operation error preserved |
+| 10–11 | Watch records bind PID/start identity; lease ownership uses canonical run directories, including old alias paths | Recycled watch PID; actual watch marker; symlink acquire/status/release and GC ownership check |
+| 12–13 | Unchanged parked diagnostics do not repeatedly wake an active run; settled reports supersede transient monitor errors | Two waits time out; parked worker still visible/closable; valid report restores accept guidance |
+| 14 | Registry failures isolated per target; corrupt worker cannot promote itself via self-filtered discovery | Independent keys, switch, live cancel and owner takeover cases; worker promotion refused |
+| 15 | Valid generation proof can save a report with unknown/empty readiness; working/blocked still excluded | All four readiness variants through the real hook; acceptance settlement guard unchanged |
+
+- Counterfactual: all **15 newly added Node cases fail** on unchanged baseline product code; only test files replaced in a detached temporary worktree.
+- Bash counterfactuals: empty parser loses inbox; unknown readiness loses report; created-stage handoff rejected; empty-success close guard incorrectly retires the fixture tab.
+- Parser fault consumes stdin before returning empty success: no accidental SIGPIPE fallback masking the regression.
+- Shared cancel/switch retirement verification; no additional dependencies, daemon or polling loop.
+- Remaining limits: quota detection uses terminal wording, not subscription APIs; no real allowance deliberately exhausted. Legacy watch markers without verifiable process identity remain protected. Corrupt target ownership never grants closure authority. Unregistered shell-only tabs require explicit inspection; no guessed cleanup.
+- Final validation: **Node 127/127; Bash 50/50**; Bash syntax, ShellCheck `--severity=error`, `git diff --check` and 23 local documentation links clean. Temporary counterfactual worktree removed. No new external reviewer or CI run claimed.

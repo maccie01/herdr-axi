@@ -1967,6 +1967,23 @@ test_quota_handoff_requires_checkpoint_identity_and_paused_worker() (
     fail "handoff closed without a current quota error"
   fi
   printf '%s\n' "You've hit your usage limit" > "$FAKE_HERDR_CASE/visible"
+  node() { cat >/dev/null; printf '%s' "${FAKE_QUOTA_OUTPUT:-}"; }
+  export -f node
+  for invalid in '' 'null' '{}' '[]' '{"code":"OTHER"}' 'partial'; do
+    if HERDR_AXI_NODE=node FAKE_QUOTA_OUTPUT="$invalid" bash "$orchestrator_script" close worker --handoff "$run_file" >/dev/null 2>&1; then
+      fail "handoff accepted invalid quota protocol: $invalid"
+    fi
+    assert_eq 0 "$(call_count '^tab close')" "invalid quota preserves tab"
+  done
+  unset -f node
+  printf '%s\n' "You've hit your usage limit" 'Do you want to proceed?' '❯ 1. Yes' '  2. No' > "$FAKE_HERDR_CASE/visible"
+  printf '%s\n' blocked > "$FAKE_HERDR_CASE/status"
+  if bash "$orchestrator_script" close worker --handoff "$run_file" >/dev/null 2>&1; then
+    fail "handoff closed a permission dialog with retained quota text"
+  fi
+  assert_eq 0 "$(call_count '^tab close')" "dialog preserves tab"
+  printf '%s\n' idle > "$FAKE_HERDR_CASE/status"
+  printf '%s\n' "You've hit your usage limit" > "$FAKE_HERDR_CASE/visible"
   write_current_completion_proof
   if bash "$orchestrator_script" close worker --handoff "$run_file" >/dev/null 2>&1; then
     fail "handoff closed while current completion proof awaited collection"
@@ -2171,7 +2188,69 @@ test_hook_renders_backend_output_without_holding_receipt_lock() (
   done
 )
 
+test_quota_protocol_failures_preserve_reports_and_diagnose_node() (
+  node() { cat >/dev/null; printf '%s' "${FAKE_QUOTA_OUTPUT:-}"; }
+  export -f node
+  for invalid in '' 'null' '{}' '[]' 'partial'; do
+    setup_case "quota-protocol-${#invalid}-$RANDOM"
+    write_complete_transcript
+    HERDR_AXI_NODE=node FAKE_QUOTA_OUTPUT="$invalid" HERDR_MONITOR_INBOX=1 run_hook settled "$(payload)"
+    assert_eq settled "$(jq -r '.event' "${HERDR_MONITOR_RECEIPT}.inbox")" "invalid optional quota cannot lose report"
+    assert_eq 'native completion' "$(jq -r '.summary' "${HERDR_MONITOR_RECEIPT}.inbox")" "report preserved"
+  done
+  unset -f node
+  setup_case missing-node-diagnostic
+  export HERDR_MONITOR_RESULT_FILE="$TMPDIR/result"
+  if HERDR_AXI_NODE=/missing-herdr-node bash "$hook_script" quota '{}' 2> "$TMPDIR/error"; then fail "missing node silently succeeded"; fi
+  assert_eq $'error\tmissing-node' "$(< "$HERDR_MONITOR_RESULT_FILE")" "machine-readable missing node"
+  [[ "$(< "$TMPDIR/error")" == *'missing dependency: node'* ]] || fail "node diagnosis absent"
+  write_complete_transcript
+  HERDR_AXI_NODE="$(command -v node)" HERDR_MONITOR_INBOX=1 run_hook settled "$(payload)"
+  assert_eq settled "$(jq -r '.event' "${HERDR_MONITOR_RECEIPT}.inbox")" "pinned node restores collection"
+)
+
+test_unknown_readiness_preserves_generation_bound_completion() (
+  for status in unknown __empty__ working blocked; do
+    setup_case "completion-state-$status"
+    write_complete_transcript
+    printf '%s\n' "$status" > "$FAKE_HERDR_CASE/status"
+    HERDR_MONITOR_INBOX=1 run_hook settled "$(payload)"
+    if [[ "$status" == working || "$status" == blocked ]]; then
+      assert_file_absent "${HERDR_MONITOR_RECEIPT}.inbox" "active/UI state cannot settle"
+    else
+      assert_eq settled "$(jq -r '.event' "${HERDR_MONITOR_RECEIPT}.inbox")" "unknown readiness does not discard proof"
+    fi
+  done
+  setup_case input-wins-over-quota
+  printf '%s\n' blocked > "$FAKE_HERDR_CASE/status"
+  printf '%s\n' "You've hit your limit" > "$FAKE_HERDR_CASE/visible"
+  HERDR_MONITOR_INBOX=1 run_hook input '{"message":"Permission required"}'
+  assert_eq input "$(jq -r '.event' "${HERDR_MONITOR_RECEIPT}.inbox")" "native input event wins"
+  assert_eq null "$(jq -r '.quota' "${HERDR_MONITOR_RECEIPT}.inbox")" "input is not quota"
+)
+
+test_created_stage_handoff_without_monitor_or_receipt() (
+  setup_case created-handoff
+  source "$receipt_script"
+  write_worker_registry worker ws testgen
+  registry="$HERDR_RECEIPT_ROOT/ws/worker.json"
+  jq '.stage="created" | .monitor_pane=null' "$registry" > "$TMPDIR/registry"
+  mv "$TMPDIR/registry" "$registry"
+  rm "$FAKE_HERDR_CASE/monitor-1-alive"
+  export HERDR_AXI_MANAGED_TASK=1
+  run_file="$FAKE_HERDR_CASE/run.json"
+  jq -nc --arg receipt "$HERDR_MONITOR_RECEIPT" '{schema:1,workspace:"ws",owner:{pane:"owner",tab:"owner-tab"},tasks:[{name:"worker",pane:"pane-1",state:"switching",handoffs:[{from:{name:"worker",kind:"copilot",pane:"pane-1",tab:"tab-1",generation:"testgen",session:"session-1",receipt:$receipt},to:{kind:"codex"},quota:{code:"QUOTA_EXHAUSTED"},output:"startup checkpoint"}]}]}' > "$run_file"
+  printf '%s\n' blocked > "$FAKE_HERDR_CASE/status"
+  printf '%s\n' "You've hit your session limit" > "$FAKE_HERDR_CASE/visible"
+  bash "$orchestrator_script" close worker --handoff "$run_file" >/dev/null
+  assert_file_absent "$FAKE_HERDR_CASE/tab-alive" "created tab retired"
+  assert_eq 1 "$(call_count '^tab close')" "whole startup tab closed once"
+)
+
 tests=(
+  test_quota_protocol_failures_preserve_reports_and_diagnose_node
+  test_unknown_readiness_preserves_generation_bound_completion
+  test_created_stage_handoff_without_monitor_or_receipt
   test_hook_renders_backend_output_without_holding_receipt_lock
   test_monitor_signal_during_waiter_registration
   test_quota_with_pending_proof_preserves_completed_report

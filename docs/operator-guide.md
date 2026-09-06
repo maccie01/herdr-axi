@@ -75,6 +75,10 @@ when no completion proof exists. Detection is wording-based, not a subscription 
 monthly quota, session limit, and “You've hit/reached your [usage/session/weekly/monthly]
 limit”. Ordinary retryable rate limits are excluded.
 
+- Visible permission/trust selectors override retained quota text; input hooks stay input events.
+- Saved quota receipts: historical evidence, never current switching authority.
+- Managed workers/monitors inherit the initiating Node executable; missing Node produces an explicit diagnostic.
+
 ```sh
 herdr-axi run switch w1:pP --kind codex --model gpt-5.6-sol --effort high \
   --summary 'Partial implementation; build and review still pending.'
@@ -252,6 +256,7 @@ not a missing server; request permission for the same command instead of restart
 | Recovery case | Action |
 | --- | --- |
 | Startup blocked / `delivery:not_submitted` | `read <pane> --raw`; authorize explicit keys if appropriate; once ready, `run recover <task-id>` |
+| Failed startup, no registry | After launcher/engine exit and inspection: `run cancel <task-id> --evidence "..."`. Requires no named live agent; releases reservation without inferred tab closure. Any shell-only orphan needs separate inspection |
 | Uncertain submission or lost worker | Inspect first; `run recover <pane-or-task-id>` never blindly resends. Requeue requires verified absence of all recorded resources |
 | Stop unfinished task / orphan monitor tab | `run cancel <pane-or-task-id> --evidence "authorized stop; partial state/background jobs reviewed"`; not `accept` or worktree deletion |
 | Changed/unreadable identity | Control fails closed; diagnostics remain visible. Never adopt a replacement occupant |
@@ -261,8 +266,12 @@ not a missing server; request permission for the same command instead of restart
 
 Never delete locks or unverifiable leases to force progress. A `committed:true`
 response with `maintenance` means state was saved but follow-up cleanup needs attention.
+`finish` releases leases only after archive/run publication; cleanup failure leaves a
+durable archive and a recoverable lease. Retry `finish` or terminal-task `recover`.
+Valid proof with unknown readiness can save a report; acceptance still requires live
+idle/done. A successful settled report supersedes stale monitor errors.
 New control markers include process start identity: recycled PIDs do not pin
-takeover or archive cleanup. Legacy/unknown live identities remain fail-closed;
+watch, takeover or archive cleanup. Legacy/unknown live identities remain fail-closed;
 errors name the marker and inspection commands. Without `ps`, dead-PID markers
 remain reclaimable, but live/recycled identities require explicit inspection.
 
