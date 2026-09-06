@@ -106,6 +106,10 @@ group="${1:-}"
 action="${2:-}"
 shift $(( $# >= 2 ? 2 : $# ))
 record_call "$group $action $*"
+if [[ -e "$case_dir/check-unlocked-reads" && "$group" == "agent" &&
+  ( "$action" == "get" || "$action" == "read" ) && -e "${HERDR_MONITOR_RECEIPT:-/nonexistent}.lock" ]]; then
+  printf '%s\n' "$group $action" >> "$case_dir/locked-backend-reads"
+fi
 
 case "$group:$action" in
   agent:get)
@@ -1963,6 +1967,12 @@ test_quota_handoff_requires_checkpoint_identity_and_paused_worker() (
     fail "handoff closed without a current quota error"
   fi
   printf '%s\n' "You've hit your usage limit" > "$FAKE_HERDR_CASE/visible"
+  write_current_completion_proof
+  if bash "$orchestrator_script" close worker --handoff "$run_file" >/dev/null 2>&1; then
+    fail "handoff closed while current completion proof awaited collection"
+  fi
+  assert_eq 0 "$(call_count '^tab close')" "pending proof preserves tab"
+  remove_current_completion_proof
   : > "$FAKE_HERDR_CASE/start-on-read"
   if bash "$orchestrator_script" close worker --handoff "$run_file" >/dev/null 2>&1; then
     fail "handoff closed worker that resumed during quota read"
@@ -2057,7 +2067,114 @@ test_cancel_monitor_orphan_requires_checkpoint_and_preserves_foreign_panes() (
   assert_eq 0 "$(file_value "$FAKE_HERDR_CASE/prompt-attempts")" "intentional closure suppresses lost notification"
 )
 
+test_quota_with_pending_proof_preserves_completed_report() (
+  for kind in copilot claude codex; do
+    setup_case "quota-pending-proof-$kind"
+    printf '%s\n' "$kind" > "$FAKE_HERDR_CASE/kind"
+    case "$kind" in
+      copilot) write_complete_transcript ;;
+      claude) write_claude_transcript >/dev/null; arm_completion_generation ;;
+      codex) write_codex_transcript >/dev/null; arm_completion_generation ;;
+    esac
+    printf '%s\n' idle > "$FAKE_HERDR_CASE/status"
+    printf '%s\n' "You've hit your usage limit" > "$FAKE_HERDR_CASE/visible"
+    HERDR_MONITOR_INBOX=1 run_hook error '{}'
+    assert_eq settled "$(jq -r '.event' "${HERDR_MONITOR_RECEIPT}.inbox")" "$kind proof wins before first settlement"
+    assert_eq generation:generation-one "$(receipt_read_field 8)" "$kind proof committed"
+    assert_eq QUOTA_EXHAUSTED "$(jq -r '.quota.code' "${HERDR_MONITOR_RECEIPT}.inbox")" "$kind quota retained separately"
+    saved=$(< "${HERDR_MONITOR_RECEIPT}.inbox")
+    [[ "$saved" == *'"summary":"complete"'* || "$saved" == *'"summary":"intermediate"'* ]] || fail "$kind report replaced by quota"
+    HERDR_MONITOR_INBOX=1 run_hook settled '{}'
+    assert_eq "$saved" "$(< "${HERDR_MONITOR_RECEIPT}.inbox")" "$kind retry preserves result"
+  done
+  setup_case quota-proof-empty-native-report
+  printf '%s\n' '{"type":"session.task_complete","data":{"summary":""}}' > "$(transcript_path)"
+  arm_completion_generation
+  printf '%s\n' idle > "$FAKE_HERDR_CASE/status"
+  printf '%s\n' 'VISIBLE_RESULT: checks passed' 'You have exceeded your monthly quota' > "$FAKE_HERDR_CASE/visible"
+  HERDR_MONITOR_INBOX=1 run_hook error '{}'
+  assert_eq settled "$(jq -r '.event' "${HERDR_MONITOR_RECEIPT}.inbox")" "empty native report still settles with proof"
+  [[ "$(jq -r '.detail' "${HERDR_MONITOR_RECEIPT}.inbox")" == *VISIBLE_RESULT* ]] || fail "quota discarded visible fallback report"
+  for invalid in absent stale malformed unfinished; do
+    setup_case "quota-invalid-proof-$invalid"
+    write_complete_transcript
+    case "$invalid" in
+      absent) remove_current_completion_proof ;;
+      stale) printf '%s\n' old-generation > "${HERDR_MONITOR_RECEIPT}.proof.generation-one" ;;
+      malformed) printf '%s' generation-one > "${HERDR_MONITOR_RECEIPT}.proof.generation-one" ;;
+      unfinished) append_user_message ;;
+    esac
+    printf '%s\n' "You have exceeded your monthly quota" > "$FAKE_HERDR_CASE/visible"
+    HERDR_MONITOR_INBOX=1 run_hook settled '{}'
+    assert_eq error "$(jq -r '.event' "${HERDR_MONITOR_RECEIPT}.inbox")" "$invalid proof cannot defeat quota"
+    assert_eq "" "$(receipt_read_field 8)" "$invalid proof cannot complete"
+  done
+)
+
+test_monitor_signal_during_waiter_registration() (
+  setup_case signal-during-registration
+  printf '%s\n' working > "$FAKE_HERDR_CASE/status"
+  # Scheduling fault injection, not a source-text assertion: interrupt the real
+  # monitor's helper after spawning its backend but before recording its PID.
+  cat > "$FAKE_HERDR_CASE/schedule.bash" <<'EOF'
+set -T
+trap '
+  if [[ "$BASH_COMMAND" == "wait_command_pid=\$!" && ! -e "$FAKE_HERDR_CASE/registration-pid" ]]; then
+    trap - DEBUG
+    backend_pid=$!
+    helper_pid=$(ps -o ppid= -p "$backend_pid" | tr -d " ")
+    printf "%s\n" "$backend_pid" > "$FAKE_HERDR_CASE/registration-pid"
+    kill -TERM "$helper_pid"
+  fi
+' DEBUG
+EOF
+  BASH_ENV="$FAKE_HERDR_CASE/schedule.bash" bash "$monitor_script" worker worker orch "$HERDR_MONITOR_RECEIPT" "$hook_script" > "$FAKE_HERDR_CASE/output" 2>&1 &
+  monitor_pid=$!
+  trap 'kill "$monitor_pid" 2>/dev/null || true; wait "$monitor_pid" 2>/dev/null || true; if [[ -s "$FAKE_HERDR_CASE/registration-pid" ]]; then kill "$(< "$FAKE_HERDR_CASE/registration-pid")" 2>/dev/null || true; fi' EXIT
+  wait_for_file "$FAKE_HERDR_CASE/registration-pid" || fail "registration signal never injected"
+  sleep 0.2
+  kill "$monitor_pid" 2>/dev/null || true
+  wait "$monitor_pid" 2>/dev/null || true
+  assert_no_fake_waiters "signal during PID registration"
+  trap - EXIT
+)
+
+test_hook_renders_backend_output_without_holding_receipt_lock() (
+  jq() {
+    if [[ "$*" == *events.jsonl* ]]; then
+      : > "$FAKE_HERDR_CASE/transcript-scanned"
+      if [[ -e "${HERDR_MONITOR_RECEIPT}.lock" ]]; then : > "$FAKE_HERDR_CASE/locked-transcript-scan"; fi
+    fi
+    command jq "$@"
+  }
+  export -f jq
+  setup_case locked-scan-negative-control
+  write_complete_transcript
+  (
+    # shellcheck source=herdr-receipt.sh
+    source "$receipt_script"
+    herdr_receipt_lock_acquire "$HERDR_MONITOR_RECEIPT"
+    jq -s . "$(transcript_path)" >/dev/null
+    assert_file_present "$FAKE_HERDR_CASE/locked-transcript-scan" "negative control detects a real locked scan"
+    herdr_receipt_lock_release
+  )
+  for event in settled input error lost quota; do
+    setup_case "unlocked-render-$event"
+    write_complete_transcript
+    : > "$FAKE_HERDR_CASE/check-unlocked-reads"
+    if [[ "$event" == quota ]]; then printf '%s\n' 'You have exceeded your monthly quota' > "$FAKE_HERDR_CASE/visible"; event=error; fi
+    HERDR_MONITOR_INBOX=1 run_hook "$event" '{}'
+    assert_file_present "${HERDR_MONITOR_RECEIPT}.inbox" "$event delivered"
+    assert_file_absent "$FAKE_HERDR_CASE/locked-backend-reads" "$event backend reads outside critical section"
+    assert_file_present "$FAKE_HERDR_CASE/transcript-scanned" "$event transcript scan exercised"
+    assert_file_absent "$FAKE_HERDR_CASE/locked-transcript-scan" "$event transcript scans outside critical section"
+  done
+)
+
 tests=(
+  test_hook_renders_backend_output_without_holding_receipt_lock
+  test_monitor_signal_during_waiter_registration
+  test_quota_with_pending_proof_preserves_completed_report
   test_cancel_monitor_orphan_requires_checkpoint_and_preserves_foreign_panes
   test_quota_hook_records_error_without_completion_or_owner_input
   test_quota_handoff_requires_checkpoint_identity_and_paused_worker

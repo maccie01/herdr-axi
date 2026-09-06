@@ -438,3 +438,53 @@ not live-tested. The user's pre-existing orphan tabs were intentionally untouche
 Final validation: Bash 44/44; JavaScript 93/93, including the stale-launcher-PID
 regression. Node/Bash syntax and diff checks passed. No new dependency or scheduler;
 existing close/receipt/archive paths reused.
+
+## Adversarial fixes and orchestrator exercise (6 September 2026)
+
+Baseline `d2f431f`; scratch `/private/tmp/herdr-axi-fix-live.fJ5Qz7`.
+Actual Claude Opus 5/high adversarial review; separate Codex Sol/high orchestrator.
+No live project tasks, global instruction edits, dependency additions or publication.
+
+| Live scenario | Observed result |
+| --- | --- |
+| Queue overlapping writer | Deferred; cancelled without starting another worker |
+| Start Codex + Copilot | Two distinct owned tabs; trust/startup handled explicitly |
+| Cancel running Copilot | Whole tab, including monitor, gone; 1738 ms |
+| Complete/reuse Codex | Exact `alpha\n`, then `second\n`; same worker, new generation |
+| Watch → review → accept | Reports in both watch responses; zero separate inbox calls |
+| Close/finish | Both worker tabs absent; run archived; no retained lease |
+
+CLI trace: **25 completed calls, 14,680 output bytes**; watch 2, inbox 0,
+bounded read 2, help 0, final status 1. No status/inbox polling loop.
+Two CLI errors: sandbox permission denial and premature startup recovery.
+One further approval rejection occurred before CLI execution. The child’s own
+call-count estimate differed; `cli-calls.jsonl` is authoritative.
+
+Workers: Copilot `w1B:p1B` / `w1B:tZ`, Codex `w1B:p1C` / `w1B:t0` (zero).
+Standalone orchestrator `w1B:p19` / `w1B:tY` also closed after identity/topology checks.
+Reviewer `w1B:p18` / `w1B:tX`: accepted review, whole tab closed, run archived.
+All four test tabs independently verified absent; both runs lease-free.
+Original owner `w1B:p2` / `w1B:t2` untouched. Scratch outputs retained under
+`scenario-run/one`; native provider session history not deleted.
+
+Regression coverage: pending proof versus quota for all three providers;
+interrupted/resumed switch; handoff reuse; recovery archival; receipt-lock IPC;
+signal during waiter registration; PID reuse; context/quota probe fairness;
+late-proof watch reports; bounded startup diagnostics. Eleven new Node cases
+and both original Bash proof/signal cases failed against the old product code.
+
+Limits: no real subscription deliberately exhausted; provider quota variants,
+owner takeover and interrupted switch cleanup fault-injected through isolated
+backends. Trust/updater dialogs still require explicit authorized handling.
+`no-mistakes` executable unavailable; independent Opus review and local validation
+used instead. No claim of its pipeline or CI passing.
+
+Final frozen-code validation: **Node 112/112; Bash 47/47**. Node/Bash syntax,
+`git diff --check`, ShellCheck `--severity=error`: clean. Phase-order reuse also
+exposed historical task selection masking the active task on the same pane;
+shared lookup and monitor hints now prioritize active work, with explicit task
+IDs preserving historical selection. No full transcript scan under the hook's
+receipt lock; executable probes cover both quota and non-quota paths.
+The probe itself has a negative control: a real receipt lock plus an intentional
+transcript scan must be detected. Four focused Opus rounds reviewed the deltas;
+the last test-probe defect was corrected and independently exercised.

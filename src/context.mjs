@@ -44,17 +44,32 @@ export function contextStatus(run, workers, rows) {
   // ponytail: at most two 1s backend probes/call; bounded local transcript tails
   // need no terminal round trip and do not compete for that budget.
   const candidates = workers.filter((w) => !w.closed);
-  let probes = 0, codexDue = 0;
+  let probes = 0;
   const screens = new Map();
-  const due = candidates.filter((w) => rows.some((a) => a.pane === w.pane) && (!cache[w.pane] || cache[w.pane].generation !== w.generation || now - (cache[w.pane].attemptedAt ?? cache[w.pane].at) >= 15000)).sort((a, b) => (cache[a.pane]?.attemptedAt ?? cache[a.pane]?.at ?? 0) - (cache[b.pane]?.attemptedAt ?? cache[b.pane]?.at ?? 0)).filter((w) => w.kind !== "codex" || ++codexDue <= 2);
+  const contextDue = (w) => !cache[w.pane] || cache[w.pane].generation !== w.generation || now - (cache[w.pane].attemptedAt ?? cache[w.pane].at ?? 0) >= 15000;
+  const quotaDue = (w) => {
+    const a = rows.find((a) => a.pane === w.pane), c = cache[w.pane];
+    return a && ["blocked", "idle", "done", "unknown"].includes(a.state) && (!c || c.generation !== w.generation || c.quotaState !== a.state || now - (c.quotaAttemptedAt ?? c.quotaAt ?? 0) >= 15000);
+  };
+  // One fair terminal queue for context AND quota. Failed probes rotate too;
+  // frequent Codex context refresh must not starve another provider's quota.
+  const terminalDue = candidates.filter((w) => rows.some((a) => a.pane === w.pane) && ((w.kind === "codex" && contextDue(w)) || quotaDue(w)))
+    .sort((a, b) => (cache[a.pane]?.probedAt ?? 0) - (cache[b.pane]?.probedAt ?? 0)).slice(0, 2);
+  for (const w of terminalDue) {
+    const a = rows.find((a) => a.pane === w.pane);
+    const c = cache[w.pane]?.generation === w.generation ? cache[w.pane] : { generation: w.generation, source: "unknown" };
+    cache[w.pane] = { ...c, probedAt: now, quotaAttemptedAt: now, quotaState: a.state };
+    probes++;
+    try { screens.set(w.pane, runHerdr(["agent", "read", w.pane, "--source", "visible", "--lines", "24"], { timeoutMs: 1000, text: true })); }
+    catch { /* unavailable; preserve last measurement, rotate probe priority */ }
+  }
+  const due = candidates.filter((w) => rows.some((a) => a.pane === w.pane) && contextDue(w) && (w.kind !== "codex" || terminalDue.includes(w)));
   for (const w of due) {
     let value = { source: "unknown" };
     try {
       const a = rows.find((a) => a.pane === w.pane);
       if (w.kind === "codex") {
-        probes++;
-        const screen = runHerdr(["agent", "read", w.pane, "--source", "visible", "--lines", "24"], { timeoutMs: 1000, text: true });
-        screens.set(w.pane, screen); value = contextValue(w.kind, screen);
+        value = contextValue(w.kind, screens.get(w.pane) ?? "");
       }
       else if (/^[a-fA-F0-9-]{36}$/.test(a.session ?? "")) {
         const transcript = w.kind === "copilot"
@@ -74,16 +89,15 @@ export function contextStatus(run, workers, rows) {
     const a = rows.find((a) => a.pane === w.pane);
     if (!a || !["blocked", "idle", "done", "unknown"].includes(a.state)) continue;
     const c = cache[w.pane]?.generation === w.generation ? cache[w.pane] : { generation: w.generation, source: "unknown" };
-    if (c.quotaState === a.state && now - (c.quotaAt ?? 0) < 15000) continue;
-    if (!screens.has(w.pane) && probes >= 2) continue;
+    if (!screens.has(w.pane)) continue;
     try {
-      const screen = screens.get(w.pane) ?? (++probes, runHerdr(["agent", "read", w.pane, "--source", "visible", "--lines", "24"], { timeoutMs: 1000, text: true }));
+      const screen = screens.get(w.pane);
       cache[w.pane] = { ...c, quota: quotaError(screen), quotaAt: now, quotaState: a.state };
       quotaProbed = true;
     } catch { /* unavailable is not quota evidence */ }
   }
   let error;
-  if (due.length || quotaProbed) {
+  if (due.length || probes || quotaProbed) {
     const temp = `${file}.${process.pid}.tmp`;
     try {
       fs.writeFileSync(temp, JSON.stringify(Object.fromEntries(candidates.filter((w) => cache[w.pane]).map((w) => [w.pane, cache[w.pane]]))), { mode: 0o600 });

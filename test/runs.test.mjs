@@ -137,6 +137,239 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
     return w;
   }
 
+  test("control markers survive PID reuse and concurrent same-process calls without clobbering", () => {
+    const f = fixture();
+    try {
+      const source = `import assert from 'node:assert/strict'; import fs from 'node:fs'; import path from 'node:path';
+        import {runCommand} from ${JSON.stringify(new URL("../src/runs.mjs", import.meta.url).href)};
+        const folder=path.join(process.env.HERDR_AXI_RUN,'operations'); fs.mkdirSync(folder,{recursive:true});
+        const old=path.join(folder,String(process.pid)); fs.writeFileSync(old,'previous incarnation');
+        const first=runCommand('inbox',{_:[]}), second=runCommand('inbox',{_:[]});
+        assert.equal(fs.readdirSync(folder).length,3,'both live controls must retain their own marker');
+        await Promise.all([first,second]);
+        assert.deepEqual(fs.readdirSync(folder),[String(process.pid)]);
+        assert.equal(fs.readFileSync(old,'utf8'),'previous incarnation');`;
+      const r = spawnSync(process.execPath, ["--input-type=module", "-e", source], { env: f.env, encoding: "utf8" });
+      assert.equal(r.status, 0, r.stderr);
+    } finally { f.clean(); }
+  });
+
+  test("unlock is idempotent when no transaction lock exists, but refuses a live holder", () => {
+    const f = fixture();
+    try {
+      assert.match(f.ok(["run", "unlock"]), /Already unlocked/);
+      assert.match(f.ok(["run", "unlock"]), /unlocked: false/);
+      const lock = path.join(f.env.HERDR_AXI_RUN, "run.lock");
+      fs.writeFileSync(lock, String(process.pid));
+      assert.match(f.execute(["run", "unlock"]).output, /RUN_BUSY/);
+      assert.equal(fs.readFileSync(lock, "utf8"), String(process.pid));
+      assert(!fs.existsSync(path.join(f.env.HERDR_AXI_RUN, "run.unlock")));
+    } finally { f.clean(); }
+  });
+
+  for (const retry of [false, true]) test(`recover retains absent worker evidence through ${retry ? "replacement" : "cancellation"} and finish`, () => {
+    const f = fixture();
+    try {
+      f.queue("lost"); f.ok(["run", "next"]);
+      const w = f.state().workers[0];
+      fs.writeFileSync(w.receipt + ".inbox", JSON.stringify({ generation: w.generation, event: "lost", summary: "partial evidence to preserve" }));
+      fs.unlinkSync(path.join(f.dir, `${w.pane}.agent`));
+      fs.unlinkSync(path.join(f.dir, `${w.monitor}.monitor`));
+      f.ok(["run", "recover", w.pane]);
+      assert.equal(f.state().workers[0].closed, true);
+      assert.equal(f.state().tasks[0].state, "queued");
+      if (retry) {
+        f.ok(["run", "next"]);
+        const fresh = f.state().workers.find((v) => !v.closed);
+        assert.notEqual(fresh.name, w.name);
+        f.complete(fresh); f.ok(["run", "accept", fresh.pane, "--evidence", "Checked replacement result"]);
+        f.ok(["run", "close", fresh.pane]);
+      } else f.ok(["run", "cancel", "lost"]);
+      f.ok(["run", "finish"]);
+      const archive = JSON.parse(gunzipSync(fs.readFileSync(path.join(f.env.HERDR_AXI_RUN, "detail.json.gz"))));
+      assert.match(archive.inboxes[w.name], /partial evidence to preserve/);
+      for (const file of [w.receipt, w.receipt + ".inbox", w.receipt.replace(/\.event$/, ".json")]) assert(!fs.existsSync(file), file);
+    } finally { f.clean(); }
+  });
+
+  for (const reuseParked of [false, true]) test(`handoff survives recovery and later switching${reuseParked ? " onto another parked worker" : " onto a new worker"}`, () => {
+    const f = fixture();
+    try {
+      const old = exhaustedWorker(f);
+      f.ok(["run", "switch", old.pane, "--kind", "codex", "--model", "gpt-5.6-sol", "--summary", "FIRST_HANDOFF_PENDING"]);
+      fs.writeFileSync(path.join(f.dir, "startup-blocked"), "");
+      f.ok(["run", "next"]);
+      const file = path.join(f.env.HERDR_AXI_RUN, "task-quota-task.txt");
+      assert.match(fs.readFileSync(file, "utf8"), /FIRST_HANDOFF_PENDING/);
+      fs.unlinkSync(path.join(f.dir, "startup-blocked"));
+      const w = f.state().workers.find((w) => !w.closed);
+      f.ok(["dispatch", w.pane, "--keys", "enter"]); f.ok(["run", "recover", w.pane]);
+      assert.match(f.calls().filter((c) => c.action === "prompt").at(-1).args[1], /FIRST_HANDOFF_PENDING/);
+      const fresh = f.state().workers.find((w) => !w.closed);
+      f.complete(fresh);
+      f.ok(["run", "revise", fresh.pane, "--prompt", "REVISION_ONLY: check and fix one edge case"]);
+      const delivered = f.calls().filter((c) => c.action === "prompt").at(-1).args[1];
+      assert.match(delivered, /REVISION_ONLY/); assert.doesNotMatch(delivered, /FIRST_HANDOFF_PENDING|Prior terminal tail/);
+      const lost = f.state().workers.find((w) => !w.closed);
+      fs.unlinkSync(path.join(f.dir, `${lost.pane}.agent`));
+      fs.unlinkSync(path.join(f.dir, `${lost.monitor}.monitor`));
+      f.ok(["run", "recover", lost.pane]);
+      let parked;
+      if (reuseParked) {
+        // Another identical-policy task ran in an earlier phase; its worker
+        // never received this task's checkpoint. Launch it through the CLI.
+        const r = f.state(), original = r.tasks[0];
+        r.tasks.push({ ...original, id: "parked-task", prompt: "Independent check", handoffs: [], revisions: [] });
+        original.phase = "build"; f.write(r);
+        f.ok(["run", "next"]); parked = f.state().workers.find((w) => !w.closed);
+        f.complete(parked); f.ok(["run", "accept", parked.pane, "--evidence", "Independent check reviewed"]);
+        f.ok(["run", "phase", "build", "--cap", "1"]);
+      }
+      f.ok(["run", "next"]);
+      if (parked) assert.equal(f.state().tasks[0].pane, parked.pane, "must exercise reuse, not a fresh launch");
+      if (parked) {
+        const hint = fs.readFileSync(path.join(f.env.HERDR_AXI_RUN, "receipts", "wTEST", `${parked.name}.task`), "utf8");
+        assert.match(hint, /\trunning\t/, "monitor hint must describe active task, not later queued accepted history");
+      }
+      const restored = f.calls().filter((c) => c.action === "prompt").at(-1).args[1];
+      assert.match(restored, /REVISION_ONLY/); assert.match(restored, /FIRST_HANDOFF_PENDING/);
+      const current = f.state().workers.find((w) => !w.closed);
+      const aFile = path.join(f.dir, `${current.pane}.agent`), a = JSON.parse(fs.readFileSync(aFile));
+      a.agent_status = "idle"; fs.writeFileSync(aFile, JSON.stringify(a));
+      fs.writeFileSync(path.join(f.dir, `screen-${current.pane}`), "Session limit reached");
+      f.ok(["run", "switch", current.pane, "--kind", "claude", "--model", "opus", "--summary", "SECOND_HANDOFF_PENDING"]);
+      f.ok(["run", "next"]);
+      const second = f.calls().filter((c) => c.action === "prompt").at(-1).args[1];
+      assert.match(second, /SECOND_HANDOFF_PENDING/); assert.doesNotMatch(second, /FIRST_HANDOFF_PENDING/);
+    } finally { f.clean(); }
+  });
+
+  test("queue returns actual cwd-relative scope before any worker is started", () => {
+    const f = fixture();
+    try {
+      const cwd = f.state().project;
+      const output = f.ok(["run", "queue", "scope", "--kind", "codex", "--cwd", cwd, "--area", "project", "--prompt", "Check scope"]);
+      assert(output.includes(path.join(cwd, "project")));
+      assert.equal(f.state().tasks[0].area, path.join(cwd, "project"));
+      assert(!f.calls().some((c) => c.action === "start"));
+    } finally { f.clean(); }
+  });
+
+  test("quota and context share a fair two-probe budget at slow polling cadence", () => {
+    const f = fixture();
+    try {
+      fs.writeFileSync(path.join(f.dir, "context-footer"), "Context 8% left");
+      fs.writeFileSync(path.join(f.dir, "screen-wTEST:pQUOTA"), "You have exceeded your monthly quota");
+      const source = `import assert from 'node:assert/strict';
+        import {contextStatus} from ${JSON.stringify(new URL("../src/context.mjs", import.meta.url).href)};
+        const workers=[{pane:'wTEST:pA',kind:'codex',state:'working'},{pane:'wTEST:pB',kind:'codex',state:'working'},{pane:'wTEST:pQUOTA',kind:'copilot',state:'idle'}].map(w=>({...w,generation:'gen'}));
+        const run={config:{context:{warnPercent:70,criticalPercent:85}}};
+        let now=1000000; Date.now=()=>now;
+        let result; for(let i=0;i<4;i++){result=contextStatus(run,workers,workers); now+=30000;}
+        assert.equal(result.quotas[0]?.pane,'wTEST:pQUOTA');
+        assert.equal(result.warnings.length,2);`;
+      const before = f.calls().length;
+      const r = spawnSync(process.execPath, ["--input-type=module", "-e", source], { env: f.env, encoding: "utf8" });
+      assert.equal(r.status, 0, r.stderr);
+      const reads = f.calls().slice(before).filter((c) => c.action === "read");
+      assert(reads.length <= 8); assert(reads.some((c) => c.args[0] === "wTEST:pQUOTA"));
+    } finally { f.clean(); }
+  });
+
+  test("quota-only screen changes preserve fresh context warnings until context refresh is due", () => {
+    const f = fixture();
+    try {
+      const source = `import assert from 'node:assert/strict'; import fs from 'node:fs';
+        import {contextStatus} from ${JSON.stringify(new URL("../src/context.mjs", import.meta.url).href)};
+        let now=1000000; Date.now=()=>now;
+        const w={pane:'wTEST:pA',kind:'codex',generation:'g',state:'done'};
+        fs.writeFileSync(process.env.HERDR_AXI_RUN+'/context.json',JSON.stringify({[w.pane]:{generation:'g',percent:92,at:now-1000,attemptedAt:now-1000,quotaAt:now-1000,quotaState:'idle',source:'native-context'}}));
+        const run={config:{context:{warnPercent:70,criticalPercent:85}}};
+        let s=contextStatus(run,[w],[w]); assert.equal(s.warnings[0]?.percent,92); assert.equal(s.stale,0);
+        now+=16000; s=contextStatus(run,[w],[w]); assert.equal(s.warnings.length,0); assert.equal(s.lastKnown[0]?.percent,92);`;
+      const r = spawnSync(process.execPath, ["--input-type=module", "-e", source], { env: f.env, encoding: "utf8" });
+      assert.equal(r.status, 0, r.stderr);
+    } finally { f.clean(); }
+  });
+
+  test("takeover and archive cleanup reclaim reused-PID controls by start identity, not PID alone", () => {
+    const f = fixture();
+    try {
+      const env = replacementOwner(f);
+      fs.writeFileSync(path.join(f.dir, "owner-gone"), "");
+      const folder = path.join(f.env.HERDR_AXI_RUN, "operations"); fs.mkdirSync(folder);
+      const stale = path.join(folder, `${process.pid}.${randomUUID()}`);
+      fs.writeFileSync(stale, JSON.stringify({ pid: process.pid, started: "Mon Jan 1 00:00:00 2001", action: "inbox" }));
+      const result = f.execute(["run", "takeover", "--from", owner.pane_id, "--evidence", "Authorized recovery; previous PID incarnation ended"], env);
+      assert.equal(result.status, 0, result.output); assert(!fs.existsSync(stale));
+      fs.writeFileSync(stale, JSON.stringify({ pid: process.pid, started: "Mon Jan 1 00:00:00 2001", action: "inbox" }));
+      const finished = f.execute(["run", "finish"], env);
+      assert.equal(finished.status, 0, finished.output); assert(!fs.existsSync(stale));
+    } finally { f.clean(); }
+  });
+
+  test("unverifiable live control gives exact inspection hints without deleting the marker", () => {
+    const f = fixture();
+    try {
+      const env = replacementOwner(f);
+      fs.writeFileSync(path.join(f.dir, "owner-gone"), "");
+      const folder = path.join(f.env.HERDR_AXI_RUN, "operations"); fs.mkdirSync(folder);
+      const marker = path.join(folder, String(process.pid)); fs.writeFileSync(marker, "legacy control");
+      const result = f.execute(["run", "takeover", "--from", owner.pane_id, "--evidence", "Authorized recovery"], env);
+      assert.equal(result.status, 1); assert.match(result.output, /RUN_BUSY/);
+      assert(result.output.includes(marker)); assert(result.output.includes(`ps -p ${process.pid}`));
+      assert.equal(fs.readFileSync(marker, "utf8"), "legacy control");
+    } finally { f.clean(); }
+  });
+
+  test("resumed quota switch collects a newly arrived proof and offers cancellation, not a retry loop", () => {
+    const f = fixture();
+    try {
+      const w = exhaustedWorker(f), aFile = path.join(f.dir, `${w.pane}.agent`), a = JSON.parse(fs.readFileSync(aFile));
+      const session = randomUUID(); a.agent_session = { value: session }; fs.writeFileSync(aFile, JSON.stringify(a));
+      fs.writeFileSync(path.join(f.dir, "close-fail"), "");
+      assert.match(f.execute(["run", "switch", w.pane, "--kind", "codex", "--model", "gpt-5.6-sol"]).output, /SWITCH_PENDING/);
+      const closes = f.calls().filter((c) => c.action === "close").length;
+      f.env.HOME = path.join(f.dir, "home");
+      const transcript = path.join(f.env.HOME, ".copilot/session-state", session, "events.jsonl");
+      fs.mkdirSync(path.dirname(transcript), { recursive: true });
+      fs.writeFileSync(transcript, JSON.stringify({ type: "session.task_complete", data: { summary: "SWITCH_LATE_REPORT: checked" } }) + "\n");
+      fs.writeFileSync(`${w.receipt}.proof.${w.generation}`, w.generation + "\n");
+      fs.unlinkSync(path.join(f.dir, "close-fail"));
+      const result = f.execute(["run", "switch", "quota-task"]);
+      assert.equal(result.status, 1); assert.match(result.output, /SWITCH_PENDING/); assert.match(result.output, /run switch quota-task --cancel/);
+      assert.equal(f.calls().filter((c) => c.action === "close").length, closes);
+      f.ok(["run", "switch", "quota-task", "--cancel"]);
+      const report = f.ok(["watch", "--timeout-ms", "100"]);
+      assert.match(report, /SWITCH_LATE_REPORT/); assert.match(report, /review/);
+      f.ok(["run", "accept", w.pane, "--evidence", "Late report reviewed"]);
+    } finally { f.clean(); }
+  });
+
+  for (const [quota, action] of [[false, "watch"], [true, "watch"], [true, "switch"]]) test(`${action} collects late native proof without losing completed work${quota ? " despite quota banner" : ""}`, () => {
+    const f = fixture();
+    try {
+      const w = exhaustedWorker(f), aFile = path.join(f.dir, `${w.pane}.agent`), a = JSON.parse(fs.readFileSync(aFile));
+      const session = randomUUID(); a.agent_session = { value: session }; fs.writeFileSync(aFile, JSON.stringify(a));
+      f.env.HOME = path.join(f.dir, "home");
+      const transcript = path.join(f.env.HOME, ".copilot/session-state", session, "events.jsonl");
+      fs.mkdirSync(path.dirname(transcript), { recursive: true });
+      fs.writeFileSync(transcript, JSON.stringify({ type: "session.task_complete", data: { summary: "LATE_REPORT: checks passed" } }) + "\n");
+      fs.writeFileSync(`${w.receipt}.proof.${w.generation}`, w.generation + "\n");
+      if (!quota) fs.writeFileSync(path.join(f.dir, `screen-${w.pane}`), "Task finished");
+      if (action === "switch") {
+        const r = f.execute(["run", "switch", w.pane, "--kind", "codex", "--model", "gpt-5.6-sol"]);
+        assert.equal(r.status, 1); assert.match(r.output, /NOT_SWITCHABLE/);
+        assert(!f.calls().some((c) => c.action === "close"));
+        assert.equal(f.state().tasks[0].state, "running");
+      }
+      const out = f.ok(["watch", "--timeout-ms", "100"]);
+      assert.match(out, /LATE_REPORT/); assert.match(out, /review/); assert.match(out, /run accept/);
+      assert.doesNotMatch(out, /herdr-axi run inbox|herdr-axi run switch/);
+      f.ok(["run", "accept", w.pane, "--evidence", "Verified actual result and checks"]);
+    } finally { f.clean(); }
+  });
+
   test("explicit cancellation closes working worker AND monitor; saves partial work without acceptance", () => {
     const f = fixture();
     try {
@@ -512,9 +745,10 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       assert.match(f.execute(args, env).output, /QUOTA_NOT_CONFIRMED/);
       fs.writeFileSync(path.join(f.dir, `screen-${owner.pane_id}`), "You've hit your limit");
       const ops = path.join(f.env.HERDR_AXI_RUN, "operations"); fs.mkdirSync(ops);
-      fs.writeFileSync(path.join(ops, String(process.pid)), "next");
+      const active = path.join(ops, `${process.pid}.${randomUUID()}`);
+      fs.writeFileSync(active, "next");
       assert.match(f.execute(args, env).output, /RUN_BUSY/);
-      fs.unlinkSync(path.join(ops, String(process.pid)));
+      fs.unlinkSync(active);
       fs.writeFileSync(path.join(f.dir, "owner.json"), JSON.stringify({ ...owner, terminal_id: "different", agent_status: "idle" }));
       assert.match(f.execute(args, env).output, /OWNER_CHANGED/);
       assert.match(f.execute(args, { ...env, HERDR_AXI_WORKER: "1" }).output, /NESTED_RUN/);
@@ -547,6 +781,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       fs.writeFileSync(lock, String(stopped.pid));
       const ops = path.join(f.env.HERDR_AXI_RUN, "operations"); fs.mkdirSync(ops);
       fs.writeFileSync(path.join(ops, String(stopped.pid)), "next");
+      fs.writeFileSync(path.join(ops, `${stopped.pid}.${randomUUID()}`), "inbox");
       const result = f.execute(args, env); assert.equal(result.status, 0, result.output);
       assert(!fs.existsSync(lock)); assert.deepEqual(fs.readdirSync(ops), []);
     } finally { f.clean(); }
@@ -931,6 +1166,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       fs.writeFileSync(path.join(f.dir, "startup-blocked"), "");
       f.queue("a"); const result = f.ok(["run", "next"]);
       assert.match(result, /blocked/); assert.match(result, /submitted: false/);
+      assert.match(result, /startupOutput: Worker result/);
       const w = f.state().workers[0];
       assert.match(result, new RegExp(`herdr-axi read ${w.pane} --raw`));
       assert.equal(JSON.parse(fs.readFileSync(path.join(f.dir, `${w.pane}.agent`))).label, "a · codex");
@@ -941,6 +1177,24 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       assert.match(f.ok(["run", "recover", "a"]), /running/);
       assert.equal(f.calls().filter((c) => c.action === "create").length, 1);
       assert.equal(f.calls().filter((c) => c.action === "prompt").length, 1);
+    } finally { f.clean(); }
+  });
+
+  test("startup preview is bounded and never auto-confirms a dialog", () => {
+    const f = fixture();
+    try {
+      fs.writeFileSync(path.join(f.dir, "startup-blocked"), "");
+      fs.writeFileSync(path.join(f.dir, "context-footer"), "padding ".repeat(2000) + "Trust this folder?");
+      f.queue("preview");
+      const result = f.ok(["run", "next"]);
+      assert.match(result, /startupOutput:/); assert.match(result, /Trust this folder/);
+      assert(Buffer.byteLength(result) < 5000);
+      assert(!f.calls().some((c) => ["prompt", "send-keys"].includes(c.action)));
+      assert.equal(f.calls().filter((c) => c.action === "read").length, 1);
+      const w = f.state().workers[0], retry = f.execute(["run", "recover", w.pane]);
+      assert.equal(retry.status, 1); assert.match(retry.output, /STARTUP_NOT_READY/);
+      assert(retry.output.includes(`herdr-axi read ${w.pane} --raw --lines 60 --chars 8000`));
+      assert(!f.calls().some((c) => ["prompt", "send-keys"].includes(c.action)));
     } finally { f.clean(); }
   });
 

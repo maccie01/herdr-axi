@@ -61,7 +61,7 @@ Long assignments: `--prompt-file /external/task.txt` instead of `--prompt`.
 they do **not** push into the orchestrator conversation. A shell PID, detached `&`
 or Herdr toast does not guarantee an agent wakeup. `watch` defaults to 30 seconds;
 `run watch` is an equivalent alias. One active watcher per run; duplicates fail
-with `WATCH_ACTIVE`. Review reports are included in the watch response—no separate
+with `WATCH_ACTIVE`. Watch collects late completion proofs and includes review reports—no separate
 inbox fetch needed. Act on returned help, then continue independent work.
 
 **Subscription/session exhausted:** `fleet`, `run inbox`, `watch` and visible `read`
@@ -94,6 +94,10 @@ be verified absent before the replacement is queued. Retired monitor hints are
 removed along with the retired runtime registry. Registry identity stays in the
 checkpoint; tombstone and reports stay until `run finish` archives and prunes them.
 Native provider sessions, detached jobs and external worktrees are not deleted.
+Valid current-generation proof plus native settlement takes precedence over a quota
+banner, even before the first hook records completion; the result stays reviewable.
+After a completed replacement, same-worker revisions omit the old terminal handoff
+tail; a fresh or different parked replacement after worker loss receives the checkpoint again.
 
 ### Orchestrator exhausted
 
@@ -159,6 +163,8 @@ worktree does not close its panes. New monitors use the durable run directory as
 - **One writer per canonical worktree**, across runs—even with disjoint `--area`
   values. Separate worktrees for parallel writers. Read-only roles reserve their
   worktree too by default. `--area` is a scope instruction, not a sandbox.
+- `--area` is relative to `--cwd`, not the Git root. Use `.` for the entire cwd;
+  queue returns the resolved paths before startup.
 - `sharedReadWorktree: true`: optional read/write overlap **within one run**;
   instruction-only read access, not enforced isolation. Final verification should
   depend on accepted writer tasks via `--after task-id,task-id`.
@@ -236,7 +242,10 @@ Exit codes: **0** success, **1** error, **2** unknown command.
 
 Herdr state detection can misclassify dialogs; settled agents may still have
 background tools running. Check deliverables separately. Trust/approval dialogs
-are **never automatically approved**.
+are **never automatically approved**. Failed startup includes a bounded dialog
+preview (24 lines / 2400 characters); expand only when insufficient. Updates are
+not installed automatically. IPC permission errors identify the execution sandbox,
+not a missing server; request permission for the same command instead of restarting Herdr.
 
 | Recovery case | Action |
 | --- | --- |
@@ -250,6 +259,10 @@ are **never automatically approved**.
 
 Never delete locks or unverifiable leases to force progress. A `committed:true`
 response with `maintenance` means state was saved but follow-up cleanup needs attention.
+New control markers include process start identity: recycled PIDs do not pin
+takeover or archive cleanup. Legacy/unknown live identities remain fail-closed;
+errors name the marker and inspection commands. Without `ps`, dead-PID markers
+remain reclaimable, but live/recycled identities require explicit inspection.
 
 ## Project policy
 
@@ -280,6 +293,7 @@ orchestrator role cannot change an already-running owner's model.
 Native children: no recursion or extra Herdr tabs. Child limits and read-only access
 are agent instructions, **not an OS security boundary**.
 
+Context and quota share a fair two-probe terminal budget; failed probes rotate too.
 Context uses Codex's explicit remaining-context footer or Claude/Copilot's latest
 input tokens with a configured window—not cost or cumulative usage. Missing data:
 `contextUnknown`; failed/unverified/older-than-120s readings: `contextLastKnown` and
@@ -306,6 +320,7 @@ requested as deliverables.
 | `run gc` | Expires completed managed detail after 30 days, summaries after 180; also runs on init/finish |
 
 Active/locked runs, foreign files and explicit `--dir` records are not age-deleted.
+Recovered absent workers retain their identity for inbox archival and runtime cleanup.
 Unresolved leases preserve recovery records. Expired detail needs a backup to
 recover; increase retention for longer audits.
 

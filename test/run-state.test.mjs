@@ -3,8 +3,51 @@ import fs from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
-import { changeRun, PHASES, loadRun, takeRunWarnings } from "../src/run-state.mjs";
+import { changeRun, PHASES, loadRun, takeRunWarnings, controlActive, processStart, taskFor } from "../src/run-state.mjs";
 import { writerLease } from "../src/project.mjs";
+
+test("pane lookup prefers active work, explicit task IDs preserve historical selection", () => {
+  const active = { id: "earlier", pane: "wTEST:p1", name: "worker", state: "running" };
+  const archived = { id: "later", pane: active.pane, name: active.name, state: "accepted" };
+  const run = { tasks: [active, archived] };
+  assert.equal(taskFor(run, active.pane), active);
+  assert.equal(taskFor(run, "missing-pane", "worker"), active);
+  assert.equal(taskFor(run, "later"), archived);
+  assert.equal(taskFor(run, "absent"), undefined);
+});
+
+test("process identity fencing preserves live/unknown controls and tolerates a disappearing marker", () => {
+  const dir = fs.mkdtempSync(path.join(tmpdir(), "axi-control-")), file = path.join(dir, "control");
+  try {
+    assert.equal(controlActive(file, process.pid), false);
+    const started = processStart(process.pid); assert(started, "process inspection required");
+    for (const payload of [JSON.stringify({ pid: process.pid, started }), "legacy action", "null", JSON.stringify({pid:process.pid,started:"invalid"})]) {
+      fs.writeFileSync(file, payload); assert.equal(controlActive(file, process.pid), true);
+    }
+    fs.writeFileSync(file, JSON.stringify({pid:process.pid,started:"Mon Jan 1 00:00:00 2001"}));
+    assert.equal(controlActive(file, process.pid), false);
+    const read = fs.readFileSync;
+    try {
+      fs.readFileSync = (target, ...args) => { if (target === file) fs.unlinkSync(file); return read(target, ...args); };
+      assert.equal(controlActive(file, process.pid), false, "marker vanished after lstat");
+    } finally { fs.readFileSync = read; }
+    const oldPath = process.env.PATH;
+    try {
+      process.env.PATH = dir;
+      assert.equal(processStart(process.pid), null, "ps unavailable");
+      fs.writeFileSync(file, JSON.stringify({ pid: process.pid, started: null }));
+      assert.equal(controlActive(file, process.pid), true, "live identity remains fail-closed without ps");
+      const kill = process.kill;
+      try {
+        process.kill = () => { throw Object.assign(Error("process absent"), { code: "ESRCH" }); };
+        assert.equal(controlActive(file, process.pid), false, "dead process marker remains reclaimable without ps");
+      } finally { process.kill = kill; }
+    } finally { process.env.PATH = oldPath; }
+    fs.writeFileSync(file, "legacy action");
+    fs.unlinkSync(file); fs.symlinkSync(path.join(dir, "missing"), file);
+    assert.equal(controlActive(file, process.pid), true);
+  } finally { fs.rmSync(dir, { recursive:true, force:true }); }
+});
 
 test("lease rollback, crash reclaim and release only after durable publication", () => {
   const dir = fs.mkdtempSync(path.join(tmpdir(), "axi-transaction-"));

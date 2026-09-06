@@ -20,6 +20,9 @@ export function requireHerdrEnv() {
 
 export function runHerdr(args, { timeoutMs = 30_000, text = false } = {}) {
   const r = spawnSync(HERDR_BIN, args, { encoding: "utf8", timeout: timeoutMs });
+  if (["EACCES", "EPERM"].includes(r.error?.code)) {
+    throw new AxiError(r.error.message, "HERDR_PERMISSION_DENIED", suggestFor("HERDR_PERMISSION_DENIED"));
+  }
   if (r.error?.code === "ENOENT") {
     throw new AxiError(`herdr binary not found: ${HERDR_BIN}`, "HERDR_NOT_INSTALLED",
       ["Install herdr, or set HERDR_BIN to its path."]);
@@ -53,6 +56,7 @@ function mapErrorCode(msg = "", wireCode = "") {
   if (wireCode === "agent_prompt_stalled") return "PROMPT_STALLED";
   if (wireCode === "timeout") return "TIMEOUT";
   const m = msg.toLowerCase();
+  if (["EACCES", "EPERM"].includes(wireCode) || /permission denied|operation not permitted/.test(m)) return "HERDR_PERMISSION_DENIED";
   if (m.includes("alternate-screen history")) return "READ_UNAVAILABLE";
   if (m.includes("unknown option") || m.includes("invalid value")) return "HERDR_CLI_ERROR";
   if (m.includes("not found") || m.includes("no such agent") || m.includes("unknown agent")) return "UNKNOWN_AGENT";
@@ -63,6 +67,7 @@ function mapErrorCode(msg = "", wireCode = "") {
 
 function suggestFor(code, pane) {
   if (code === "UNKNOWN_AGENT") return ["List live agents: herdr-axi agents"];
+  if (code === "HERDR_PERMISSION_DENIED") return ["Herdr IPC/process access denied by the execution environment. Request permission to retry this exact command outside its sandbox; do not restart Herdr or discover raw worker commands."];
   if (code === "HERDR_UNREACHABLE") return ["Check the server: herdr status"];
   if (code === "TIMEOUT") return ["Inspect current state: herdr-axi agents", ...(pane ? [`Wait longer: herdr-axi wait ${pane} --timeout-ms 300000`] : [])];
   if (["AGENT_BLOCKED", "PROMPT_STALLED", "READ_UNAVAILABLE"].includes(code)) return [`Inspect current output: herdr-axi read ${pane}`];

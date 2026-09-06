@@ -23,6 +23,7 @@ if (process.argv[2] === "agent") {
     process.exit(1);
   };
   if (args[1] === "list") {
+    if (scenario === "ipc-denied") fail("io_error", "Operation not permitted (os error 1) while connecting to socket");
     if (scenario === "empty-json") process.exit(0);
     if (scenario === "invalid-json") { console.log("not JSON"); process.exit(0); }
     if (["working", "blocked", "unknown", "done"].includes(scenario)) agent.agent_status = scenario;
@@ -64,13 +65,13 @@ if (process.argv[2] === "agent") {
   } else if (args[1] === "send-keys") emit({ sent: true });
   else throw new Error(`unexpected fake herdr call: ${args}`);
 } else {
-  function run(args, scenario = "idle") {
+  function run(args, scenario = "idle", backend = self) {
     const dir = mkdtempSync(path.join(tmpdir(), "herdr-axi-test-"));
     const log = path.join(dir, "calls");
     try {
       const r = spawnSync(process.execPath, [cli, ...args], {
         encoding: "utf8", timeout: 10000,
-        env: { ...process.env, HERDR_AXI_RUN: "", HERDR_BIN: self, AXI_TEST_SCENARIO: scenario, AXI_TEST_LOG: log },
+        env: { ...process.env, HERDR_AXI_RUN: "", HERDR_BIN: backend, AXI_TEST_SCENARIO: scenario, AXI_TEST_LOG: log },
       });
       assert.ifError(r.error);
       let calls = [];
@@ -86,6 +87,17 @@ if (process.argv[2] === "agent") {
     assert.deepEqual(r.calls, [["agent", "list"], ["agent", "prompt", pane, "hello", "--wait", "--timeout", "1000"]]);
     assert.match(r.output, /state: done/);
     assert.match(r.output, /herdr-axi read w1:pTEST/);
+  });
+
+  test("IPC denial diagnoses permissions without raw backend discovery or retries", () => {
+    const r = run(["fleet"], "ipc-denied");
+    assert.equal(r.status, 1); assert.equal(r.calls.length, 1);
+    assert.match(r.output, /HERDR_PERMISSION_DENIED/);
+    assert.match(r.output, /retry this exact command/);
+    assert.doesNotMatch(r.output, /herdr status|herdr --skill/);
+    const denied = run(["fleet"], "idle", path.dirname(self));
+    assert.equal(denied.status, 1); assert.match(denied.output, /HERDR_PERMISSION_DENIED/);
+    assert.equal(denied.calls.length, 0);
   });
 
   test("no-wait submits once without claiming settlement", () => {
