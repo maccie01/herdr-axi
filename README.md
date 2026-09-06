@@ -17,9 +17,16 @@
 | --- | --- |
 | Human | Install [Herdr](https://herdr.dev); authenticate the worker CLIs you want to use |
 | Machine | Node ≥20; Bash, `jq`, `rg`, `uuidgen`; Herdr and worker CLIs on inherited `PATH` |
-| CLI | Clone, install dependencies, link the checkout globally |
+| CLI | `npm i -g herdr-axi`, or clone and link the checkout globally |
 | Project | Optional [`.herdr-axi.json`](.herdr-axi.json); defaults work without it |
 | Orchestrator | Open the target project in Herdr; start your chosen coding agent in its own tab |
+
+```sh
+npm i -g herdr-axi
+herdr-axi --version
+```
+
+From source instead:
 
 ```sh
 git clone https://github.com/maccie01/herdr-axi.git
@@ -29,7 +36,6 @@ npm link
 herdr-axi --version
 ```
 
-- GitHub access required while the repository is private; no published npm install assumed.
 - Preserve the global npm bin directory on every agent's `PATH`.
 - Managed workers also receive the package bin path and `HERDR_AXI_BIN` fallback.
 - No global Claude/Codex/Copilot instruction files modified.
