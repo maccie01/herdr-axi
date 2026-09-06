@@ -72,6 +72,9 @@ if [[ -z "$model" ]]; then
   esac
 fi
 
+"$HERDR_AXI_NODE" "$script_dir/../src/launch-policy.mjs" \
+  --kind "$kind" --model "$model" --effort "$effort" >/dev/null
+
 receipt_dir="$HERDR_RECEIPT_REGISTRY_DIR"
 receipt_file="$HERDR_RECEIPT_FILE"
 
@@ -128,6 +131,13 @@ jq -nc --arg name "$name" --arg workspace_id "$workspace_id" \
   --arg receipt_file "$receipt_file" --arg generation "$completion_generation" \
   '{name:$name,workspace_id:$workspace_id,tab_id:$tab_id,agent_pane:$agent_pane,monitor_pane:null,receipt_file:$receipt_file,generation:$generation,stage:"created"}' > "$registry_tmp"
 mv -f "$registry_tmp" "$receipt_dir/$name.json"
+
+# Native startup can emit an input hook before agent start returns (trust or
+# permission dialog). Arm its generation first so cancellation stays bound.
+herdr_receipt_rearm "$receipt_file" worker-start "$completion_generation" || {
+  printf '%s\n' "herdr-worker: could not rearm lifecycle receipt: $name" >&2
+  exit 1
+}
 
 case "$kind" in
   copilot)
@@ -191,10 +201,15 @@ while [[ "$resume" != "true" ]]; do
   sleep 0.25
 done
 
-herdr_receipt_rearm "$receipt_file" worker-start "$completion_generation" || {
-  printf '%s\n' "herdr-worker: could not rearm lifecycle receipt: $name" >&2
-  exit 1
-}
+if [[ "$kind" == "claude" ]]; then
+  # Passing --permission-mode auto is not proof that the provider enabled it.
+  # Keep an unsupported or unverified session inspectable, without sending work.
+  if ! herdr agent read "$agent_pane" --source visible --lines 40 |
+    "$HERDR_AXI_NODE" "$script_dir/../src/launch-policy.mjs" --check-screen >/dev/null; then
+    cleanup_created_tab=false
+    exit 1
+  fi
+fi
 
 task=$(< "$prompt_file")
 if [[ "${HERDR_AXI_MANAGED_TASK:-0}" != "1" ]]; then
@@ -244,17 +259,19 @@ fi
 cleanup_created_tab=false
 trap - EXIT
 
-if [[ "$kind" == "copilot" ]]; then
-  permission_mode="autopilot"
-else
-  permission_mode="auto"
-fi
+permission_mode_verified=false
+case "$kind" in
+  copilot) permission_mode=autopilot ;;
+  codex) permission_mode=approve-for-me ;;
+  claude) permission_mode=auto; permission_mode_verified=true ;;
+esac
 
 jq -n \
   --arg name "$name" \
   --arg kind "$kind" \
   --arg model "$model" \
   --arg permission_mode "$permission_mode" \
+  --argjson permission_mode_verified "$permission_mode_verified" \
   --arg workspace_id "$workspace_id" \
   --arg tab_id "$tab_id" \
   --arg agent_pane "$agent_pane" \
@@ -262,4 +279,4 @@ jq -n \
   --arg receipt_file "$receipt_file" \
   --arg generation "$completion_generation" \
   --arg monitoring_mode "$monitoring_mode" \
-  '{name:$name,kind:$kind,model:$model,permission_mode:$permission_mode,workspace_id:$workspace_id,tab_id:$tab_id,agent_pane:$agent_pane,monitor_pane:($monitor_pane | if . == "" then null else . end),receipt_file:$receipt_file,generation:$generation,monitoring:$monitoring_mode,stage:"submitted"}'
+  '{name:$name,kind:$kind,model:$model,permission_mode:$permission_mode,permission_mode_verified:$permission_mode_verified,workspace_id:$workspace_id,tab_id:$tab_id,agent_pane:$agent_pane,monitor_pane:($monitor_pane | if . == "" then null else . end),receipt_file:$receipt_file,generation:$generation,monitoring:$monitoring_mode,stage:"submitted"}'

@@ -245,6 +245,8 @@ case "$group:$action" in
     fi
     if [[ -r "$case_dir/visible" ]]; then
       cat "$case_dir/visible"
+    elif [[ -r "$case_dir/startup-screen" ]]; then
+      cat "$case_dir/startup-screen"
     else
       printf '%s\n' "fake visible agent output"
     fi
@@ -252,6 +254,9 @@ case "$group:$action" in
   agent:start)
     if [[ -e "$case_dir/start-blocked" ]]; then
       printf '%s\n' blocked > "$case_dir/status"
+      if [[ -r "$case_dir/start-hook" ]]; then
+        HERDR_MONITOR_INBOX=1 bash "$(< "$case_dir/start-hook")" input '{"message":"Approve this folder?"}'
+      fi
       jq -nc '{error:{code:"agent_not_ready"}}'
       exit 1
     fi
@@ -474,6 +479,7 @@ setup_case() {
   printf '%s\n' copilot > "$FAKE_HERDR_CASE/kind"
   printf '%s\n' ws > "$FAKE_HERDR_CASE/workspace"
   printf '%s\n' session-1 > "$FAKE_HERDR_CASE/session"
+  printf '%s\n' '❯' '⏵⏵ auto mode on (shift+tab to cycle) · for agents' > "$FAKE_HERDR_CASE/startup-screen"
 }
 
 transcript_path() {
@@ -959,6 +965,7 @@ test_close_generation_binding() (
   run_hook settled "$(payload)"
   write_worker_registry
   original_generation=$(receipt_read_field 10)
+  write_current_completion_proof
   followup_prompt="$FAKE_HERDR_CASE/followup.txt"
   printf '%s\n' "followup before close" > "$followup_prompt"
   export FAKE_HERDR_APPEND_USER=1
@@ -967,6 +974,7 @@ test_close_generation_binding() (
   followup_generation=$(receipt_read_field 10)
   [[ "$followup_generation" != "$original_generation" ]] ||
     fail "followup did not create a new lifecycle generation"
+  assert_file_absent "${HERDR_MONITOR_RECEIPT}.proof.${original_generation}" "explicit followup invalidates old proof"
   assert_eq "$followup_generation" \
     "$(jq -r '.generation' "$HERDR_RECEIPT_ROOT/ws/worker.json")" \
     "followup registry generation"
@@ -1393,13 +1401,18 @@ test_prompt_delivery_for_all_agent_kinds() (
     printf '%s\n' stalled-visible > "$FAKE_HERDR_CASE/worker-prompt-mode"
     worker_prompt="$FAKE_HERDR_CASE/worker.txt"
     printf '%s\n' "prompt for $kind" > "$worker_prompt"
-    bash "$worker_script" \
+    worker_output=$(bash "$worker_script" \
       --name worker \
       --kind "$kind" \
       --cwd "$FAKE_HERDR_CASE" \
       --prompt-file "$worker_prompt" \
       --workspace ws \
-      --orchestrator-agent orch >/dev/null
+      --orchestrator-agent orch)
+    expected_mode=auto
+    expected_verified=false
+    case "$kind" in copilot) expected_mode=autopilot ;; codex) expected_mode=approve-for-me ;; claude) expected_verified=true ;; esac
+    assert_eq "$expected_mode" "$(jq -r '.permission_mode' <<< "$worker_output")" "$kind reported launch mode"
+    assert_eq "$expected_verified" "$(jq -r '.permission_mode_verified' <<< "$worker_output")" "$kind honest runtime verification"
     assert_eq 1 "$(call_count 'agent send-keys worker enter')" \
       "$kind explicit Enter count"
     assert_eq 0 "$(call_count 'pane wait-output pane-1')" \
@@ -1620,6 +1633,8 @@ test_monitor_rearm_across_idle_and_fast_completion() (
   setup_case monitor-rearm-idle
   write_complete_transcript
   run_hook settled "$(payload)"
+  write_worker_registry
+  assert_file_absent "${HERDR_MONITOR_RECEIPT}.proof.generation-one" "settlement consumed proof file"
   HERDR_MONITOR_CHANGE_WAIT_TICKS=100 \
     bash "$monitor_script" \
       worker worker orch "$HERDR_MONITOR_RECEIPT" "$hook_script" &
@@ -1633,9 +1648,18 @@ test_monitor_rearm_across_idle_and_fast_completion() (
     sleep 0.02
   done
   assert_eq 2 "$(receipt_read_field 2)" "done-idle-working rearm"
+  assert_eq generation:generation-one "$(receipt_read_field 8)" "same task retains delivered completion"
+  printf '%s\n' idle > "$FAKE_HERDR_CASE/status"
+  for _ in $(seq 1 250); do
+    (( $(call_count '^agent wait worker') >= 4 )) && break
+    sleep 0.02
+  done
+  assert_eq generation:generation-one "$(receipt_read_field 8)" "working-idle retains consumed proof evidence"
   kill "$monitor_pid" 2>/dev/null || true
   wait "$monitor_pid" 2>/dev/null || true
   assert_no_fake_waiters "idle rearm cleanup"
+  bash "$orchestrator_script" close worker >/dev/null
+  assert_file_absent "$FAKE_HERDR_CASE/tab-alive" "completion remains usable for normal close"
 
   setup_case monitor-fast-completion
   write_complete_transcript
@@ -1651,6 +1675,10 @@ test_monitor_rearm_across_idle_and_fast_completion() (
     sleep 0.02
   done
   assert_eq 2 "$(receipt_read_field 2)" "fast completion rearm"
+  # Only an explicit assignment change, never native readiness, resets proof.
+  source "$receipt_script"
+  herdr_receipt_rearm "$HERDR_MONITOR_RECEIPT" followup generation-two
+  assert_eq "" "$(receipt_read_field 8)" "explicit assignment clears prior completion"
   write_current_completion_proof
   append_user_message
   append_task_complete
@@ -1668,6 +1696,81 @@ test_monitor_rearm_across_idle_and_fast_completion() (
   kill "$monitor_pid" 2>/dev/null || true
   wait "$monitor_pid" 2>/dev/null || true
   assert_no_fake_waiters "fast completion cleanup"
+)
+
+test_monitor_rearm_unknown_and_failure_are_not_new_assignments() (
+  for variant in blank corrupt; do
+    setup_case "monitor-rearm-$variant"
+    arm_completion_generation assignment-one
+    remove_current_completion_proof
+    if [[ "$variant" == blank ]]; then
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        herdr-receipt/3 1 input delivered input input input "" open "" legacy > "$HERDR_MONITOR_RECEIPT"
+    fi
+    printf '%s\n' blocked > "$FAKE_HERDR_CASE/status"
+    HERDR_MONITOR_INBOX=1 HERDR_MONITOR_CHANGE_WAIT_TICKS=100 \
+      bash "$monitor_script" worker worker orch "$HERDR_MONITOR_RECEIPT" "$hook_script" > "$TMPDIR/monitor-output" 2> "$TMPDIR/monitor-error" &
+    monitor_pid=$!
+    for _ in $(seq 1 250); do
+      (( $(call_count '^agent wait worker') >= 1 )) && break
+      sleep 0.02
+    done
+    (( $(call_count '^agent wait worker') >= 1 )) || fail "$variant blocked boundary not captured"
+    [[ "$variant" != corrupt ]] || printf '%s\n' corrupt > "$HERDR_MONITOR_RECEIPT"
+    printf '%s\n' working > "$FAKE_HERDR_CASE/status"
+    if [[ "$variant" == corrupt ]]; then
+      wait_for_file "${HERDR_MONITOR_RECEIPT}.monitor-error" || fail "rearm failure was hidden"
+      if wait "$monitor_pid"; then fail "failed rearm reported successful monitor exit"; fi
+      assert_eq assignment-one "$(cut -f 1 "${HERDR_MONITOR_RECEIPT}.monitor-error")" "failure retains known assignment"
+      rg -q 'Lifecycle receipt rearm failed' "$TMPDIR/monitor-error" || fail "missing rearm diagnostic"
+      assert_eq corrupt "$(< "$HERDR_MONITOR_RECEIPT")" "failed rearm did not invent a receipt"
+    else
+      for _ in $(seq 1 250); do
+        (( $(call_count '^agent wait worker') >= 2 )) && break
+        sleep 0.02
+      done
+      (( $(call_count '^agent wait worker') >= 2 )) || fail "legacy monitor never resumed waiting"
+      assert_eq "" "$(receipt_read_field 10)" "native resume cannot invent legacy assignment"
+      assert_eq 1 "$(receipt_read_field 2)" "unowned legacy cycle not rearmed"
+      kill "$monitor_pid" 2>/dev/null || true
+      wait "$monitor_pid" 2>/dev/null || true
+    fi
+    assert_no_fake_waiters "$variant rearm cleanup"
+  done
+)
+
+test_blocked_working_cycle_preserves_assignment_and_proof() (
+  setup_case blocked-working-generation
+  arm_completion_generation assignment-one
+  write_worker_registry worker ws assignment-one
+  printf '%s\n' blocked > "$FAKE_HERDR_CASE/status"
+  HERDR_MONITOR_INBOX=1 HERDR_MONITOR_CHANGE_WAIT_TICKS=100 \
+    bash "$monitor_script" worker worker orch "$HERDR_MONITOR_RECEIPT" "$hook_script" > "$TMPDIR/monitor-output" &
+  monitor_pid=$!
+  wait_for_file "${HERDR_MONITOR_RECEIPT}.inbox" || fail "blocked input was not collected"
+  # Wait until the monitor has remembered the boundary, then resume this task.
+  for _ in $(seq 1 250); do
+    (( $(call_count '^agent wait worker') >= 1 )) && break
+    sleep 0.02
+  done
+  (( $(call_count '^agent wait worker') >= 1 )) || fail "blocked wait never armed"
+  printf '%s\n' working > "$FAKE_HERDR_CASE/status"
+  for _ in $(seq 1 250); do
+    [[ "$(receipt_read_field 2)" == 2 ]] && break
+    sleep 0.02
+  done
+  assert_eq 2 "$(receipt_read_field 2)" "native resume starts status cycle"
+  assert_eq assignment-one "$(receipt_read_field 10)" "native resume preserves assignment generation"
+  assert_eq assignment-one "$(jq -r '.generation' "$HERDR_RECEIPT_ROOT/ws/worker.json")" "registry still agrees"
+  assert_file_present "${HERDR_MONITOR_RECEIPT}.proof.assignment-one" "native resume retains concurrent completion proof"
+  kill "$monitor_pid" 2>/dev/null || true
+  wait "$monitor_pid" 2>/dev/null || true
+  assert_no_fake_waiters "blocked-working cleanup"
+  run_file="$FAKE_HERDR_CASE/run.json"
+  jq -nc --arg receipt "$HERDR_MONITOR_RECEIPT" \
+    '{schema:1,workspace:"ws",owner:{pane:"owner",tab:"owner-tab"},tasks:[{name:"worker",pane:"pane-1",state:"cancelling",cancellation:{from:{name:"worker",pane:"pane-1",tab:"tab-1",generation:"assignment-one",session:"session-1",receipt:$receipt},evidence:"User authorizes interruption; partial state preserved",output:"Saved assignment checkpoint"}}]}' > "$run_file"
+  HERDR_AXI_MANAGED_TASK=1 bash "$orchestrator_script" close worker --cancel "$run_file" >/dev/null
+  assert_file_absent "$FAKE_HERDR_CASE/tab-alive" "resumed assignment remains cancellable"
 )
 
 test_worker_prompt_failure_is_not_success() (
@@ -1891,6 +1994,104 @@ test_blocked_startup_resumes_owned_pane() (
   assert_eq 1 "$(call_count 'tab create')" "resume reused tab"
   assert_eq 1 "$(call_count 'agent start worker')" "resume reused agent"
   assert_eq 1 "$(file_value "$FAKE_HERDR_CASE/worker-prompts")" "resume delivered once"
+)
+
+test_blocked_startup_hook_keeps_cancellable_generation() (
+  setup_case startup-hook-cancel
+  : > "$FAKE_HERDR_CASE/start-blocked"
+  printf '%s\n' "$hook_script" > "$FAKE_HERDR_CASE/start-hook"
+  worker_prompt="$FAKE_HERDR_CASE/worker.txt"
+  printf '%s\n' "bounded work" > "$worker_prompt"
+  if bash "$worker_script" --name worker --kind copilot --cwd "$FAKE_HERDR_CASE" \
+    --prompt-file "$worker_prompt" --workspace ws --orchestrator-agent orch >/dev/null 2>&1; then
+    fail "blocked startup claimed success"
+  fi
+  generation=$(jq -r '.generation' "$HERDR_RECEIPT_ROOT/ws/worker.json")
+  assert_eq "$generation" "$(receipt_read_field 10)" "native input retains startup generation"
+  assert_eq "$generation" "$(jq -r '.generation' "${HERDR_MONITOR_RECEIPT}.inbox")" "input report bound to startup"
+  assert_eq input "$(receipt_read_field 3)" "real startup hook ran"
+  assert_eq 0 "$(file_value "$FAKE_HERDR_CASE/worker-prompts")" "no task sent at trust dialog"
+  run_file="$FAKE_HERDR_CASE/run.json"
+  jq -nc --arg receipt "$HERDR_MONITOR_RECEIPT" --arg generation "$generation" \
+    '{schema:1,workspace:"ws",owner:{pane:"owner",tab:"owner-tab"},tasks:[{name:"worker",pane:"pane-1",state:"cancelling",cancellation:{from:{name:"worker",pane:"pane-1",tab:"tab-1",generation:$generation,session:"session-1",receipt:$receipt},evidence:"Stop blocked startup; no task submitted",output:"Folder approval pending"}}]}' > "$run_file"
+  HERDR_AXI_MANAGED_TASK=1 bash "$orchestrator_script" close worker --cancel "$run_file" >/dev/null
+  assert_file_absent "$FAKE_HERDR_CASE/tab-alive" "whole blocked startup tab closed"
+  assert_eq 1 "$(call_count '^tab close')" "one owned tab close"
+  assert_eq cancelled "$(receipt_read_field 11)" "cancellation tombstone"
+)
+
+test_legacy_startup_cancel_repair_is_narrow() (
+  for variant in blank drift settled monitor proof foreign; do
+    setup_case "legacy-startup-$variant"
+    mkdir -p "$(dirname -- "$HERDR_MONITOR_RECEIPT")"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      herdr-receipt/3 1 input delivered input input input "" open "" delivered > "$HERDR_MONITOR_RECEIPT"
+    write_worker_registry worker ws testgen
+    registry="$HERDR_RECEIPT_ROOT/ws/worker.json"
+    jq '.stage="created" | .monitor_pane=null' "$registry" > "$TMPDIR/registry"
+    mv "$TMPDIR/registry" "$registry"
+    rm -f "$FAKE_HERDR_CASE/monitor-1-alive"
+    case "$variant" in
+      drift) arm_completion_generation other; remove_current_completion_proof ;;
+      settled) printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        herdr-receipt/3 1 settled delivered settled settled settled settled open "" delivered > "$HERDR_MONITOR_RECEIPT" ;;
+      monitor) jq '.monitor_pane="monitor-1"' "$registry" > "$TMPDIR/registry"; mv "$TMPDIR/registry" "$registry"; : > "$FAKE_HERDR_CASE/monitor-1-alive" ;;
+      proof) printf '%s\n' testgen > "${HERDR_MONITOR_RECEIPT}.proof.testgen" ;;
+      foreign) : > "$FAKE_HERDR_CASE/extra-pane" ;;
+    esac
+    run_file="$FAKE_HERDR_CASE/run.json"
+    jq -nc --arg receipt "$HERDR_MONITOR_RECEIPT" \
+      '{schema:1,workspace:"ws",owner:{pane:"owner",tab:"owner-tab"},tasks:[{name:"worker",pane:"pane-1",state:"cancelling",cancellation:{from:{name:"worker",pane:"pane-1",tab:"tab-1",generation:"testgen",session:"session-1",receipt:$receipt},evidence:"User authorized stop at startup",output:"Startup dialog"}}]}' > "$run_file"
+    if HERDR_AXI_MANAGED_TASK=1 bash "$orchestrator_script" close worker --cancel "$run_file" > "$TMPDIR/result" 2>&1; then
+      [[ "$variant" == blank ]] || fail "legacy repair accepted $variant"
+      assert_file_absent "$FAKE_HERDR_CASE/tab-alive" "legacy startup retired"
+      assert_eq testgen "$(receipt_read_field 10)" "legacy cancellation bound generation"
+    else
+      [[ "$variant" != blank ]] || fail "legacy startup refused: $(< "$TMPDIR/result")"
+      assert_eq 0 "$(call_count '^tab close')" "$variant never closes"
+      assert_file_present "$FAKE_HERDR_CASE/tab-alive" "$variant remains inspectable"
+    fi
+  done
+)
+
+test_claude_startup_requires_verified_auto_mode() (
+  setup_case claude-unsupported-model
+  worker_prompt="$FAKE_HERDR_CASE/worker.txt"
+  printf '%s\n' "bounded implementation" > "$worker_prompt"
+  if bash "$worker_script" --name worker --kind claude --model haiku --cwd "$FAKE_HERDR_CASE" \
+    --prompt-file "$worker_prompt" --workspace ws --orchestrator-agent orch > "$TMPDIR/result" 2>&1; then
+    fail "unsupported manual-fallback model accepted"
+  fi
+  assert_eq 0 "$(call_count '^tab create')" "invalid model rejected before allocation"
+  rg -q AUTO_MODE_UNSUPPORTED "$TMPDIR/result" || fail "missing model policy error"
+  for mode in auto manual unknown; do
+    setup_case "claude-mode-$mode"
+    printf '%s\n' claude > "$FAKE_HERDR_CASE/kind"
+    case "$mode" in
+      manual) printf '%s\n' '❯' '⏵⏵ accept edits on (shift+tab to cycle)' > "$FAKE_HERDR_CASE/startup-screen" ;;
+      unknown) printf '%s\n' 'Starting Claude...' > "$FAKE_HERDR_CASE/startup-screen" ;;
+    esac
+    worker_prompt="$FAKE_HERDR_CASE/worker.txt"
+    printf '%s\n' "bounded implementation" > "$worker_prompt"
+    if bash "$worker_script" --name worker --kind claude --cwd "$FAKE_HERDR_CASE" \
+      --prompt-file "$worker_prompt" --workspace ws --orchestrator-agent orch > "$TMPDIR/result" 2>&1; then
+      [[ "$mode" == auto ]] || fail "work submitted in $mode mode"
+      assert_eq 1 "$(file_value "$FAKE_HERDR_CASE/worker-prompts")" "verified auto gets one prompt"
+    else
+      [[ "$mode" != auto ]] || fail "auto startup refused: $(< "$TMPDIR/result")"
+      assert_file_present "$FAKE_HERDR_CASE/tab-alive" "$mode startup retained for inspection"
+      assert_eq 0 "$(file_value "$FAKE_HERDR_CASE/worker-prompts")" "$mode gets no assignment"
+      assert_eq 0 "$(call_count '^pane split')" "$mode creates no unnecessary monitor"
+      rg -q 'MODE_UNSUPPORTED|MODE_UNVERIFIED' "$TMPDIR/result" || fail "missing actionable mode error"
+      # Recover/resume must check the observed mode too; merely idle is not enough.
+      if bash "$worker_script" --resume --name worker --kind claude --cwd "$FAKE_HERDR_CASE" \
+        --prompt-file "$worker_prompt" --workspace ws --orchestrator-agent orch > "$TMPDIR/resume" 2>&1; then
+        fail "$mode bypassed mode check on resume"
+      fi
+      assert_eq 0 "$(file_value "$FAKE_HERDR_CASE/worker-prompts")" "$mode resume still sends no work"
+      assert_eq 1 "$(call_count '^tab create')" "$mode resume reuses owned tab"
+    fi
+  done
 )
 
 test_close_owner_tab_is_refused() (
@@ -2261,6 +2462,9 @@ tests=(
   test_compact_completion_command_handles_quoted_paths
   test_idle_completion_is_collected
   test_blocked_startup_resumes_owned_pane
+  test_blocked_startup_hook_keeps_cancellable_generation
+  test_legacy_startup_cancel_repair_is_narrow
+  test_claude_startup_requires_verified_auto_mode
   test_monitor_survives_quiet_intervals
   test_monitor_separates_readiness_completion_and_acceptance
   test_failed_native_waits_back_off_and_lost_terminates
@@ -2294,6 +2498,8 @@ tests=(
   test_hot_loop_negative_probe
   test_same_name_restart_and_new_cycle
   test_monitor_rearm_across_idle_and_fast_completion
+  test_blocked_working_cycle_preserves_assignment_and_proof
+  test_monitor_rearm_unknown_and_failure_are_not_new_assignments
   test_worker_prompt_failure_is_not_success
   test_prompt_delivery_for_all_agent_kinds
   test_event_bounded_pane_readiness

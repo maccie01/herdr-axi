@@ -336,6 +336,7 @@ herdr_receipt_rearm_locked() {
   local generation="${3:-}"
   local next_cycle=1
   local previous_completion=""
+  local settled_fingerprint=""
   if herdr_receipt_read "$receipt_file"; then
     if [[ -n "$receipt_generation" ]]; then
       previous_completion=$(herdr_completion_file "$receipt_file" "$receipt_generation" || true)
@@ -346,9 +347,12 @@ herdr_receipt_rearm_locked() {
   fi
   [[ -n "$generation" ]] || generation=$(herdr_new_generation)
   [[ -n "$generation" ]] || return 1
-  [[ -z "$previous_completion" ]] || rm -f "$previous_completion"
+  # A native blocked/idle -> working transition starts a status cycle, not a
+  # new assignment. Only explicit generation changes invalidate task proof.
+  [[ -z "$previous_completion" || "$generation" == "$receipt_generation" ]] || rm -f "$previous_completion"
+  [[ "$generation" != "$receipt_generation" ]] || settled_fingerprint="$receipt_settled_fingerprint"
   herdr_receipt_write \
-    "$receipt_file" "$next_cycle" cycle armed "" "" "" "" open \
+    "$receipt_file" "$next_cycle" cycle armed "" "" "" "$settled_fingerprint" open \
     "$generation" "$reason"
 }
 

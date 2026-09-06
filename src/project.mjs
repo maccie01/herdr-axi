@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { PHASES, runError, runDir, canonicalDir } from "./run-state.mjs";
+import { validateLaunch, launchMode } from "./launch-policy.mjs";
 
 export const stateRoot = () => path.resolve(process.env.HERDR_AXI_STATE_HOME || path.join(homedir(), ".local/state/herdr-axi"));
 export const hash = (value) => createHash("sha256").update(value).digest("hex").slice(0, 24);
@@ -49,7 +50,8 @@ export function validateConfig(input = {}) {
     }
   }
   for (const [name, role] of Object.entries(config.roles)) {
-    if (!["claude", "codex", "copilot"].includes(role.kind) || typeof role.model !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,99}$/.test(role.model) || !["minimal", "low", "medium", "high", "xhigh", "max"].includes(role.effort) || !["read", "write"].includes(role.access)) throw runError(`Invalid role ${name}`, "CONFIG_INVALID");
+    if (!["read", "write"].includes(role.access)) throw runError(`Invalid role ${name}`, "CONFIG_INVALID");
+    try { validateLaunch(role); } catch (e) { throw runError(`Role ${name}: ${e.message}`, "CONFIG_INVALID"); }
     if (role.contextWindowTokens !== undefined && !integer(role.contextWindowTokens, 1000, 10000000)) throw runError(`Invalid context window for ${name}`, "CONFIG_INVALID");
     if (role.subagents !== undefined) {
       if (!Array.isArray(role.subagents) || role.subagents.length > 4) throw runError(`Invalid subagents for ${name}`, "CONFIG_INVALID");
@@ -65,19 +67,34 @@ export function validateConfig(input = {}) {
 }
 
 export const nativeSlots = (role) => (role.subagents ?? []).reduce((n, s) => n + s.max, 0);
+export function selectWorker(config, options) {
+  const base = options.role ? config.roles[options.role] : null;
+  if (options.role && (!base || options.role === "orchestrator")) throw runError("Choose a worker role from init", "CONFIG_INVALID", ["herdr-axi run config"]);
+  const kind = options.kind ?? base?.kind;
+  if (base && kind !== base.kind && !options.model) throw runError("Changing provider requires --model; no implicit substitution", "CONFIG_INVALID", ["herdr-axi run queue --help"]);
+  const role = { ...(base ?? { access: "write" }), kind, model: options.model ?? base?.model ?? (kind === "claude" ? "opus" : "gpt-5.6-sol"), effort: options.effort ?? base?.effort ?? "high" };
+  if (role.model !== base?.model || role.kind !== base?.kind) delete role.contextWindowTokens;
+  try { validateLaunch(role); } catch (e) { throw runError(e.message, e.code, ["herdr-axi run queue --help", "herdr-axi run config"]); }
+  return role;
+}
+
 export function workerRoleSummary(config) {
   const roles = Object.entries(config.roles).filter(([name]) => name !== "orchestrator")
-    .map(([role, { kind, model, effort, access, subagents }]) => ({ role, kind, model, effort, access, native: nativeSlots({ subagents }) }));
+    .map(([role, { kind, model, effort, access, subagents }]) => ({ role, kind, model, effort, access, native: nativeSlots({ subagents }), mode: launchMode(kind) }));
   return { roles: roles.slice(0, 8), ...(roles.length > 8 ? { moreRoles: roles.length - 8 } : {}) };
 }
 
 export function projectConfig(cwd) {
   const project = worktree(cwd);
-  const file = path.join(project, ".herdr-axi.json");
-  let input = {};
-  try { input = JSON.parse(fs.readFileSync(file, "utf8")); }
-  catch (e) { if (e.code !== "ENOENT") throw runError(`Cannot load ${file}: ${e.message}`, "CONFIG_INVALID"); }
-  return { project, configFile: fs.existsSync(file) ? file : null, config: validateConfig(input) };
+  for (let directory = fs.realpathSync(cwd); ; directory = path.dirname(directory)) {
+    const file = path.join(directory, ".herdr-axi.json");
+    let input;
+    try { input = JSON.parse(fs.readFileSync(file, "utf8")); }
+    catch (e) { if (e.code !== "ENOENT") throw runError(`Cannot load ${file}: ${e.message}`, "CONFIG_INVALID"); }
+    if (input !== undefined) return { project, configFile: file, config: validateConfig(input) };
+    if (directory === project || directory === path.dirname(directory)) break;
+  }
+  return { project, configFile: null, config: validateConfig() };
 }
 
 export const leasePath = (task) => path.join(stateRoot(), "writers", hash(task.worktree || task.cwd) + ".json");

@@ -39,6 +39,7 @@ herdr-axi --version
 ```text
 Task: <goal, scope and required checks>
 Delegation: herdr-axi managed run; project roles; bounded phases.
+Start: init -> returned export + queue --start. Optional help: guide "start opus".
 Parallel writers: separate worktrees; no raw worker startup.
 Waiting: independent work first; tracked watch only with verified wakeup.
 Finish: reviewed results; owned worker tabs closed; run archived.
@@ -47,6 +48,8 @@ Finish: reviewed results; owned worker tabs closed; run archived.
 ## For agents
 
 - Run from **your own orchestrator pane**, in the target project.
+- Optional help: `herdr-axi guide "start opus"`, `guide "quota switch"`, `guide "stop worker"`; precise TOON recipes, zero backend/model calls.
+- Full compact workflow: `herdr-axi guide` / `herdr-axi --skill`; not a prerequisite.
 - Start with `run init`; no fleet/config/layout preflight.
 - Existing isolated worktree for concurrent writing; `--area` relative to `--cwd`, not isolation.
 - Inline task + acceptance criteria + checks; no project plan/state document needed.
@@ -54,12 +57,14 @@ Finish: reviewed results; owned worker tabs closed; run archived.
 ```sh
 herdr-axi run init --project /path/to/project
 export HERDR_AXI_RUN='/exact/path/returned/by/init'
-herdr-axi run phase build
 herdr-axi run queue parser --role implementer \
   --cwd /path/to/separate-worktree --area src/parser \
-  --prompt 'Fix parser edge cases; run parser tests; report files, checks and blockers.'
-herdr-axi run next
+  --prompt 'Fix parser edge cases; run parser tests; report files, checks and blockers.' --start
 ```
+
+- Batch: omit `--start`, queue tasks, then `run next` once; `--start` starts all eligible queued tasks within caps.
+- Two tool calls: `init`; then its returned export + `queue --start` together. Set `run phase build` when moving into implementation; no mandatory phase/config tour.
+- Explicit worker choice: add `--kind claude --model claude-opus-5 --effort high`; role access/native limits retained; no config edit or new run.
 
 | While workers run | Action |
 | --- | --- |
@@ -74,6 +79,7 @@ herdr-axi run next
 - **Hooks save receipts; they do not push into the orchestrator conversation.**
 - Background wakeup requires a verified harness callback; detached `&` and a Herdr toast are not enough.
 - `watch` default: 30 seconds; `run watch` alias; one active watcher; timeout ≠ completion.
+- Long wait: `watch --timeout-ms 1800000`; no model inference while blocked. File events + 2→10-second fallback checks; telemetry writes ignored.
 
 <details>
 <summary>Diagram: readiness, proof and acceptance</summary>
@@ -96,7 +102,8 @@ herdr-axi run next
 | Controlled dispatch | Managed tasks: `queue/next/revise`; authorized unmanaged panes: `dispatch`, `wait`; busy rejection; `--no-wait` means submission only |
 | Phased scheduling | Explicit caps; accepted dependencies via `--after`; no batch barrier; matching workers reused |
 | Worktree exclusion | One writer per canonical worktree across runs; queued relocation via `run move` |
-| Model policy | Role → provider, model, effort, access; snapshot at init; changes apply to new runs |
+| Model policy | Nearest project config → role defaults; explicit per-task model/effort; fixed autonomous launch modes |
+| Manual-mode guard | Claude auto-capable model + visible Auto footer before submission; no bypass fallback |
 | Native reviewers | Optional bounded read-only leaf subagents; separate budget; parent integrates |
 | Context warnings | Defaults 70% / 85%; fresh readings actionable; unknown/stale disclosed; no auto-interrupt |
 | Provider recovery | Explicit `run switch`; same task, dirty files, dependencies and reservation |

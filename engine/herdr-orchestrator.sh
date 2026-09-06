@@ -468,6 +468,15 @@ case "$command_name" in
       receipt_generation="$close_generation"
     fi
     if [[ -n "$cancel_file" ]]; then
+      # Older workers armed receipts after native startup. An input hook could
+      # therefore leave a blank generation at a dialog, before any task existed.
+      # Only that unsubmitted shape may bind to the checkpoint; real drift fails.
+      if [[ -z "$receipt_generation" && "$close_stage" == "created" &&
+        -z "$close_monitor_pane" && -z "$receipt_settled_fingerprint" &&
+        "$receipt_terminal" == "open" && "$receipt_event" != "settled" &&
+        ! -e "${receipt_file}.proof.${close_generation}" && ! -e "${receipt_file}.proof." ]]; then
+        receipt_generation="$close_generation"
+      fi
       cancel_json=$(jq -ce --arg name "$name" --arg pane "$close_agent_pane" \
         --arg tab "$close_tab_id" --arg generation "$close_generation" \
         --arg workspace "$close_workspace_id" --arg receipt "$close_receipt_file" '

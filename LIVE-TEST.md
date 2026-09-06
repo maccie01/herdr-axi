@@ -513,3 +513,28 @@ by these tests. Existing fake backends; dependency-free Node tests.
 - Shared cancel/switch retirement verification; no additional dependencies, daemon or polling loop.
 - Remaining limits: quota detection uses terminal wording, not subscription APIs; no real allowance deliberately exhausted. Legacy watch markers without verifiable process identity remain protected. Corrupt target ownership never grants closure authority. Unregistered shell-only tabs require explicit inspection; no guessed cleanup.
 - Final validation: **Node 127/127; Bash 50/50**; Bash syntax, ShellCheck `--severity=error`, `git diff --check` and 23 local documentation links clean. Temporary counterfactual worktree removed. No new external reviewer or CI run claimed.
+
+## Agent ergonomics and event-driven waiting — 2026-09-07
+
+- Baseline: `fab3e0f`; isolated fake backends; no live Herdr panes/tabs started or modified in this pass.
+- Two bounded, read-only native Opus reviews; final waiting enhancement reviewed locally and tested without additional model calls.
+- Shared launch guards and existing run lifecycle reused; no new dependency, scheduler service, project state document or model-based help router.
+
+| Scenario | Verified result |
+| --- | --- |
+| Direct Opus delegation | Two frontend calls: `init`, then export + `queue --start`; one prompt; startup response <1,500 bytes; no fleet/layout/config/help preflight |
+| Keyword help | `start opus`: 1,056 bytes; `wait notification`: 501 bytes; full guide: 2,924 bytes; queue help: 761 bytes; zero backend/model calls |
+| Ambiguous/unknown intent | Bounded topic choices; no guessed cancellation, approval or dispatch |
+| Model/mode choice | Role access/native-child limits retained; incompatible models rejected before allocation; missing/manual Claude startup footer prevents submission and remains cancellable |
+| Nested config | Nearest complete config through worktree root; no project-identity change; invalid nearest file fails visibly |
+| Startup/input hooks | Registered generation armed before native startup; narrow legacy blank-generation repair; true identity drift remains protected, with diagnostic rather than blind retry |
+| Native state cycles | Assignment generation, proof file and consumed-proof fingerprint survive same-assignment rearm; explicit follow-up invalidates old evidence |
+| Failed monitor rearm | Generation-bound error and nonzero exit; no invented assignment or silently lost supervision |
+| Quiet wait | Three backend list probes over 8.5 seconds; persisted completion wakes the same call before the next 8-second fallback; report included, no second inbox call |
+| Notification races/noise | Events before wait retained; consumed events do not repeat; telemetry/locks/temp writes ignored; missing filesystem notifications retain timer fallback |
+| Cleanup | One watcher/run; duplicate refused; owned tab lifecycle and watch-record removal verified; unrelated panes protected |
+
+- Focused validation: 43 helper/CLI tests, 7 startup/recovery tests, 13 watch/inbox tests; Bash **55/55**.
+- Final frozen-product suite: **Node 149/149**, 205 seconds; no failures or skips. Global PATH entry resolves the updated guide correctly.
+- Bash syntax, ShellCheck `--severity=error`, JavaScript syntax, whitespace checks and 23 local documentation links: clean.
+- Limits: no real subscription exhausted or live worker workload benchmarked; provider/account availability still native-CLI authority. Claude mode checked at initial/resumed startup; other providers retain explicit native launch flags, not a claimed visual mode attestation. Persisted hooks/file events do not themselves wake an LLM: that requires a verified harness callback or an awaited foreground tool result. No self-modifying orchestration policy or automatic acceptance.

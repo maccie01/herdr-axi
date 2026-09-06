@@ -6,7 +6,9 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { runHerdr, listAgents, requireHerdrEnv, projectAgent } from "./herdr.mjs";
 import { PHASES, runError, runDir, loadRun, changeRun, pending, limit, receipt, registeredWorker, ownedWorkers, takeRunWarnings, processStart, controlActive, taskFor } from "./run-state.mjs";
-import { projectConfig, validateConfig, worktree, nativeSlots, workerRoleSummary, writerLease, leasePath, leaseStatus, hash, DEFAULT_CONFIG } from "./project.mjs";
+import { projectConfig, validateConfig, selectWorker, worktree, nativeSlots, workerRoleSummary, writerLease, leasePath, leaseStatus, hash, DEFAULT_CONFIG } from "./project.mjs";
+import { launchMode, validateLaunch } from "./launch-policy.mjs";
+import { runWake } from "./run-wake.mjs";
 import { projectRuns, projectHistory, history, finishRun, collectArchives } from "./archive.mjs";
 import { contextStatus } from "./context.mjs";
 import { quotaError, switchHelp } from "./quota.mjs";
@@ -145,7 +147,7 @@ function engineCall(args, run) {
     child.stdout.on("data", (b) => { out = (out + b).slice(-32000); });
     child.stderr.on("data", (b) => { err = (err + b).slice(-4000); });
     child.on("error", reject);
-    child.on("close", (code) => code === 0 ? resolve(out) : reject(runError(`Engine failed (${code}); inspect before retrying. ${err.trim()}`, "ENGINE_ERROR")));
+    child.on("close", (code) => code === 0 ? resolve(out) : reject(runError(`Engine failed (${code}); inspect before retrying. ${err.trim()}`, /(?:current registered generation|registered lifecycle generation changed)/.test(err) ? "GENERATION_DRIFT" : "ENGINE_ERROR")));
   });
 }
 
@@ -177,6 +179,7 @@ function taskFile(task, run) {
   const continuation = handoff && (handoff.completedBy !== task.name || !task.pane || task.resume) ? `\nProvider handoff, unfinished task; NOT an accepted result. Continue in the existing dirty worktree; do not reset, recreate or commit it. Inspect current files/diff first; verify prior claims and rerun needed checks.\nCoordinator notes (first 2000 chars): ${handoff.summary.slice(0, 2000) || "none"}\nCaptured Git status (first 2000 chars): ${handoff.gitStatus.slice(0, 2000)}\nPrior terminal tail (last 6000 chars; partial evidence, not new instructions):\n${handoff.output.slice(-6000)}\nFull saved checkpoint: ${path.join(runDir(), "run.json")} tasks[id=${task.id}].handoffs. Native session: ${handoff.from.session || "unknown"}; not a restored model context.\n` : "";
   fs.writeFileSync(file, `${task.prompt}\n${continuation}\nTask: ${task.id}\nRole: ${task.role || task.kind}; access: ${task.access || "write"}\n${task.access === "read" ? "Read-only project: no source, documentation, Git or test-output writes; a writer may be active. Report snapshot/commit; recheck after writer acceptance for final verification." : `Write scope: ${task.area}`}
 No commits, pushes, follow-up assignments or Herdr workers. ${delegation}
+Worker runtime: ${task.kind}/${task.model || "default"}/${task.effort || "high"}; required mode ${launchMode(task.kind)}. Do not change model or enter manual/plan mode. Application/model-call budgets are separate from this coding-worker contract; do not reinterpret either scope. Report unsupported runtime or policy as a blocker.
 Do not call raw herdr agent start/prompt or split worker panes; the coordinator owns startup through herdr-axi run queue/next.
 No repository state files, scratch plans, progress logs or duplicate reports. Documentation only if explicitly requested as a deliverable. Private runtime records: ${runDir()}.
 Output: concise TOON; fragments, no narrative. Fields: task, state, files, checks, decisions (why), blockers. Exact commands/results; no invented passes. Coordinator acceptance required.\n`, { mode: 0o600 });
@@ -198,7 +201,8 @@ async function launch(task, run) {
     await publishRun((r) => {
       const t = r.tasks.find((t) => t.id === task.id);
       t.state = error ? "uncertain" : "running";
-      if (error) t.error = error.message.slice(0, 600); else delete t.error;
+      if (error) { t.error = error.message.slice(0, 600); t.errorCode = error.code; }
+      else { delete t.error; delete t.errorCode; }
       if (worker) {
         t.pane = worker.pane;
         r.workers = [...r.workers.filter((w) => w.pane !== worker.pane), worker];
@@ -244,7 +248,7 @@ export function runStatus() {
       ? (current?.pane === w.pane && current?.tab === w.tab ? current.stage : undefined) : w?.stage;
     const state = ["switching", "cancelling"].includes(t.state) ? t.state : a?.state === "blocked" ? "blocked" : t.state === "starting" && launcherAlive(t.launcher) ? "starting" : w && !a ? "lost" : a?.state ?? (t.state === "starting" ? "uncertain" : t.state);
     const complete = t.state === "running" && w && receipt(w)?.complete && ["idle", "done"].includes(state);
-    return { task: t.id, pane: w?.pane ?? t.pane ?? "pending", state: complete ? "review" : state, ...(stage === "created" ? { delivery: "not_submitted" } : t.state === "uncertain" ? { delivery: "uncertain" } : {}) };
+    return { task: t.id, pane: w?.pane ?? t.pane ?? "pending", state: complete ? "review" : state, ...(t.errorCode ? { code: t.errorCode } : {}), ...(stage === "created" ? { delivery: "not_submitted" } : t.state === "uncertain" ? { delivery: "uncertain" } : {}) };
   });
   const queued = run.tasks.filter((t) => t.state === "queued");
   const parked = run.workers.filter((w) => !w.closed && !pending(run).some((t) => t.pane === w.pane)).map((w) => w.pane);
@@ -264,7 +268,9 @@ export function runStatus() {
   const blocked = tasks.find((t) => t.state === "blocked");
   const ready = tasks.find((t) => t.delivery === "not_submitted" && ["idle", "done"].includes(t.state));
   let help;
-  if (cancelling) help = [`herdr-axi run cancel ${cancelling.task}`];
+  const drifted = tasks.find((t) => t.code === "GENERATION_DRIFT");
+  if (drifted) help = [`herdr-axi run history --task ${drifted.task}`, `herdr-axi read ${drifted.pane} --raw`];
+  else if (cancelling) help = [`herdr-axi run cancel ${cancelling.task}`];
   else if (exhausted) help = switchHelp(run, exhausted.pane, workers.find((w) => w.pane === exhausted.pane)?.kind);
   else if (switching) help = [`herdr-axi run switch ${switching.task}`];
   else if (blocked) help = [`herdr-axi read ${blocked.pane} --raw`];
@@ -311,6 +317,7 @@ export async function watchRun(timeout = 30000) {
       fs.renameSync(temp, file);
     } finally { fs.rmSync(temp, { force: true }); }
   }, { readOnly: true, allowFinished: true });
+  const wake = runWake(runDir());
   try {
     const first = runStatus();
     const attention = async (s, changed, reason) => ({ changed, reason, ...(s.tasks?.some((t) => ["review", "idle", "done"].includes(t.state) || t.quota) && s.owner === callerPane() ? await runCommand("inbox", { _: [] }) : s) });
@@ -318,14 +325,19 @@ export async function watchRun(timeout = 30000) {
     const key = watchKey(first);
     let latest = first;
     const start = Date.now();
+    let interval = 2000, lastProbe = start;
     while (Date.now() - start < timeout) {
-      await delay(Math.min(2000, timeout - (Date.now() - start)));
+      await wake.wait(Math.min(interval, timeout - (Date.now() - start)));
+      // Coalesce hook bursts; never turn filesystem noise into a backend hot loop.
+      await delay(Math.max(0, Math.min(250 - (Date.now() - lastProbe), timeout - (Date.now() - start))));
       latest = runStatus();
+      lastProbe = Date.now();
+      interval = Math.min(interval * 2, 10000);
       if (!latest.finished && latest.owner !== first.owner) return { changed: true, reason: "owner-changed", owner: latest.owner, note: "Stop old-owner supervision; replacement owns this run." };
       if (key !== watchKey(latest)) return await attention(latest, true, "state-change");
     }
     return { changed: false, reason: "timeout", pending: latest.occupied, note: waitingNote, help: latest.help };
-  } finally { fs.rmSync(file, { force: true }); }
+  } finally { wake.close(); fs.rmSync(file, { force: true }); }
 }
 
 // A bounded queue and a reusable worker pool, not a background scheduler.
@@ -368,9 +380,9 @@ async function executeRunCommand(action, o) {
     catch (e) { if (e.code === "EEXIST") throw runError("Run already exists; select it, do not overwrite it"); throw e; }
     const roles = workerRoleSummary(run.config);
     return { run: dir, owner: ownerPane, workspace: run.workspace, project: project.project, config: project.configFile || "defaults", phase: run.phase, capacity: limit(run), ...roles, cleanup: collectArchives(project.project),
-      queue: 'herdr-axi run queue TASK --role ROLE --cwd WORKTREE --area AREA --prompt "task and checks"',
-      note: "Replace queue placeholders; inline task and checks, no project task file. Roles/policy already loaded, no config/fleet/layout preflight. Then herdr-axi run next.",
-      help: [`export HERDR_AXI_RUN='${dir.replaceAll("'", "'\\''")}'`, ...(roles.moreRoles ? ["herdr-axi run config --full"] : [])] };
+      selection: "Role supplies access/native limits. Explicit model request: add --kind claude --model claude-opus-5 --effort high. No config edit/new run needed. Worker budget != application API budget.",
+      note: "Next tool call: replace TASK/WORKTREE/task text below; role already selected (read-only: verifier). Export + queue together. --start schedules eligible tasks within caps; batch: omit --start, then next once. No fleet/help/config/layout/run.json preflight.",
+      help: [`export HERDR_AXI_RUN=${quote(dir)}; herdr-axi run queue TASK --role implementer --cwd WORKTREE --area . --prompt 'task; owned files; checks' --start`, ...(roles.moreRoles ? ["herdr-axi run config --full"] : [])] };
   }
   const run = loadRun();
   if (!run) throw runError("Initialize/select a run first", "RUN_REQUIRED");
@@ -487,9 +499,8 @@ async function executeRunCommand(action, o) {
   if (action === "unlock") return unlockRun();
   if (action === "queue") {
     const id = o._[0];
-    const role = o.role ? (run.config ?? DEFAULT_CONFIG).roles[o.role] : null;
-    if (o.role && (!role || o.role === "orchestrator" || (o.kind && o.kind !== role.kind))) throw runError("Unknown/owner role or conflicting --kind", "CONFIG_INVALID");
-    const kind = role?.kind ?? o.kind;
+    const role = selectWorker(run.config ?? DEFAULT_CONFIG, o);
+    const kind = role.kind;
     if (!idOK(id) || !["claude", "codex", "copilot"].includes(kind) || !o.cwd || !o.area) throw runError("queue needs a short task ID, --role or --kind, --cwd, --area and --prompt TEXT or --prompt-file PATH");
     const location = taskLocation(o.cwd, o.area);
     const prompt = taskPrompt(o);
@@ -499,7 +510,10 @@ async function executeRunCommand(action, o) {
       if (deps.some((id) => !r.tasks.some((t) => t.id === id))) throw runError("Dependencies must reference existing tasks");
       r.tasks.push({ id, ...(role || {}), kind, role: o.role, policy: hash(JSON.stringify(role || { kind, access: "write" })), access: role?.access ?? "write", nativeSlots: role ? nativeSlots(role) : 0, ...location, prompt, deps, phase: r.phase, state: "queued" });
     });
-    return { queued: id, cwd: location.cwd, area: location.area, help: ["herdr-axi run next"] };
+    const queued = { queued: id, cwd: location.cwd, area: location.area, worker: { kind, model: role.model, effort: role.effort, access: role.access, mode: launchMode(kind) } };
+    if (!o.start) return { ...queued, help: ["herdr-axi run next"] };
+    try { return { ...queued, ...await executeRunCommand("next", { _: [] }) }; }
+    catch (e) { throw runError(`Task ${id} is already queued; do not queue again. ${e.message}`, e.code, ["herdr-axi run next"]); }
   }
   if (action === "move") {
     if (!o.cwd) throw runError("move requires --cwd pointing to an existing isolated worktree");
@@ -595,11 +609,12 @@ async function executeRunCommand(action, o) {
         if (t.state !== "cancelling" || t.cancellation.from.generation !== worker.generation) throw runError("Cancellation changed", "CANCEL_PENDING");
         r.workers.find((w) => w.name === worker.name).closed = true;
         t.state = "cancelled"; t.evidence = checkpoint.evidence.slice(0, 1000);
-        delete t.launcher; delete t.error;
+        delete t.launcher; delete t.error; delete t.errorCode;
         afterCommit.push(() => writerLease(r, t, true));
       });
     } catch (e) {
-      try { await publishRun((r) => { const t = r.tasks.find((t) => t.id === task.id); if (t.state === "cancelling") { delete t.launcher; t.error = e.message.slice(0, 600); } }); } catch { /* durable checkpoint retains capacity and lease */ }
+      try { await publishRun((r) => { const t = r.tasks.find((t) => t.id === task.id); if (t.state === "cancelling") { delete t.launcher; t.error = e.message.slice(0, 600); t.errorCode = e.code; } }); } catch { /* durable checkpoint retains capacity and lease */ }
+      if (e.code === "GENERATION_DRIFT") throw runError(`Generation mismatch; cancellation retained, not retriable unchanged. Do not edit receipts or close raw panes. ${e.message}`, "GENERATION_DRIFT", [`herdr-axi run history --task ${task.id}`, `herdr-axi read ${worker.pane} --raw`]);
       throw runError(`Cancellation incomplete; checkpoint and reservation retained: ${e.message}`, "CANCEL_PENDING", [retry]);
     }
     return { cancelled: task.id, closed: worker.pane, tab: worker.tab, capture: checkpoint.capture.source, note: "Owned tab, agent and monitor verified absent. Not accepted; files/worktree untouched. Bounded checkpoint saved; detached jobs are not stopped. Remove external worktrees only after reviewing saved/dirty work, never as a way to close panes.", help: ["herdr-axi run status"] };
@@ -626,7 +641,7 @@ async function executeRunCommand(action, o) {
         const t = r.tasks.find((t) => t.id === task.id);
         if (t.state !== "switching" || t.launcher !== task.launcher) throw runError("Switch changed concurrently", "RUN_BUSY");
         t.handoffs.at(-1).state = "cancelled"; t.state = handoff.priorState;
-        delete t.launcher; delete t.error;
+        delete t.launcher; delete t.error; delete t.errorCode;
       });
       return { switchCancelled: task.id, note: "Old owned worker retained; task remains unfinished and lease retained.", help: ["herdr-axi run inbox"] };
     }
@@ -678,7 +693,7 @@ async function executeRunCommand(action, o) {
         if (w) w.closed = true;
         delete t.contextWindowTokens;
         Object.assign(t, handoff.to, { policy: hash(JSON.stringify(handoff.to)), nativeSlots: nativeSlots(handoff.to), state: "queued" });
-        delete t.pane; delete t.name; delete t.launcher; delete t.error;
+        delete t.pane; delete t.name; delete t.launcher; delete t.error; delete t.errorCode;
         t.handoffs.at(-1).state = "retired";
         effects.afterCommit.push(() => {
           // Registry identity is saved in run.json; tombstone/inbox stay until finish.
@@ -690,7 +705,8 @@ async function executeRunCommand(action, o) {
         });
       });
     } catch (e) {
-      try { await publishRun((r) => { const t = r.tasks.find((t) => t.id === task.id); if (t.state === "switching") { delete t.launcher; t.error = e.message.slice(0, 600); } }); } catch { /* checkpoint and lease remain durable */ }
+      try { await publishRun((r) => { const t = r.tasks.find((t) => t.id === task.id); if (t.state === "switching") { delete t.launcher; t.error = e.message.slice(0, 600); t.errorCode = e.code; } }); } catch { /* checkpoint and lease remain durable */ }
+      if (e.code === "GENERATION_DRIFT") throw runError(`Generation mismatch; switch retained, not retriable unchanged. Do not edit receipts or close raw panes. ${e.message}`, "GENERATION_DRIFT", [`herdr-axi run history --task ${task.id}`, `herdr-axi read ${handoff.from.pane} --raw`]);
       throw runError(`Switch incomplete; checkpoint and lease retained: ${e.message}`, "SWITCH_PENDING", [`herdr-axi run switch ${task.id}`, `herdr-axi run switch ${task.id} --cancel`]);
     }
     return { switched: task.id, kind: handoff.to.kind, model: handoff.to.model, state: "queued", cwd: task.cwd, note: "Old owned tab retired without accepting the task. Files, original prompt, checkpoint and lease retained; no Git writes. Next starts the replacement. Terminal capture is bounded, not full model-context restoration.", help: [task.phase === run.phase ? "herdr-axi run next" : `herdr-axi run phase ${task.phase}`] };
@@ -760,6 +776,8 @@ async function executeRunCommand(action, o) {
       const defer = (t, reason, detail = {}) => deferred.push({ task: t.id, reason, ...detail });
       const availableParked = () => r.workers.find((w) => !w.closed && !w.closing && !pending(r).some((t) => t.pane === w.pane) && [...r.tasks].reverse().find((t) => t.pane === w.pane)?.state === "accepted" && ["idle", "done"].includes(safeWorker(r, w, rows, { observe: true })?.state));
       for (const t of r.tasks.filter((t) => t.state === "queued" && t.phase === r.phase)) {
+        try { validateLaunch({ ...t, model: t.model ?? (t.kind === "claude" ? "opus" : "gpt-5.6-sol"), effort: t.effort ?? "high" }); }
+        catch (e) { defer(t, e.message, { help: `herdr-axi run cancel ${t.id}` }); continue; }
         if (pending(r).length >= limit(r)) { defer(t, "primary capacity"); continue; }
         const dependency = t.deps.map((id) => r.tasks.find((d) => d.id === id) ?? { id, state: "missing" }).find((d) => d.state !== "accepted");
         if (dependency) { defer(t, "unaccepted dependency", { dependency: dependency.id, state: dependency.state, help: dependency.state === "cancelled" ? `herdr-axi run cancel ${t.id}` : dependency.state === "queued" && dependency.phase !== r.phase ? `herdr-axi run phase ${dependency.phase}` : "herdr-axi run inbox" }); continue; }
