@@ -2,7 +2,7 @@
 set -euo pipefail
 
 event_kind="${1:-}"
-[[ "$event_kind" == "settled" || "$event_kind" == "input" || "$event_kind" == "error" || "$event_kind" == "lost" ]] || exit 0
+[[ "$event_kind" == "settled" || "$event_kind" == "input" || "$event_kind" == "error" || "$event_kind" == "lost" || "$event_kind" == "quota" ]] || exit 0
 [[ "${HERDR_ENV:-}" == "1" && "${HERDR_MONITOR_ENABLED:-}" == "1" ]] || exit 0
 if [[ "${HERDR_MONITOR_RENDER_ONLY:-}" != "1" && -z "${HERDR_MONITOR_ORCHESTRATOR:-}" ]]; then
   exit 0
@@ -206,6 +206,17 @@ completion_ordinal() {
 
 resolve_native_transcript
 suppression_reason=""
+quota_json=null
+if [[ "$event_kind" != "lost" && "$live_status" != "working" && "${HERDR_MONITOR_INBOX:-0}" == "1" ]]; then
+  quota_json=$(herdr agent read "$agent_name" --source visible --lines 40 2>/dev/null |
+    node "$script_dir/../src/quota.mjs" 2>/dev/null) || quota_json=null
+fi
+if [[ "$quota_json" != "null" ]]; then
+  event_kind=error
+elif [[ "$event_kind" == "quota" ]]; then
+  write_result suppressed no-quota
+  exit 0
+fi
 
 # Copilot emits errorOccurred for failed subagent/tool calls during a live turn.
 if [[ "$event_kind" == "error" ]]; then
@@ -217,7 +228,9 @@ if [[ "$event_kind" == "error" ]]; then
 fi
 
 detail=""
-if [[ "$event_kind" == "settled" ]]; then
+if [[ "$quota_json" != "null" ]]; then
+  detail=$(printf '%s\n' "$quota_json" | jq -r '.message')
+elif [[ "$event_kind" == "settled" ]]; then
   detail=$(payload_value '.last_assistant_message // .lastAssistantMessage // .["last-assistant-message"]')
   if [[ -z "$detail" ]]; then
     detail=$(native_transcript_tail "$transcript_backend" "$transcript_path" || true)
@@ -256,7 +269,7 @@ fi
 
 if [[ "$event_kind" == "settled" ]]; then
   fingerprint=""
-elif [[ "$transcript_resolution" == "resolved" ]]; then
+elif [[ "$transcript_resolution" == "resolved" && "$quota_json" == "null" ]]; then
   ordinal=$(completion_ordinal "$transcript_backend" "$transcript_path" || true)
   if [[ -n "$ordinal" && "$ordinal" != "0" ]]; then
     fingerprint="${transcript_backend}:${transcript_session}:${ordinal}"
@@ -309,6 +322,13 @@ if [[ "$event_kind" == "settled" && -n "$receipt_generation" ]]; then
   fingerprint="generation:${receipt_generation}"
 fi
 
+# A quota after completed work must not overwrite its only saved result.
+# The next explicitly armed task has a new generation and can report its quota.
+if [[ "$quota_json" != "null" && -n "$receipt_generation" &&
+  "$receipt_settled_fingerprint" == "generation:$receipt_generation" ]]; then
+  suppression_reason=completed-task-quota
+fi
+
 if [[ "$event_kind" == "settled" && -n "$receipt_settled_fingerprint" &&
   "$receipt_settled_fingerprint" == "$fingerprint" ]]; then
   suppression_reason=duplicate-settled
@@ -351,7 +371,7 @@ if [[ -n "$suppression_reason" ]]; then
   exit 0
 fi
 
-if [[ "$event_kind" == "settled" && "$receipt_terminal" == "closed" ]]; then
+if [[ "$receipt_terminal" == "closed" ]]; then
   suppression_reason=closed-tombstone
 elif [[ "$receipt_delivered_event" == "$event_kind" &&
   "$receipt_delivered_fingerprint" == "$fingerprint" ]]; then
@@ -374,8 +394,8 @@ if [[ "${HERDR_MONITOR_INBOX:-0}" == "1" ]]; then
   # summaries in batches; hooks never type into its terminal.
   inbox_tmp=$(mktemp "${receipt_file}.inbox.tmp.XXXXXXXX")
   if jq -nc --arg event "$event_kind" --arg generation "$receipt_generation" \
-    --arg summary "$detail" --arg fingerprint "$fingerprint" \
-    '{event:$event,generation:$generation,fingerprint:$fingerprint,summary:($summary | .[0:600]),detail:($summary | .[0:3500]),truncated:($summary | length > 600)}' > "$inbox_tmp" &&
+    --arg summary "$detail" --arg fingerprint "$fingerprint" --argjson quota "$quota_json" \
+    '{event:$event,generation:$generation,fingerprint:$fingerprint,summary:($summary | .[0:600]),detail:($summary | .[0:3500]),truncated:($summary | length > 600)} + (if $quota != null then {quota:$quota} else {} end)' > "$inbox_tmp" &&
     mv -f "$inbox_tmp" "${receipt_file}.inbox"; then
     delivered=true
   else

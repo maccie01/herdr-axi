@@ -95,13 +95,17 @@ function leaseRecord(file) {
 // One owner run per worktree. Its run.lock serializes holder changes; other runs
 // can only acquire after the last holder releases. Read sharing is within that
 // owner run, never an invisible opt-out from the cross-run lease protocol.
-export function writerLease(run, task, release = false) {
+export function writerLease(run, task, release = false, rollback) {
   const file = leasePath(task);
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const holder = { task: task.id, access: task.access || "write", shared: !!run.config?.sharedReadWorktree };
   const value = { schema: 2, run: run.id, directory: process.env.HERDR_AXI_RUN ? path.resolve(process.env.HERDR_AXI_RUN) : null, worktree: task.worktree || task.cwd, holders: [holder] };
   if (!release) {
-    try { fs.writeFileSync(file, JSON.stringify(value), { flag: "wx", mode: 0o600 }); return true; }
+    try {
+      fs.writeFileSync(file, JSON.stringify(value), { flag: "wx", mode: 0o600 });
+      rollback?.push(() => writerLease(run, task, true));
+      return true;
+    }
     catch (e) { if (e.code !== "EEXIST") throw e; }
   }
   let old;
@@ -121,6 +125,7 @@ export function writerLease(run, task, release = false) {
     fs.writeFileSync(temp, JSON.stringify({ ...value, holders: old.holders }), { mode: 0o600 });
     fs.renameSync(temp, file);
   } finally { fs.rmSync(temp, { force: true }); }
+  if (!release) rollback?.push(() => writerLease(run, task, true));
   return true;
 }
 

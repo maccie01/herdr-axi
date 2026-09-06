@@ -368,3 +368,43 @@ error during test-file editing; the final frozen-file full rerun passed.
 Existing context cache and close/queue paths reused; no dependency, daemon, project
 state document or automatic billing/provider switch. A tracked watch surfaces the
 quota to its caller; universal unsolicited orchestrator wakeup remains unimplemented.
+
+## Quota supervision, takeover and switch cleanup (6 September 2026)
+
+This pass uses isolated fake-backend regressions, not exhausted live subscriptions.
+No production run or pane was changed. The global executable's targeted help exposes
+`run watch` and `run takeover`; no install or global instruction-file change needed.
+
+- Shared JS/engine quota detector: monthly/session/weekly limits, hit/reached variants,
+  Claude-style bare “You've hit your limit” and Codex-style bullet prefixes.
+- Managed hooks persist quota errors without completion proof or owner-terminal input.
+  Monitor probes native `unknown` as well; stable unknown can wait for the existing
+  monitor interval (up to approximately 60 seconds), not guaranteed instant delivery.
+- Worker switch: re-read quota and identity before closure, including unknown-state
+  workers. A worker resuming during that read refuses closure. Runtime registry and
+  disposable monitor hints removed; identity/checkpoint, tombstone and inbox retained.
+  Late hooks on closed workers suppressed until a new generation is explicitly armed.
+  A later quota cannot overwrite an already saved completed result. Failed replacement
+  reservation rolls back new leases only, preserving the handoff's existing lease.
+- Explicit same-workspace owner takeover: current quota or verified pane absence,
+  bounded checkpoint, preserved task/lease state, old-owner CLI fencing. Concurrent
+  controls block takeover without serializing ordinary controls. Dead transaction
+  locks have a verified recovery path; unknown/live holders remain protected.
+- `run watch` alias; one live watcher/run; review results included, avoiding another
+  inbox fetch. Persisted quota evidence suggests a switch but cannot authorize a
+  stale close: the switch always revalidates the visible error.
+- Finished-run cleanup/retention removes verified dead watch/control metadata too;
+  active runs, live PIDs, unverified files and symlinks remain protected.
+
+Not verified: real Claude/Codex exhausted subscriptions, live owner/provider transfer,
+or host-specific background notification delivery. No universal unsolicited wakeup,
+automatic replacement launch or provider/billing change. Owner tabs, native sessions,
+external worktrees and detached jobs are deliberately not killed/deleted. The CLI
+fences its own controls, not arbitrary commands another process may still execute.
+
+Final validation: `npm test` 87/87; standalone Bash suite 43/43; Node/Bash syntax
+and `git diff --check` passed. Initial checks caught an incorrect test expectation
+that the runtime registry survived closure, stale help wording, and an old assertion
+that allowed late post-close input notifications; expectations/docs were reconciled
+with the verified cleanup behavior. New failure-injection tests cover retained-lease
+rollback, owner publication failure, live/dead locks, stale quota and watcher transfer.

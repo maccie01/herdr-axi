@@ -49,10 +49,57 @@ export function ownerCheck(run) {
     throw runError("Owner identity changed; refusing to control this run", "OWNER_CHANGED");
 }
 
+// Register controls under the short run lock, without rewriting run.json.
+// Ordinary controls remain concurrent. Takeover alone waits for quiescence.
+function beginControl(action) {
+  const run = loadRun();
+  if (!run || run.finishedAt) return () => {};
+  requireHerdrEnv();
+  if (callerPane() !== run.owner.pane) throw runError("This pane is not the run owner", "NOT_RUN_OWNER");
+  const folder = path.join(runDir(), "operations"), file = path.join(folder, String(process.pid));
+  changeRun((current) => {
+    if (JSON.stringify(current.owner) !== JSON.stringify(run.owner)) throw runError("Owner changed before control started", "OWNER_CHANGED");
+    fs.mkdirSync(folder, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(file, action, { flag: "wx", mode: 0o600 });
+  }, { readOnly: true });
+  return () => {
+    fs.rmSync(file, { force: true });
+    // Keep the active run's directory stable for concurrent registrations.
+    if (loadRun()?.finishedAt) try { fs.rmdirSync(folder); } catch (e) { if (!["ENOENT", "ENOTEMPTY", "EEXIST"].includes(e.code)) throw e; }
+  };
+}
+
+function assertQuiescent(run) {
+  const folder = path.join(runDir(), "operations");
+  if (fs.existsSync(folder)) for (const name of fs.readdirSync(folder)) {
+    if (!/^[1-9][0-9]*$/.test(name) || launcherAlive(Number(name))) throw runError("A run control is still active; retry takeover after it returns", "RUN_BUSY", ["herdr-axi run takeover --help"]);
+    fs.unlinkSync(path.join(folder, name));
+  }
+  if (pending(run).some((t) => ["starting", "switching"].includes(t.state) && launcherAlive(t.launcher))) throw runError("Launcher still active; wait for it before takeover", "RUN_BUSY");
+}
+
+function unlockRun() {
+  // Shared by owner recovery and a fully validated replacement. Serialize
+  // unlockers; a live/unknown lock holder is never displaced.
+  const guard = path.join(runDir(), "run.unlock");
+  let fd;
+  try { fd = fs.openSync(guard, "wx", 0o600); }
+  catch (e) { if (e.code === "EEXIST") throw runError("Another unlock is active; inspect run.unlock after a crash", "RUN_BUSY"); throw e; }
+  try {
+    const file = path.join(runDir(), "run.lock");
+    const pid = Number(fs.readFileSync(file, "utf8"));
+    if (!Number.isSafeInteger(pid) || pid <= 0) throw runError("Lock owner is unknown; inspect run.lock manually");
+    try { process.kill(pid, 0); throw runError("Lock holder is still live", "RUN_BUSY"); }
+    catch (e) { if (e.code !== "ESRCH") throw e; }
+    fs.unlinkSync(file);
+    return { unlocked: true };
+  } finally { fs.closeSync(fd); fs.unlinkSync(guard); }
+}
+
 function safeWorker(run, worker, rows, { observe = false } = {}) {
   try {
     if (!worker || worker.closed) throw runError("Pane is not a live owned worker", "NOT_OWNED");
-    if (worker.pane === run.owner.pane || worker.tab === run.owner.tab || worker.pane === process.env.HERDR_PANE_ID || worker.tab === process.env.HERDR_TAB_ID)
+    if ([run.owner, ...(run.ownerHandoffs ?? []).map((h) => h.from)].some((o) => worker.pane === o.pane || worker.tab === o.tab) || worker.pane === process.env.HERDR_PANE_ID || worker.tab === process.env.HERDR_TAB_ID)
       throw runError("Refusing an operation on the orchestrator or its tab", "SELF_TARGET");
     const a = rows.find((a) => a.pane === worker.pane);
     if (a && (a.workspace !== run.workspace || a.tab !== worker.tab || a.backendName !== worker.name || (worker.terminal && a.terminal !== worker.terminal) || (worker.session && a.session !== worker.session)))
@@ -187,7 +234,7 @@ export function runStatus() {
   const switching = tasks.find((t) => t.state === "switching");
   const blocked = tasks.find((t) => t.state === "blocked");
   const ready = tasks.find((t) => t.delivery === "not_submitted" && ["idle", "done"].includes(t.state));
-  return { phase: run.phase, capacity: limit(run), occupied: tasks.length, queued: queued.length, tasks,
+  return { owner: run.owner.pane, phase: run.phase, capacity: limit(run), occupied: tasks.length, queued: queued.length, tasks,
     ...(run.config ? { nativeReserved: pending(run).reduce((n, t) => n + (t.nativeSlots ?? 0), 0), nativeCapacity: run.config.nativeSubagentLimit } : {}),
     ...(context?.warnings.length ? { contextWarnings: context.warnings, contextAction: "Checkpoint at a safe boundary; review, then replace/compact the accepted worker. Never interrupt unfinished work automatically." } : {}),
     ...(context?.unknown ? { contextUnknown: context.unknown } : {}),
@@ -209,30 +256,52 @@ const needsAttention = (s) => s.contextWarnings?.length || s.contextError || s.o
 const waitingNote = "Continue independent work. Use one notification-backed background watch if supported; otherwise wait only when dependent. No inbox/read polling.";
 
 export async function watchRun(timeout = 30000) {
-  const first = runStatus();
-  if (!first.tasks?.length || needsAttention(first)) return { changed: false, reason: "attention", ...first };
-  const key = watchKey(first);
-  let latest = first;
-  const start = Date.now();
-  while (Date.now() - start < timeout) {
-    await delay(Math.min(2000, timeout - (Date.now() - start)));
-    latest = runStatus();
-    if (key !== watchKey(latest)) return { changed: true, reason: "state-change", ...latest };
-  }
-  return { changed: false, reason: "timeout", pending: latest.occupied, note: waitingNote, help: latest.help };
+  const selected = loadRun();
+  if (!selected?.finishedAt) ownerCheck(selected);
+  const file = path.join(runDir() ?? ".", "watch.json");
+  changeRun(() => {
+    let previous;
+    try { previous = JSON.parse(fs.readFileSync(file, "utf8")); } catch (e) { if (e.code !== "ENOENT") throw runError("Unverifiable watch record; inspect watch.json", "WATCH_ACTIVE"); }
+    if (previous && (!Number.isSafeInteger(previous.pid) || previous.pid <= 0 || launcherAlive(previous.pid))) throw runError("One watch is active or its identity is unverifiable; keep the existing job handle and continue independent work", "WATCH_ACTIVE", ["herdr-axi watch --help"]);
+    const temp = `${file}.${process.pid}.tmp`;
+    try {
+      fs.writeFileSync(temp, JSON.stringify({ pid: process.pid }), { mode: 0o600 });
+      fs.renameSync(temp, file);
+    } finally { fs.rmSync(temp, { force: true }); }
+  }, { readOnly: true, allowFinished: true });
+  try {
+    const first = runStatus();
+    const attention = async (s, changed, reason) => ({ changed, reason, ...(s.tasks?.some((t) => t.state === "review") && s.owner === callerPane() ? await runCommand("inbox", { _: [] }) : s) });
+    if (!first.tasks?.length || needsAttention(first)) return await attention(first, false, "attention");
+    const key = watchKey(first);
+    let latest = first;
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+      await delay(Math.min(2000, timeout - (Date.now() - start)));
+      latest = runStatus();
+      if (!latest.finished && latest.owner !== first.owner) return { changed: true, reason: "owner-changed", owner: latest.owner, note: "Stop old-owner supervision; replacement owns this run." };
+      if (key !== watchKey(latest)) return await attention(latest, true, "state-change");
+    }
+    return { changed: false, reason: "timeout", pending: latest.occupied, note: waitingNote, help: latest.help };
+  } finally { fs.rmSync(file, { force: true }); }
 }
 
 // A bounded queue and a reusable worker pool, not a background scheduler.
 // `next` reserves all available slots atomically, then starts them concurrently.
 export async function runCommand(action, o) {
-  let result;
-  try { result = await executeRunCommand(action, o); }
+  let result, release, cleanupError;
+  try {
+    if (!["init", "status", "config", "history", "gc", "leases", "takeover", "unlock"].includes(action)) release = beginControl(action);
+    result = await executeRunCommand(action, o);
+  }
   catch (e) {
     const warnings = takeRunWarnings();
     if (warnings.length) e.message += `; earlier changes committed; maintenance: ${warnings.slice(0, 8).map((w) => w.error).join("; ")}`;
     throw e;
   }
+  finally { try { if (release) release(); } catch (e) { cleanupError = { code: "CONTROL_CLEANUP_FAILED", error: e.message.slice(0, 600) }; } }
   const warnings = takeRunWarnings();
+  if (cleanupError) warnings.push(cleanupError);
   return warnings.length ? { ...result, committed: true, maintenance: warnings.slice(0, 8), ...(warnings.length > 8 ? { moreMaintenance: warnings.length - 8 } : {}), help: ["herdr-axi run leases", ...(result.help ?? [])] } : result;
 }
 
@@ -292,6 +361,48 @@ async function executeRunCommand(action, o) {
     requireHerdrEnv();
   }
   if (run.finishedAt && action !== "finish") throw runError("Archived run is read-only; initialize a new run", "RUN_FINISHED");
+  if (action === "takeover") {
+    if (process.env.HERDR_AXI_WORKER === "1") throw runError("Workers cannot take over their supervisor", "NESTED_RUN");
+    if (o.from !== run.owner.pane || !o.evidence?.trim() || o.evidence.length > 4000)
+      throw runError("Takeover requires --from <current-owner-pane> and --evidence (1..4000 chars): authorization and remaining work", "INVALID_TAKEOVER", ["herdr-axi run takeover --help"]);
+    if ((run.ownerHandoffs?.length ?? 0) >= 8) throw runError("Eight owner transfers reached; inspect the run", "TAKEOVER_LIMIT");
+    const pane = callerPane(), a = liveAgent(pane);
+    if (!a || a.pane_id !== pane || a.workspace_id !== run.workspace || !a.tab_id || !a.terminal_id || !["claude", "codex", "copilot"].includes(a.agent)) throw runError("Replacement must be a live agent in the same workspace", "INVALID_TAKEOVER");
+    if (pane === run.owner.pane || a.tab_id === run.owner.tab || ownedWorkers(run).some((w) => !w.closed && (w.pane === pane || w.tab === a.tab_id))) throw runError("Replacement must be a separate non-worker pane/tab", "SELF_TARGET");
+    let old, quota, output = "", absent = false;
+    try { old = liveAgent(run.owner.pane); }
+    catch (e) { if (e.code !== "UNKNOWN_AGENT") throw e; }
+    if (old?.agent) {
+      if (old.workspace_id !== run.workspace || old.tab_id !== run.owner.tab || (run.owner.terminal && old.terminal_id !== run.owner.terminal) || (run.owner.session && old.agent_session?.value !== run.owner.session)) throw runError("Previous owner identity changed; do not adopt its replacement", "OWNER_CHANGED");
+      if (old.agent_status === "working") throw runError("Previous owner is still working", "OWNER_BUSY");
+      output = runHerdr(["agent", "read", run.owner.pane, "--source", "visible", "--lines", "60"], { timeoutMs: 2000, text: true });
+      quota = quotaError(output);
+      if (!quota) throw runError("Previous owner has no current quota error", "QUOTA_NOT_CONFIRMED");
+      try { output = runHerdr(["agent", "read", run.owner.pane, "--source", "recent-unwrapped", "--lines", "2000"], { timeoutMs: 3000, text: true }); } catch { /* visible checkpoint remains */ }
+    } else {
+      // Agent-not-found alone may mean a different occupant or a transient gap.
+      try { runHerdr(["pane", "get", run.owner.pane]); throw runError("Old pane still exists without a verified owner; inspect it", "OWNER_CHANGED"); }
+      catch (e) { if (e.code !== "UNKNOWN_AGENT") throw e; absent = true; }
+    }
+    const owner = { pane, tab: a.tab_id, terminal: a.terminal_id, session: a.agent_session?.value };
+    const identity = (a) => JSON.stringify([a?.pane_id, a?.workspace_id, a?.tab_id, a?.terminal_id, a?.agent_session?.value, a?.agent, a?.name]);
+    if (identity(liveAgent(pane)) !== identity(a)) throw runError("Replacement identity changed while checkpointing", "OWNER_CHANGED");
+    if (!absent) {
+      const fresh = liveAgent(run.owner.pane);
+      if (identity(fresh) !== identity(old) || fresh?.agent_status === "working") throw runError("Previous owner changed or resumed while checkpointing", "OWNER_CHANGED");
+    }
+    if (fs.existsSync(path.join(runDir(), "run.lock"))) unlockRun();
+    changeRun((r) => {
+      if (JSON.stringify(r.owner) !== JSON.stringify(run.owner)) throw runError("Owner changed concurrently", "OWNER_CHANGED");
+      assertQuiescent(r);
+      (r.ownerHandoffs ??= []).push({ at: new Date().toISOString(), from: r.owner, to: owner, evidence: o.evidence, quota, absent, output: output.slice(-32000), truncated: true });
+      r.owner = owner;
+      (r.events ??= []).push({ at: new Date().toISOString(), action: "takeover", from: run.owner.pane, to: pane });
+    });
+    return { owner: pane, previous: run.owner.pane, phase: run.phase, pending: pending(run).length, queued: run.tasks.filter((t) => t.state === "queued").length,
+      note: "Same run, tasks, receipts and leases. Previous owner fenced from CLI controls, never closed or sent input; old external jobs are not stopped. Review the checkpoint and inbox before dispatching. No automatic billing change.",
+      checkpoint: { evidence: o.evidence, output: output.slice(-4000), truncated: true }, help: ["herdr-axi run inbox"] };
+  }
   if (action === "inbox") {
     ownerCheck(run);
     let status = runStatus();
@@ -309,7 +420,7 @@ async function executeRunCommand(action, o) {
       if (!w) continue;
       try {
         const e = JSON.parse(fs.readFileSync(`${w.receipt}.inbox`, "utf8"));
-        if (e.generation === w.generation) events.push({ task: t.id, pane: w.pane, event: e.event, summary: String(e.summary).slice(0, 600), ...(e.truncated ? { truncated: true } : {}) });
+        if (e.generation === w.generation) events.push({ task: t.id, pane: w.pane, event: e.event, summary: String(e.summary).slice(0, 600), ...(e.quota?.code === "QUOTA_EXHAUSTED" ? { reportedQuota: e.quota.scope } : {}), ...(e.truncated ? { truncated: true } : {}) });
       } catch (e) { if (e.code !== "ENOENT") errors.push({ pane: w.pane, error: e.message.slice(0, 300) }); }
       try {
         const notice = fs.readFileSync(`${w.receipt}.monitor-error`, "utf8");
@@ -320,7 +431,8 @@ async function executeRunCommand(action, o) {
       return { events: [], pending: status.occupied, queued: status.queued, note: waitingNote, help: status.help };
     const first = status.tasks.find((t) => t.state === "blocked") ?? status.tasks.find((t) => !["working", "starting"].includes(t.state) && t.pane !== "pending");
     const report = events.find((e) => e.pane === first?.pane);
-    const help = status.tasks.some((t) => t.quota || t.state === "switching") ? status.help : errors.length ? [`herdr-axi read ${errors[0].pane} --raw`, "herdr-axi run --help"]
+    const quotaEvent = events.find((e) => e.reportedQuota && status.tasks.some((t) => t.pane === e.pane && !["working", "starting", "review"].includes(t.state)));
+    const help = status.tasks.some((t) => t.quota || t.state === "switching") ? status.help : quotaEvent ? switchHelp(run, quotaEvent.pane, run.workers.find((w) => w.pane === quotaEvent.pane)?.kind) : errors.length ? [`herdr-axi read ${errors[0].pane} --raw`, "herdr-axi run --help"]
       : first?.state === "review" && report ? [report.truncated ? `herdr-axi read ${first.pane}` : `herdr-axi run accept ${first.pane} --evidence "<verified checks>"`]
       : ["lost", "unverified"].includes(first?.state) ? ["herdr-axi agents --all", "herdr-axi run --help"]
       : first ? [`herdr-axi read ${first.pane} --raw`] : status.help;
@@ -328,23 +440,7 @@ async function executeRunCommand(action, o) {
   }
   ownerCheck(run);
   if (action === "finish") return { ...finishRun(), cleanup: collectArchives(run.project) };
-  if (action === "unlock") {
-    // Serialize recoveries and exclude new transactions while checking the
-    // dead owner, so a second unlock cannot remove a newly acquired lock.
-    const guard = path.join(runDir(), "run.unlock");
-    let fd;
-    try { fd = fs.openSync(guard, "wx", 0o600); }
-    catch (e) { if (e.code === "EEXIST") throw runError("Another unlock is active; inspect run.unlock after a crash", "RUN_BUSY"); throw e; }
-    try {
-      const file = path.join(runDir(), "run.lock");
-      const pid = Number(fs.readFileSync(file, "utf8"));
-      if (!Number.isSafeInteger(pid) || pid <= 0) throw runError("Lock owner is unknown; inspect run.lock manually");
-      try { process.kill(pid, 0); throw runError("Lock holder is still live", "RUN_BUSY"); }
-      catch (e) { if (e.code !== "ESRCH") throw e; }
-      fs.unlinkSync(file);
-      return { unlocked: true };
-    } finally { fs.closeSync(fd); fs.unlinkSync(guard); }
-  }
+  if (action === "unlock") return unlockRun();
   if (action === "queue") {
     const id = o._[0];
     const role = o.role ? (run.config ?? DEFAULT_CONFIG).roles[o.role] : null;
@@ -407,6 +503,13 @@ async function executeRunCommand(action, o) {
     return { cancelled: o._[0] };
   }
   const rows = listAgents({ all: true });
+  if (action === "keys") {
+    const worker = ownedWorkers(run).find((w) => w.pane === o._[0] && !w.closed);
+    const live = safeWorker(run, worker, rows);
+    if (!live || live.state === "working") throw runError("Worker absent or busy; inspect before sending UI keys", "AGENT_BUSY");
+    runHerdr(["agent", "send-keys", live.pane, ...o._.slice(1)]);
+    return { pane: live.pane, keys: o._.slice(1), help: [`herdr-axi read ${live.pane}`] };
+  }
   if (action === "switch") {
     const workers = ownedWorkers(run);
     const targetWorker = workers.find((w) => w.pane === o._[0] && !w.closed);
@@ -428,7 +531,7 @@ async function executeRunCommand(action, o) {
     if (task.state !== "switching") {
       const worker = workers.find((w) => (task.pane ? w.pane === task.pane : w.name === task.name) && !w.closed);
       const live = safeWorker(run, worker, rows);
-      if (!live || !["idle", "done", "blocked"].includes(live.state)) throw runError("Switch refuses working, absent or unknown workers; inspect first", "NOT_SWITCHABLE");
+      if (!live || !["idle", "done", "blocked", "unknown"].includes(live.state)) throw runError("Switch refuses working or absent workers; inspect first", "NOT_SWITCHABLE");
       if (receipt(worker)?.complete) throw runError("Completed result: review and accept/revise, not a quota switch", "NOT_SWITCHABLE");
       if ((task.handoffs?.length ?? 0) >= 4) throw runError("Four provider switches reached; re-scope explicitly", "SWITCH_LIMIT");
       if (o.role && (o.kind || o.model || o.effort)) throw runError("Choose --role OR --kind/--model/--effort", "CONFIG_INVALID");
@@ -451,7 +554,7 @@ async function executeRunCommand(action, o) {
     if (task.state === "switching" && safeWorker(run, handoff.from, rows)) {
       const live = rows.find((a) => a.pane === handoff.from.pane);
       const visible = runHerdr(["agent", "read", live.pane, "--source", "visible", "--lines", "40"], { timeoutMs: 2000, text: true });
-      if (!["idle", "done", "blocked"].includes(live.state) || receipt(handoff.from)?.complete || !quotaError(visible)) throw runError("Old worker resumed or quota no longer confirmed; inspect or cancel the pending switch", "SWITCH_PENDING", [`herdr-axi read ${live.pane} --raw`, `herdr-axi run switch ${task.id} --cancel`]);
+      if (!["idle", "done", "blocked", "unknown"].includes(live.state) || receipt(handoff.from)?.complete || !quotaError(visible)) throw runError("Old worker resumed or quota no longer confirmed; inspect or cancel the pending switch", "SWITCH_PENDING", [`herdr-axi read ${live.pane} --raw`, `herdr-axi run switch ${task.id} --cancel`]);
     }
     changeRun((r) => {
       const t = r.tasks.find((t) => t.id === task.id);
@@ -468,7 +571,7 @@ async function executeRunCommand(action, o) {
         try { runHerdr([kind, "get", id]); throw runError("Old worker resources remain; replacement not queued", "SWITCH_PENDING"); }
         catch (e) { if (e.code !== "UNKNOWN_AGENT") throw e; }
       }
-      await publishRun((r) => {
+      await publishRun((r, effects) => {
         const t = r.tasks.find((t) => t.id === task.id);
         if (t.state !== "switching" || t.handoffs.at(-1).from.generation !== handoff.from.generation) throw runError("Switch generation changed", "SWITCH_PENDING");
         const w = r.workers.find((w) => w.pane === handoff.from.pane);
@@ -477,6 +580,14 @@ async function executeRunCommand(action, o) {
         Object.assign(t, handoff.to, { policy: hash(JSON.stringify(handoff.to)), nativeSlots: nativeSlots(handoff.to), state: "queued" });
         delete t.pane; delete t.name; delete t.launcher; delete t.error;
         t.handoffs.at(-1).state = "retired";
+        effects.afterCommit.push(() => {
+          // Registry identity is saved in run.json; tombstone/inbox stay until finish.
+          // Only retired monitor hints are disposable; never touch native sessions.
+          for (const file of [handoff.from.receipt + ".monitor-error", handoff.from.receipt.replace(/\.event$/, ".task")]) {
+            try { if (fs.lstatSync(file).isFile()) fs.unlinkSync(file); }
+            catch (e) { if (e.code !== "ENOENT") throw e; }
+          }
+        });
       });
     } catch (e) {
       try { await publishRun((r) => { const t = r.tasks.find((t) => t.id === task.id); if (t.state === "switching") { delete t.launcher; t.error = e.message.slice(0, 600); } }); } catch { /* checkpoint and lease remain durable */ }
@@ -556,8 +667,8 @@ async function executeRunCommand(action, o) {
           const parked = availableParked();
           defer(t, "parked pool full; close an unused accepted worker", { help: parked ? `herdr-axi run close ${parked.pane}` : "herdr-axi run inbox" }); continue;
         }
-        if (!writerLease(r, t)) { defer(t, "worktree lease held or unverified", { help: "herdr-axi run leases" }); continue; }
-        rollback.push(() => writerLease(r, t, true));
+        // Roll back only newly acquired holders, not a retained handoff lease.
+        if (!writerLease(r, t, false, rollback)) { defer(t, "worktree lease held or unverified", { help: "herdr-axi run leases" }); continue; }
         t.state = "starting";
         t.launcher = process.pid;
         // Herdr names are lowercase and at most 32 characters; task IDs need

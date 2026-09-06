@@ -383,6 +383,7 @@ EOF
 chmod +x "$fake_bin/uuidgen"
 
 ln -s /opt/homebrew/bin/rg "$fake_bin/rg"
+ln -s "$(command -v node)" "$fake_bin/node"
 export PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export HERDR_BIN="$fake_bin/herdr"
 export FAKE_HERDR_ORCHESTRATOR=orch
@@ -713,9 +714,10 @@ test_close_tombstone_followup_and_rearm() (
 
   run_hook input '{"title":"Approval","message":"Late input"}'
   assert_eq closed "$(receipt_read_field 9)" "tombstone after input"
+  assert_eq closed-tombstone "$(receipt_read_field 11)" "late input suppressed"
   run_hook settled "$(payload)"
-  assert_eq 2 "$(file_value "$FAKE_HERDR_CASE/prompt-successes")" \
-    "post-close terminal suppression"
+  assert_eq 1 "$(file_value "$FAKE_HERDR_CASE/prompt-successes")" \
+    "all post-close notifications suppressed"
 
   prompt_file="$FAKE_HERDR_CASE/followup.txt"
   printf '%s\n' "next turn" > "$prompt_file"
@@ -727,7 +729,7 @@ test_close_tombstone_followup_and_rearm() (
   write_current_completion_proof
   printf '%s\n' done > "$FAKE_HERDR_CASE/status"
   run_hook settled "$(payload)"
-  assert_eq 3 "$(file_value "$FAKE_HERDR_CASE/prompt-successes")" \
+  assert_eq 2 "$(file_value "$FAKE_HERDR_CASE/prompt-successes")" \
     "completion after followup"
 )
 
@@ -1957,6 +1959,15 @@ test_quota_handoff_requires_checkpoint_identity_and_paused_worker() (
   fi
   assert_file_present "$FAKE_HERDR_CASE/tab-alive" "failed checks preserve tab"
   printf '%s\n' session-1 > "$FAKE_HERDR_CASE/session"
+  if bash "$orchestrator_script" close worker --handoff "$run_file" >/dev/null 2>&1; then
+    fail "handoff closed without a current quota error"
+  fi
+  printf '%s\n' "You've hit your usage limit" > "$FAKE_HERDR_CASE/visible"
+  : > "$FAKE_HERDR_CASE/start-on-read"
+  if bash "$orchestrator_script" close worker --handoff "$run_file" >/dev/null 2>&1; then
+    fail "handoff closed worker that resumed during quota read"
+  fi
+  printf '%s\n' unknown > "$FAKE_HERDR_CASE/status"
   if bash "$orchestrator_script" close worker >/dev/null 2>&1; then
     fail "normal close bypassed missing completion"
   fi
@@ -1969,7 +1980,40 @@ test_quota_handoff_requires_checkpoint_identity_and_paused_worker() (
   assert_eq 1 "$(call_count '^tab close')" "retry never closes twice"
 )
 
+test_quota_hook_records_error_without_completion_or_owner_input() (
+  setup_case quota-hook
+  source "$receipt_script"
+  mkdir -p "$(dirname -- "$HERDR_MONITOR_RECEIPT")"
+  herdr_receipt_lock_acquire "$HERDR_MONITOR_RECEIPT"
+  herdr_receipt_rearm_locked "$HERDR_MONITOR_RECEIPT" quota testgen
+  herdr_receipt_lock_release
+  printf '%s\n' idle > "$FAKE_HERDR_CASE/status"
+  printf '%s\n' "You've hit your limit · resets later" > "$FAKE_HERDR_CASE/visible"
+  HERDR_MONITOR_INBOX=1 run_hook settled '{}'
+  assert_eq error "$(jq -r '.event' "${HERDR_MONITOR_RECEIPT}.inbox")" "quota is error, never settled"
+  assert_eq QUOTA_EXHAUSTED "$(jq -r '.quota.code' "${HERDR_MONITOR_RECEIPT}.inbox")" "quota diagnostic"
+  assert_eq testgen "$(jq -r '.generation' "${HERDR_MONITOR_RECEIPT}.inbox")" "generation bound"
+  assert_eq "" "$(receipt_read_field 8)" "no fabricated completion proof"
+  assert_eq 0 "$(file_value "$FAKE_HERDR_CASE/prompt-attempts")" "never inject owner input"
+  printf '%s\n' unknown > "$FAKE_HERDR_CASE/status"
+  HERDR_MONITOR_INBOX=1 run_hook quota '{}'
+  assert_eq suppressed "$(receipt_read_field 4)" "duplicate quota suppressed"
+  printf '%s\n' 'ordinary output, not quota' > "$FAKE_HERDR_CASE/visible"
+  HERDR_MONITOR_INBOX=1 run_hook quota '{}'
+  assert_eq QUOTA_EXHAUSTED "$(jq -r '.quota.code' "${HERDR_MONITOR_RECEIPT}.inbox")" "no-quota probe cannot overwrite evidence"
+
+  setup_case quota-after-completion
+  write_complete_transcript
+  HERDR_MONITOR_INBOX=1 run_hook settled "$(payload)"
+  saved_inbox=$(< "${HERDR_MONITOR_RECEIPT}.inbox")
+  printf '%s\n' "You've hit your limit" > "$FAKE_HERDR_CASE/visible"
+  HERDR_MONITOR_INBOX=1 run_hook error '{}'
+  assert_eq "$saved_inbox" "$(< "${HERDR_MONITOR_RECEIPT}.inbox")" "completed result survives later quota"
+  assert_eq completed-task-quota "$(receipt_read_field 11)" "completed quota suppression reason"
+)
+
 tests=(
+  test_quota_hook_records_error_without_completion_or_owner_input
   test_quota_handoff_requires_checkpoint_identity_and_paused_worker
   test_claude_report_survives_receipt_ack_but_not_new_task
   test_compact_completion_command_handles_quoted_paths

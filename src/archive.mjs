@@ -6,12 +6,33 @@ import { stateRoot, hash, DEFAULT_CONFIG, writerLease, hasRunLeases } from "./pr
 
 export const projectRuns = (project) => path.join(stateRoot(), "projects", hash(project), "runs");
 const regular = (file) => { try { return fs.lstatSync(file).isFile(); } catch (e) { if (e.code === "ENOENT") return false; throw e; } };
+
+// Finished runs only: crashed watches/controls must not pin archives forever.
+// Unknown files and live/unverifiable PIDs remain untouched; never follow links.
+function cleanupControls(dir) {
+  const candidates = [], operations = path.join(dir, "operations");
+  const watch = path.join(dir, "watch.json");
+  if (regular(watch)) try { candidates.push([watch, JSON.parse(fs.readFileSync(watch, "utf8"))?.pid]); } catch { /* retain corrupt evidence */ }
+  for (const name of fs.readdirSync(dir)) {
+    const match = name.match(/^watch\.json\.([1-9][0-9]*)\.tmp$/);
+    if (match) candidates.push([path.join(dir, name), Number(match[1])]);
+  }
+  const directory = fs.existsSync(operations) && fs.lstatSync(operations).isDirectory();
+  if (directory) for (const name of fs.readdirSync(operations)) if (/^[1-9][0-9]*$/.test(name)) candidates.push([path.join(operations, name), Number(name)]);
+  for (const [file, pid] of candidates) {
+    if (!Number.isSafeInteger(pid) || pid <= 0 || !regular(file)) continue;
+    try { process.kill(pid, 0); }
+    catch (e) { if (e.code === "ESRCH") fs.unlinkSync(file); }
+  }
+  if (directory) try { fs.rmdirSync(operations); } catch (e) { if (!["ENOTEMPTY", "ENOENT", "EEXIST"].includes(e.code)) throw e; }
+}
 export function history(run, taskId) {
   let detail = run;
   if (taskId && run.finishedAt && regular(path.join(runDir(), "detail.json.gz"))) detail = JSON.parse(gunzipSync(fs.readFileSync(path.join(runDir(), "detail.json.gz")), { maxOutputLength: 100000000 }));
   const tasks = detail.tasks.filter((t) => !taskId || t.id === taskId);
   if (taskId && !tasks.length) throw runError("Unknown task ID");
   return { run: run.id, project: run.project, ...(run.finishedAt ? { finished: run.finishedAt } : {}),
+    ...(run.ownerHandoffs?.length ? { ownerHandoffs: run.ownerHandoffs.map((h) => ({ at: h.at, from: h.from.pane, to: h.to.pane, evidence: h.evidence.slice(0, 600) })) } : {}),
     ...(taskId && tasks[0]?.resultSource ? { resultSource: tasks[0].resultSource } : {}),
     tasks: tasks.slice(-8).map((t) => ({ task: t.id, phase: t.phase, role: t.role || t.kind, state: t.state, cwd: t.cwd, area: t.area, ...(t.summary && !(taskId && t.result) ? { summary: t.summary } : {}), ...(t.evidence ? { evidence: t.evidence } : {}), ...(t.commit ? { commit: t.commit } : {}), ...(taskId ? { prompt: t.prompt?.slice(0, 4000) || "(detail expired)", ...(t.prompt?.length > 4000 ? { truncated: true } : {}), ...(t.result ? { result: t.result.slice(0, 3500) } : {}), revisions: (t.revisions ?? []).map((v) => ({ at: v.at, prompt: v.prompt.slice(0, 1000), summary: v.summary })) } : {}) })),
     ...(taskId && tasks[0]?.handoffs?.length ? { handoffs: tasks[0].handoffs.map((h) => ({ at: h.at, from: h.from.kind, to: h.to.kind, model: h.to.model, quota: h.quota.scope, state: h.state, summary: h.summary.slice(0, 600), capture: h.capture })) } : {}),
@@ -52,6 +73,7 @@ export function finishRun() {
     }
     fs.writeFileSync(archive + ".tmp", gzipSync(JSON.stringify({ ...r, inboxes })), { mode: 0o600 });
     fs.renameSync(archive + ".tmp", archive);
+    if (r.ownerHandoffs) r.ownerHandoffs = r.ownerHandoffs.map(({ output, ...h }) => ({ ...h, evidence: h.evidence.slice(0, 600) }));
     for (const t of r.tasks) {
       delete t.prompt; delete t.revisions; delete t.result;
       if (t.handoffs) t.handoffs = t.handoffs.map(({ output, gitStatus, ...h }) => ({ ...h, summary: h.summary.slice(0, 600) }));
@@ -62,6 +84,7 @@ export function finishRun() {
   // Only generated paths, after the archive is durable. No repository scans,
   // recursive deletions, symlink traversal, or cleanup of unknown files.
   const r = JSON.parse(fs.readFileSync(path.join(dir, "run.json")));
+  cleanupControls(dir);
   const files = [path.join(dir, "context.json"), ...r.tasks.filter((t) => /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,39}$/.test(t.id)).map((t) => path.join(dir, `task-${t.id}.txt`))];
   for (const w of r.workers) {
     const expected = path.join(dir, "receipts", r.workspace, `${w.name}.event`);
@@ -98,6 +121,7 @@ export function collectArchives(project, now = Date.now()) {
     if (!Number.isInteger(policy.detailDays) || !Number.isInteger(policy.summaryDays) || policy.detailDays < 1 || policy.summaryDays < policy.detailDays) continue;
     const detail = path.join(dir, "detail.json.gz");
     try {
+      cleanupControls(dir);
       if (age > policy.detailDays && regular(detail)) { fs.unlinkSync(detail); detailsRemoved++; }
       if (age > policy.summaryDays && fs.readdirSync(dir).every((n) => n === "run.json")) { fs.unlinkSync(record); fs.rmdirSync(dir); summariesRemoved++; }
     } catch (e) { if (e.code !== "ENOENT" && e.code !== "ENOTEMPTY") throw e; }

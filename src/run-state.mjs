@@ -4,7 +4,8 @@ import { AxiError } from "axi-sdk-js";
 
 export const PHASES = { explore: 4, build: 3, integrate: 2, verify: 2, fix: 1 };
 export const runError = (message, code = "RUN_ERROR", help) => new AxiError(message, code, help ?? (code === "RUN_REQUIRED"
-  ? ["herdr-axi run init", "herdr-axi run init --help"] : ["herdr-axi run status", "herdr-axi run --help"]));
+  ? ["herdr-axi run init", "herdr-axi run init --help"] : ["NOT_RUN_OWNER", "OWNER_CHANGED"].includes(code)
+    ? ["herdr-axi run status", "herdr-axi run takeover --help"] : ["herdr-axi run status", "herdr-axi run --help"]));
 export const runDir = () => process.env.HERDR_AXI_RUN ? path.resolve(process.env.HERDR_AXI_RUN) : null;
 const maintenance = [];
 export const takeRunWarnings = () => maintenance.splice(0);
@@ -36,7 +37,7 @@ export function loadRun(dir = runDir()) {
 
 // Short local transaction only: never hold this lock across a backend call.
 // Fail closed after a crash; explicit unlock checks that the holder is dead.
-export function changeRun(fn, { allowFinished = false } = {}) {
+export function changeRun(fn, { allowFinished = false, readOnly = false } = {}) {
   const dir = runDir();
   if (!dir) throw runError("Set HERDR_AXI_RUN to the directory returned by run init", "RUN_REQUIRED");
   const lock = path.join(dir, "run.lock");
@@ -51,6 +52,7 @@ export function changeRun(fn, { allowFinished = false } = {}) {
     if (fs.existsSync(path.join(dir, "run.unlock"))) throw runError("Run lock recovery in progress; retry", "RUN_BUSY");
     const run = loadRun(dir);
     if (run.finishedAt && !allowFinished) throw runError("Archived run is read-only", "RUN_FINISHED");
+    if (readOnly) return fn(run);
     const before = new Map(run.tasks.map((t) => [t.id, t.state]));
     const phase = run.phase;
     const result = fn(run, { rollback, afterCommit });

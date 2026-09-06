@@ -60,12 +60,18 @@ Long assignments: `--prompt-file /external/task.txt` instead of `--prompt`.
 **Notification limit:** managed end hooks currently save durable inbox receipts;
 they do **not** push into the orchestrator conversation. A shell PID, detached `&`
 or Herdr toast does not guarantee an agent wakeup. `watch` defaults to 30 seconds;
-do not duplicate an active watcher.
+`run watch` is an equivalent alias. One active watcher per run; duplicates fail
+with `WATCH_ACTIVE`. Review reports are included in the watch response—no separate
+inbox fetch needed. Act on returned help, then continue independent work.
 
 **Subscription/session exhausted:** `fleet`, `run inbox`, `watch` and visible `read`
 recognize explicit quota errors, including Copilot's monthly-quota message even
 when its terminal reports `idle`. A tracked `watch` returns attention plus switch
 commands; it does not require a completion hook. No automatic provider/billing change.
+Managed hooks also record quota errors as generation-bound inbox errors, including
+when no completion proof exists. Detection is wording-based, not a subscription API:
+monthly quota, session limit, and “You've hit/reached your [usage/session/weekly/monthly]
+limit”. Ordinary retryable rate limits are excluded.
 
 ```sh
 herdr-axi run switch w1:pP --kind codex --model gpt-5.6-sol --effort high \
@@ -82,6 +88,34 @@ gets the checkpoint and verifies remaining work; full model context is not resto
 Failed switch: `run switch <task-id>` resumes the saved target. If the original worker
 resumed, `run switch <task-id> --cancel` retains it; unavailable/changed identities
 fail closed. Four switches/task maximum. Ordinary rate-limit retries are not quota.
+Native `unknown` is allowed only with a current quota error; the engine checks it
+again before closure. `working` is never closed. Agent and monitor panes must both
+be verified absent before the replacement is queued. Retired monitor hints are
+removed along with the retired runtime registry. Registry identity stays in the
+checkpoint; tombstone and reports stay until `run finish` archives and prunes them.
+Native provider sessions, detached jobs and external worktrees are not deleted.
+
+### Orchestrator exhausted
+
+Use an **explicitly authorized replacement agent in a separate tab of the same
+workspace**. Select the original `HERDR_AXI_RUN`; do not initialize another run:
+
+```sh
+herdr-axi run takeover --from w1:pOWNER \
+  --evidence 'Authorized handover; remaining work and known background jobs.'
+herdr-axi run inbox
+```
+
+Takeover requires the old owner's exact identity plus a current quota error, or
+verified absence of its pane. Active CLI controls/launchers block transfer; ordinary
+controls still run concurrently. Saves a bounded owner checkpoint and ownership
+history; keeps tasks, phase, acceptance, receipts and leases. Previous owner loses
+CLI control. Neither owner tab is closed, and external jobs are not stopped—inspect
+them before overlapping work. Managed workers cannot promote themselves.
+
+No automatic replacement launch, billing change or universal app wakeup. Existing
+workers continue recording receipts independently; the replacement reads their inbox.
+This is an explicit recovery path, not unattended supervisor failover.
 
 When a result needs review (replace `w1:pP` with the returned worker pane):
 
