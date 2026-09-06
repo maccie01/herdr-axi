@@ -2,7 +2,7 @@ import { AxiError } from "axi-sdk-js";
 import { listAgents, findAgent, fleet, runHerdr, requireHerdrEnv, projectAgent, STATES } from "./herdr.mjs";
 
 import { loadRun, runError } from "./run-state.mjs";
-import { runCommand, runStatus, watchRun, ownerCheck } from "./runs.mjs";
+import { runCommand, runStatus, watchRun } from "./runs.mjs";
 import { quotaError, switchHelp } from "./quota.mjs";
 
 // Fail loud on unknown flags (AXI #6) - a typo must never silently no-op.
@@ -165,7 +165,7 @@ export function dispatch(args) {
       [`wait first: herdr-axi wait ${a.pane} --until idle`, "or pick another: herdr-axi agents --state idle"]);
   if (loadRun() && !o.keys) throw runError("Managed tasks use run queue/next or run revise; direct prompts bypass generation and capacity checks", "MANAGED_DISPATCH");
   if (o.keys) {
-    if (loadRun()) ownerCheck(loadRun());
+    if (loadRun()) return runCommand("keys", { _: [a.pane, ...rest] });
     runHerdr(["agent", "send-keys", a.pane, ...rest]);
     return { pane: a.pane, keys: rest, help: [`check the result: herdr-axi read ${a.pane}`] };
   }
@@ -186,10 +186,12 @@ export function watch(args = []) {
 
 export function run(args) {
   const [action = "status", ...rest] = args;
+  if (action === "watch") return watch(rest);
   const specs = {
     init: { dir: "string", owner: "string", project: "string" }, status: {}, inbox: {}, next: {}, unlock: {}, leases: {}, config: { full: "boolean" }, history: { task: "string", all: "boolean" }, finish: {}, gc: {},
     queue: { kind: "string", role: "string", cwd: "string", area: "string", prompt: "string", "prompt-file": "string", after: "string" },
     move: { cwd: "string", area: "string" },
+    takeover: { from: "string", evidence: "string" },
     switch: { role: "string", kind: "string", model: "string", effort: "string", summary: "string", cancel: "boolean" },
     phase: { cap: "string" }, accept: { evidence: "string", "result-file": "string" }, revise: { prompt: "string", "prompt-file": "string" },
     cancel: {}, close: {}, recover: {},

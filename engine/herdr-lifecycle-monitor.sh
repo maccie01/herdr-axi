@@ -393,6 +393,9 @@ while true; do
       fi
       ;;
     *)
+      if [[ "$current_state" == "unknown" && "${HERDR_MONITOR_INBOX:-0}" == "1" ]]; then
+        notify quota || true
+      fi
       wait_worker_transition "$current_state" || {
         if report_lost; then exit 0; else exit 1; fi
       }

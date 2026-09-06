@@ -502,12 +502,21 @@ case "$command_name" in
         [[ "$live_name" == "$name" && "$live_workspace" == "$close_workspace_id" &&
           "$live_tab" == "$close_tab_id" && "$live_pane" == "$close_agent_pane" ]] ||
           close_locked_error "handoff live topology changed: $name"
-        [[ "$live_state" == "idle" || "$live_state" == "done" || "$live_state" == "blocked" ]] ||
-          close_locked_error "handoff refuses active/unknown worker: $name"
+        [[ "$live_state" == "idle" || "$live_state" == "done" || "$live_state" == "blocked" || "$live_state" == "unknown" ]] ||
+          close_locked_error "handoff refuses active worker: $name"
         printf '%s\n' "$info" | jq -e --argjson checkpoint "$handoff_json" '
           .result.agent | (.terminal_id == $checkpoint.from.terminal or $checkpoint.from.terminal == null) and
           (.agent_session.value == $checkpoint.from.session or $checkpoint.from.session == null)' >/dev/null ||
           close_locked_error "handoff worker identity changed: $name"
+        herdr agent read "$close_agent_pane" --source visible --lines 40 |
+          node "$script_dir/../src/quota.mjs" >/dev/null ||
+          close_locked_error "handoff quota no longer confirmed: $name"
+        handoff_identity_filter='.result.agent | {name,pane_id,tab_id,workspace_id,terminal_id,agent_session,agent_status}'
+        handoff_identity=$(printf '%s\n' "$info" | jq -c "$handoff_identity_filter")
+        refreshed_identity=$(agent_info "$close_agent_pane" | jq -c "$handoff_identity_filter") ||
+          close_locked_error "handoff worker no longer readable: $name"
+        [[ "$handoff_identity" == "$refreshed_identity" ]] ||
+          close_locked_error "handoff worker changed or resumed during quota check: $name"
       elif [[ "$live_state" == "working" || "$live_state" == "blocked" ]]; then
         close_locked_error "close refused: $name state=$live_state"
       fi

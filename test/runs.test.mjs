@@ -23,10 +23,11 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
     const file = path.join(dir, `${a.pane_id}.agent`), temp = `${file}.${process.pid}.tmp`;
     fs.writeFileSync(temp, JSON.stringify(a)); fs.renameSync(temp, file);
   };
-  const find = (id) => [owner, ...all()].find((a) => a.pane_id === id || a.name === id);
+  const currentOwner = () => fs.existsSync(path.join(dir, "owner-gone")) ? [] : [fs.existsSync(path.join(dir, "owner.json")) ? JSON.parse(fs.readFileSync(path.join(dir, "owner.json"))) : owner];
+  const find = (id) => [...currentOwner(), ...all()].find((a) => a.pane_id === id || a.name === id);
   const missing = (kind) => { console.error(JSON.stringify({ error: { code: `${kind}_not_found`, message: "not found" } })); process.exit(1); };
   if (group === "agent") {
-    if (action === "list") emit({ agents: [owner, ...all().filter((a) => a.agent)] });
+    if (action === "list") emit({ agents: [...currentOwner(), ...all().filter((a) => a.agent)] });
     else if (action === "get") emit({ agent: find(args[0]) ?? missing("agent") });
     else if (action === "start") {
       const ready = path.join(dir, "startup-delay"), deadline = Date.now() + 10000;
@@ -63,7 +64,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       const a = { ...owner, pane_id: `wTEST:p${id}`, tab_id: `wTEST:t${id}`, terminal_id: id, name: "", label: args[args.indexOf("--label") + 1], agent: "", agent_status: "idle", cwd: args[args.indexOf("--cwd") + 1] };
       save(a); emit({ tab: { tab_id: a.tab_id }, root_pane: { pane_id: a.pane_id } });
     } else if (action === "get") {
-      const a = [owner, ...all()].find((a) => a.tab_id === args[0]) ?? missing("tab");
+      const a = [...currentOwner(), ...all()].find((a) => a.tab_id === args[0]) ?? missing("tab");
       emit({ tab: { tab_id: a.tab_id, workspace_id: a.workspace_id, pane_count: 2 } });
     } else if (action === "rename") {
       assert.notEqual(args[0], owner.tab_id);
@@ -193,7 +194,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
     } finally { f.clean(); }
   });
 
-  test("switch refuses foreign owner, active/unknown worker, access escalation and non-quota errors", () => {
+  test("switch refuses foreign owner, active worker, access escalation and non-quota errors", () => {
     const f = fixture();
     try {
       const w = exhaustedWorker(f), before = f.state();
@@ -202,7 +203,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       assert.equal(f.execute(["run", "switch", w.pane, "--role", "verifier"]).status, 1);
       assert.equal(f.execute(["run", "switch", w.pane, "--kind", "copilot", "--model", "gpt-5.6-sol"]).status, 1);
       const file = path.join(f.dir, `${w.pane}.agent`), a = JSON.parse(fs.readFileSync(file));
-      for (const state of ["working", "unknown"]) { a.agent_status = state; fs.writeFileSync(file, JSON.stringify(a)); assert.equal(f.execute(args).status, 1); }
+      a.agent_status = "working"; fs.writeFileSync(file, JSON.stringify(a)); assert.equal(f.execute(args).status, 1);
       a.agent_status = "idle"; fs.writeFileSync(file, JSON.stringify(a));
       fs.writeFileSync(path.join(f.dir, `screen-${w.pane}`), "Rate limit exceeded; retry in 2 seconds");
       assert.match(f.execute(args).output, /QUOTA_NOT_CONFIRMED/);
@@ -268,6 +269,202 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       f.ok(["fleet"]);
       assert.equal(f.calls().filter((c) => c.action === "read").length, reads);
     } finally { if (watching) await watching; f.clean(); }
+  });
+
+  test("run watch alias includes review results and refuses a second live watcher", async () => {
+    const f = fixture(); let watching;
+    try {
+      f.queue("task"); f.ok(["run", "next"]);
+      const w = f.state().workers[0];
+      watching = f.asyncRun(["run", "watch", "--timeout-ms", "6000"]);
+      const marker = path.join(f.env.HERDR_AXI_RUN, "watch.json"), deadline = Date.now() + 2000;
+      while (!fs.existsSync(marker) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+      const duplicate = f.execute(["watch", "--timeout-ms", "100"]);
+      assert.equal(duplicate.status, 1); assert.match(duplicate.output, /WATCH_ACTIVE/);
+      f.complete(w);
+      const result = await watching;
+      assert.equal(result.status, 0, result.output);
+      assert.match(result.output, /checks passed/); assert.match(result.output, /run accept/);
+      assert.doesNotMatch(result.output, /help\[1\]: herdr-axi run inbox/);
+      assert(!fs.existsSync(marker));
+      assert.match(f.ok(["run", "watch", "--help"]), /Alias of herdr-axi watch/);
+    } finally { if (watching) await watching; f.clean(); }
+  });
+
+  for (const kind of ["codex", "claude"]) test(`${kind} quota switches safely even when native state is unknown; disposable monitor hints removed`, () => {
+    const f = fixture();
+    try {
+      const w = exhaustedWorker(f), r = f.state();
+      r.tasks[0].kind = kind; r.workers[0].kind = kind; f.write(r);
+      const file = path.join(f.dir, `${w.pane}.agent`), a = JSON.parse(fs.readFileSync(file));
+      a.agent = kind; a.agent_status = "unknown"; fs.writeFileSync(file, JSON.stringify(a));
+      fs.writeFileSync(path.join(f.dir, `screen-${w.pane}`), kind === "claude" ? "You've hit your limit · resets later" : "■ You've hit your usage limit. Try again later");
+      fs.writeFileSync(w.receipt + ".monitor-error", "old hint");
+      const alternate = kind === "codex" ? "claude" : "codex";
+      f.ok(["run", "switch", w.pane, "--kind", alternate, "--model", alternate === "claude" ? "opus" : "gpt-5.6-sol"]);
+      assert.equal(f.state().tasks[0].state, "queued");
+      assert(!fs.existsSync(w.receipt + ".monitor-error"));
+      assert(!fs.existsSync(w.receipt.replace(/\.event$/, ".task")));
+      assert(fs.existsSync(w.receipt), "retain tombstone for audit and safe retries");
+      assert(!fs.existsSync(w.receipt.replace(/\.event$/, ".json")), "engine removes the retired runtime registry");
+      assert.equal(f.state().tasks[0].handoffs[0].from.generation, w.generation, "registry identity retained in checkpoint");
+    } finally { f.clean(); }
+  });
+
+  function replacementOwner(f) {
+    const a = { ...owner, pane_id: "wTEST:pNEW", tab_id: "wTEST:tNEW", terminal_id: "new-terminal", name: "replacement", agent: "claude" };
+    fs.writeFileSync(path.join(f.dir, `${a.pane_id}.agent`), JSON.stringify(a));
+    return { HERDR_PANE_ID: a.pane_id, HERDR_TAB_ID: a.tab_id };
+  }
+
+  for (const transition of ["takeover", "finish"]) test(`active watch reports ${transition} distinctly and removes its watch record`, async () => {
+    const f = fixture(); let watching;
+    try {
+      f.queue("task"); f.ok(["run", "next"]);
+      const lists = f.calls().filter((c) => c.action === "list").length;
+      watching = f.asyncRun(["watch", "--timeout-ms", "6000"]);
+      const deadline = Date.now() + 2000;
+      while (f.calls().filter((c) => c.action === "list").length === lists && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+      if (transition === "takeover") {
+        const env = replacementOwner(f);
+        fs.writeFileSync(path.join(f.dir, "owner.json"), JSON.stringify({ ...owner, agent_status: "idle" }));
+        fs.writeFileSync(path.join(f.dir, `screen-${owner.pane_id}`), "You've hit your limit");
+        const result = f.execute(["run", "takeover", "--from", owner.pane_id, "--evidence", "Authorized replacement"], env);
+        assert.equal(result.status, 0, result.output);
+      } else {
+        const r = f.state(); r.finishedAt = new Date().toISOString();
+        r.tasks.forEach((t) => { t.state = "accepted"; }); r.workers.forEach((w) => { w.closed = true; }); f.write(r);
+      }
+      const result = await watching; assert.equal(result.status, 0, result.output);
+      assert.match(result.output, transition === "takeover" ? /reason: owner-changed/ : /reason: state-change/);
+      if (transition === "finish") assert.match(result.output, /finished:/);
+      assert(!fs.existsSync(path.join(f.env.HERDR_AXI_RUN, "watch.json")));
+    } finally { if (watching) await watching; f.clean(); }
+  });
+
+  test("quota owner takeover preserves tasks and leases, fences the previous owner and never closes either owner", () => {
+    const f = fixture();
+    try {
+      const worker = exhaustedWorker(f), env = replacementOwner(f), before = f.state();
+      fs.writeFileSync(path.join(f.dir, "owner.json"), JSON.stringify({ ...owner, agent_status: "unknown" }));
+      fs.writeFileSync(path.join(f.dir, `screen-${owner.pane_id}`), "You've hit your usage limit");
+      const args = ["run", "takeover", "--from", owner.pane_id, "--evidence", "User authorized transfer; finish review, preserve dirty files."];
+      const result = f.execute(args, env); assert.equal(result.status, 0, result.output);
+      const after = f.state();
+      assert.equal(after.owner.pane, env.HERDR_PANE_ID);
+      for (const key of ["id", "tasks", "workers", "phase", "limits", "config"]) assert.deepEqual(after[key], before[key]);
+      assert.match(after.ownerHandoffs[0].output, /usage limit/);
+      assert.equal(fs.readdirSync(path.join(f.env.HERDR_AXI_STATE_HOME, "writers")).length, 1);
+      assert.match(f.execute(["run", "next"]).output, /NOT_RUN_OWNER/);
+      assert.match(f.execute(["dispatch", worker.pane, "--keys", "enter"]).output, /NOT_RUN_OWNER/);
+      assert.equal(f.execute(["run", "inbox"], env).status, 0);
+      assert(!f.calls().some((c) => c.action === "close" || c.action === "send-keys"));
+      assert.match(f.ok(["run", "history"]), /ownerHandoffs/);
+      assert.equal(f.execute(args, env).status, 1, "repeated old --from cannot transfer twice");
+    } finally { f.clean(); }
+  });
+
+  test("takeover refuses active controls, wrong owners, working/changed occupants and worker promotion", () => {
+    const f = fixture();
+    try {
+      const env = replacementOwner(f), before = f.state();
+      const args = ["run", "takeover", "--from", owner.pane_id, "--evidence", "Explicitly authorized recovery"];
+      assert.match(f.execute(args, env).output, /OWNER_BUSY/);
+      fs.writeFileSync(path.join(f.dir, "owner.json"), JSON.stringify({ ...owner, agent_status: "idle" }));
+      assert.match(f.execute(args, env).output, /QUOTA_NOT_CONFIRMED/);
+      fs.writeFileSync(path.join(f.dir, `screen-${owner.pane_id}`), "You've hit your limit");
+      const ops = path.join(f.env.HERDR_AXI_RUN, "operations"); fs.mkdirSync(ops);
+      fs.writeFileSync(path.join(ops, String(process.pid)), "next");
+      assert.match(f.execute(args, env).output, /RUN_BUSY/);
+      fs.unlinkSync(path.join(ops, String(process.pid)));
+      fs.writeFileSync(path.join(f.dir, "owner.json"), JSON.stringify({ ...owner, terminal_id: "different", agent_status: "idle" }));
+      assert.match(f.execute(args, env).output, /OWNER_CHANGED/);
+      assert.match(f.execute(args, { ...env, HERDR_AXI_WORKER: "1" }).output, /NESTED_RUN/);
+      assert.deepEqual(f.state(), before);
+    } finally { f.clean(); }
+  });
+
+  test("takeover requires verified old-pane absence and keeps the same run", () => {
+    const f = fixture();
+    try {
+      const env = replacementOwner(f);
+      fs.writeFileSync(path.join(f.dir, "owner-gone"), "");
+      const result = f.execute(["run", "takeover", "--from", owner.pane_id, "--evidence", "User authorized replacement of closed owner"], env);
+      assert.equal(result.status, 0, result.output); assert.equal(f.state().ownerHandoffs[0].absent, true);
+      assert(!f.calls().some((c) => ["close", "prompt", "start"].includes(c.action)));
+    } finally { f.clean(); }
+  });
+
+  test("validated takeover reclaims only dead transaction/operation locks and never a live holder", () => {
+    const f = fixture();
+    try {
+      const env = replacementOwner(f), args = ["run", "takeover", "--from", owner.pane_id, "--evidence", "Authorized recovery after process exit"];
+      fs.writeFileSync(path.join(f.dir, "owner-gone"), "");
+      const lock = path.join(f.env.HERDR_AXI_RUN, "run.lock");
+      fs.writeFileSync(lock, String(process.pid));
+      assert.match(f.execute(args, env).output, /RUN_BUSY/);
+      assert.equal(fs.readFileSync(lock, "utf8"), String(process.pid));
+      const stopped = spawnSync(process.execPath, ["-e", ""], { encoding: "utf8" });
+      assert.equal(stopped.status, 0); assert.throws(() => process.kill(stopped.pid, 0), { code: "ESRCH" });
+      fs.writeFileSync(lock, String(stopped.pid));
+      const ops = path.join(f.env.HERDR_AXI_RUN, "operations"); fs.mkdirSync(ops);
+      fs.writeFileSync(path.join(ops, String(stopped.pid)), "next");
+      const result = f.execute(args, env); assert.equal(result.status, 0, result.output);
+      assert(!fs.existsSync(lock)); assert.deepEqual(fs.readdirSync(ops), []);
+    } finally { f.clean(); }
+  });
+
+  test("failed takeover publication leaves the original owner in control and no destructive calls", () => {
+    const f = fixture();
+    try {
+      const env = replacementOwner(f), before = f.state();
+      fs.writeFileSync(path.join(f.dir, "owner.json"), JSON.stringify({ ...owner, agent_status: "idle" }));
+      fs.writeFileSync(path.join(f.dir, `screen-${owner.pane_id}`), "Session limit reached");
+      const source = `import fs from 'node:fs'; import assert from 'node:assert/strict';
+        import {runCommand} from ${JSON.stringify(new URL("../src/runs.mjs", import.meta.url).href)};
+        const rename = fs.renameSync;
+        fs.renameSync = (a,b) => { if (b.endsWith('/run.json')) throw Error('publication failed'); return rename(a,b); };
+        await assert.rejects(runCommand('takeover',{_:[],from:${JSON.stringify(owner.pane_id)},evidence:'Authorized transfer'}), /publication failed/);`;
+      const result = spawnSync(process.execPath, ["--input-type=module", "-e", source], { env: { ...f.env, ...env }, encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr); assert.deepEqual(f.state(), before);
+      f.queue("still-owned");
+      assert(!f.calls().some((c) => ["close", "prompt", "start"].includes(c.action)));
+    } finally { f.clean(); }
+  });
+
+  test("durable quota inbox gives a switch hint without authorizing a stale quota close", () => {
+    const f = fixture();
+    try {
+      const w = exhaustedWorker(f);
+      fs.writeFileSync(path.join(f.dir, `screen-${w.pane}`), "ordinary idle output");
+      fs.writeFileSync(w.receipt + ".inbox", JSON.stringify({ generation: w.generation, event: "error", quota: { code: "QUOTA_EXHAUSTED", scope: "monthly" }, summary: "Monthly quota was reached" }));
+      const inbox = f.ok(["run", "inbox"]);
+      assert.match(inbox, /reportedQuota/); assert.match(inbox, /herdr-axi run switch/);
+      assert.match(f.execute(["run", "switch", w.pane, "--kind", "codex", "--model", "gpt-5.6-sol"]).output, /QUOTA_NOT_CONFIRMED/);
+      assert(!f.calls().some((c) => c.action === "close"));
+    } finally { f.clean(); }
+  });
+
+  test("failed next after handoff retains its pre-existing lease while rolling back new reservations", () => {
+    const f = fixture();
+    try {
+      const w = exhaustedWorker(f);
+      f.ok(["run", "switch", w.pane, "--kind", "codex", "--model", "gpt-5.6-sol"]);
+      f.ok(["run", "phase", "explore", "--cap", "2"]); f.queue("second");
+      const leases = path.join(f.env.HERDR_AXI_STATE_HOME, "writers"), name = fs.readdirSync(leases)[0];
+      const previous = fs.readFileSync(path.join(leases, name), "utf8");
+      const source = `import fs from 'node:fs'; import assert from 'node:assert/strict';
+        import {runCommand} from ${JSON.stringify(new URL("../src/runs.mjs", import.meta.url).href)};
+        const rename = fs.renameSync;
+        fs.renameSync = (a,b) => { if (b.endsWith('/run.json')) throw Error('publication failed'); return rename(a,b); };
+        await assert.rejects(runCommand('next',{_:[]}), /publication failed/);`;
+      const result = spawnSync(process.execPath, ["--input-type=module", "-e", source], { env: f.env, encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(fs.readdirSync(leases), [name]);
+      assert.equal(fs.readFileSync(path.join(leases, name), "utf8"), previous);
+      assert(f.state().tasks.every((t) => t.state === "queued"));
+      assert.equal(f.calls().filter((c) => c.action === "start").length, 1);
+    } finally { f.clean(); }
   });
 
   test("init exposes worker choices and queue syntax; config is compact with explicit full detail", () => {

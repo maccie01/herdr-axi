@@ -89,6 +89,13 @@ test("retention expires only verified archived records; active/unknown/symlink d
     const record = { schema: 1, storage: "managed", project, finishedAt: "2020-01-01T00:00:00.000Z", tasks: [{ id: "a", cwd: project, state: "accepted" }], workers: [{ closed: true }], config: validateConfig() };
     const create = (r) => { const d = path.join(root, randomUUID()); fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(path.join(d, "run.json"), JSON.stringify(r)); fs.writeFileSync(path.join(d, "detail.json.gz"), "archive"); return d; };
     const archived = create(record), active = create({ ...record, finishedAt: null }), foreign = create({ ...record, project: "/other" }), locked = create(record), unknown = create(record);
+    const stopped = spawnSync(process.execPath, ["-e", ""], { encoding: "utf8" });
+    assert.equal(stopped.status, 0); assert.throws(() => process.kill(stopped.pid, 0), { code: "ESRCH" });
+    fs.writeFileSync(path.join(archived, "watch.json"), JSON.stringify({ pid: stopped.pid }));
+    fs.writeFileSync(path.join(archived, `watch.json.${stopped.pid}.tmp`), "partial");
+    fs.mkdirSync(path.join(archived, "operations")); fs.writeFileSync(path.join(archived, "operations", String(stopped.pid)), "next");
+    fs.writeFileSync(path.join(active, "watch.json"), JSON.stringify({ pid: stopped.pid }));
+    fs.writeFileSync(path.join(unknown, "watch.json"), JSON.stringify({ pid: process.pid }));
     fs.writeFileSync(path.join(locked, "run.lock"), "123"); fs.writeFileSync(path.join(unknown, "user-notes"), "keep");
     const outside = fs.mkdtempSync(path.join(tmpdir(), "axi-outside-"));
     fs.symlinkSync(outside, path.join(root, randomUUID()));
@@ -97,6 +104,8 @@ test("retention expires only verified archived records; active/unknown/symlink d
       assert(!fs.existsSync(archived));
       for (const d of [active, foreign, locked]) assert(fs.existsSync(path.join(d, "detail.json.gz")));
       assert(fs.existsSync(path.join(unknown, "user-notes"))); assert(fs.existsSync(outside));
+      assert(fs.existsSync(path.join(unknown, "watch.json")), "live watchers survive cleanup");
+      assert(fs.existsSync(path.join(active, "watch.json")), "active run diagnostics are retained");
       const retained = create({ ...record, id: "retained" });
       const lease = leasePath(record.tasks[0]); fs.mkdirSync(path.dirname(lease), { recursive: true });
       for (const value of [JSON.stringify({ run: "retained", directory: retained, task: "a" }), "null"]) {
