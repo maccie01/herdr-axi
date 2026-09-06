@@ -131,6 +131,22 @@ Acceptance is explicit—not inferred from an idle terminal. Continue with `run 
 or change phase. At the end, `run close <pane>` for each accepted worker, then
 `run finish`. Only recorded worker tabs are closed; the owner's tab is excluded.
 
+**Stop unfinished work:** no acceptance or completion proof needed:
+
+```sh
+herdr-axi run cancel w1:pP --evidence 'Authorized stop; partial files saved; no background jobs.'
+```
+
+Explicitly stops even working agents. Saves a bounded terminal checkpoint and Git
+status, closes the **whole owned tab—agent and monitor**, then releases the task's
+slot and lease. Also handles a missing agent pane with its monitor still present;
+changed identities or extra panes fail closed. No fake acceptance. If interrupted,
+repeat `run cancel <task-id>`; checkpoint and reservation remain until verified closure.
+Missing agent: terminal capture unavailable, disclosed; existing inbox retained.
+Files, native sessions and detached jobs stay untouched. **Cancel/close first; only
+then review and remove external worktrees with Git, without force.** Deleting a
+worktree does not close its panes. New monitors use the durable run directory as cwd.
+
 ## Scope and scheduling
 
 - Address **pane IDs** (`w1:pP`), never titles. Selected runs scope fleet/read/wait
@@ -226,6 +242,7 @@ are **never automatically approved**.
 | --- | --- |
 | Startup blocked / `delivery:not_submitted` | `read <pane> --raw`; authorize explicit keys if appropriate; once ready, `run recover <task-id>` |
 | Uncertain submission or lost worker | Inspect first; `run recover <pane-or-task-id>` never blindly resends. Requeue requires verified absence of all recorded resources |
+| Stop unfinished task / orphan monitor tab | `run cancel <pane-or-task-id> --evidence "authorized stop; partial state/background jobs reviewed"`; not `accept` or worktree deletion |
 | Changed/unreadable identity | Control fails closed; diagnostics remain visible. Never adopt a replacement occupant |
 | Missing/corrupt result | Retry `run inbox`; if unrecoverable, `run accept <pane> --evidence "review" --result-file FILE` preserves a reviewed replacement (1–3500 characters), still requiring proof and settlement |
 | Leftover worktree reservation | `run leases` lists exact files; `run recover <accepted-or-cancelled-task-id>` repairs own terminal-task leases, including archived runs |

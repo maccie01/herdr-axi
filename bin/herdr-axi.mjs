@@ -67,7 +67,8 @@ const RUN_HELP = {
   Defaults 4/3/2/2/1. Never narrow below outstanding work; retire surplus accepted workers.
   Queued tasks keep their phase; return to it or cancel/requeue explicitly.`,
   close: `herdr-axi run close <pane>
-  Accepted owned workers only; generation and topology checks. Never closes the owner tab.`,
+  Accepted owned workers only; whole tab including monitor. Never the owner tab.
+  Unfinished work: run cancel <pane> --evidence "authorized stop; partial state/background jobs reviewed".`,
   switch: `herdr-axi run switch <pane-or-task-id> --kind claude|codex|copilot --model <model> [--effort high] [--summary "partial work / pending checks"]
   Or --role <configured-worker-role>; same read/write access, different provider.
   Quota/session limit only; live identity + current quota error required, including native unknown. Never working.
@@ -79,11 +80,17 @@ const RUN_HELP = {
   Interrupted switch: repeat run switch <task-id> without flags. Checkpoint/lease retained, no duplicate startup.
   Old worker resumed: run switch <task-id> --cancel, only while its original identity/resources still exist.
   Detection is automatic in fleet/inbox/watch; provider/cost change requires this explicit command.`,
-  cancel: `herdr-axi run cancel <task-id>
-  Queued tasks only.`,
+  cancel: `herdr-axi run cancel <pane-or-task-id> [--evidence "authorized stop; partial state/background jobs reviewed"]
+  Queued tasks: remove from queue. Started tasks: evidence required (1..4000 chars); explicitly stops even working agents.
+  Save bounded terminal checkpoint + Git status, then close the owned TAB (agent + monitor), without acceptance.
+  Also handles missing agent panes with a registered monitor remaining. Identity/topology drift fails closed.
+  Never deletes worktrees, commits, stashes or stops detached jobs. Review those separately.
+  Interrupted cancellation: repeat run cancel <task-id>; checkpoint/lease/slot remain until closure is verified.
+  Close/cancel tabs BEFORE removing external worktrees; never use worktree remove --force to clear panes.`,
   recover: `herdr-axi run recover <pane-or-task-id>
   Inspect first. Resume approved startup, acknowledge uncertain submission without resend,
-  or requeue only after all registered resources are verified absent. Accepted/cancelled tasks: repair their leftover lease only, even archived/offline.`,
+  or requeue only after all registered resources are verified absent. To stop unfinished work + monitor: run cancel --help.
+  Accepted/cancelled tasks: repair their leftover lease only, even archived/offline.`,
   leases: `herdr-axi run leases
   Exact lease paths, owner and holder tasks. Unknown ownership requires inspection, never automatic deletion.`,
   unlock: `herdr-axi run unlock
@@ -111,6 +118,7 @@ herdr-axi run next                     # reserve slots; start/reuse owned worker
 Continue independent work. One notification-backed watch if supported; otherwise block only when dependent.
 Results: run inbox -> review -> run accept <pane> --evidence "<checks>" OR run revise <pane> --prompt "<fix>".
 Finish: run close <accepted-pane>, then run finish.
+Stop unfinished work: run cancel <pane> --evidence "authorized stop; partial state/background jobs reviewed". Whole tab; no worktree deletion.
 Limits: run switch --help (worker); run takeover --help (owner). watch and run watch are equivalent.
 One writer/worktree; readers reserve too. Busy: run move --help. Never auto-approve dialogs.
 No fleet/config/layout preflight. No raw worker startup. Phases explore/build/integrate/verify/fix: 4/3/2/2/1.

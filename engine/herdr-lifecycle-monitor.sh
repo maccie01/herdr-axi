@@ -70,7 +70,7 @@ display_status() {
     # Tiny post-commit display hint; shell read only, no jq or run-file scan.
     # Bad metadata cannot erase an independently valid local completion receipt.
     if IFS=$'\t' read -r saved_schema saved_state saved_generation < "$task_file" 2>/dev/null &&
-      [[ "$saved_schema" == "herdr-task/1" && "$saved_state" =~ ^(starting|running|switching|uncertain|accepted|cancelled)$ && "$saved_generation" =~ ^[a-zA-Z0-9-]+$ ]]; then
+      [[ "$saved_schema" == "herdr-task/1" && "$saved_state" =~ ^(starting|running|switching|cancelling|uncertain|accepted|cancelled)$ && "$saved_generation" =~ ^[a-zA-Z0-9-]+$ ]]; then
       [[ "$generation" == "$saved_generation" ]] || proof_state=pending
       case "$saved_state" in running|accepted) ;; *) proof_state=pending ;; esac
       if [[ "$saved_state" != "running" ]]; then task_state="$saved_state"; fi

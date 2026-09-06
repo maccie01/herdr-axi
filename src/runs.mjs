@@ -75,7 +75,7 @@ function assertQuiescent(run) {
     if (!/^[1-9][0-9]*$/.test(name) || launcherAlive(Number(name))) throw runError("A run control is still active; retry takeover after it returns", "RUN_BUSY", ["herdr-axi run takeover --help"]);
     fs.unlinkSync(path.join(folder, name));
   }
-  if (pending(run).some((t) => ["starting", "switching"].includes(t.state) && launcherAlive(t.launcher))) throw runError("Launcher still active; wait for it before takeover", "RUN_BUSY");
+  if (pending(run).some((t) => ["starting", "switching", "cancelling"].includes(t.state) && launcherAlive(t.launcher))) throw runError("Launcher still active; wait for it before takeover", "RUN_BUSY");
 }
 
 function unlockRun() {
@@ -124,6 +124,7 @@ async function publishRun(fn) {
 function engineCall(args, run) {
   return new Promise((resolve, reject) => {
     const child = spawn("bash", [engine, ...args], {
+      cwd: runDir(),
       env: { ...process.env, HERDR_ENV: "1", HERDR_RECEIPT_ROOT: path.join(runDir(), "receipts"), HERDR_WORKSPACE_ID: run.workspace, HERDR_MONITOR_INBOX: "1", HERDR_AXI_MANAGED_TASK: "1", HERDR_AXI_AGENT_RATIO: String(run.config?.agentRatio ?? 0.75), HERDR_AXI_OWNER_PANE: run.owner.pane, HERDR_AXI_OWNER_TAB: run.owner.tab },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -214,7 +215,7 @@ export function runStatus() {
     catch (e) { return { task: t.id, pane: w?.pane ?? t.pane ?? rows.find((a) => a.backendName === t.name && a.workspace === run.workspace)?.pane ?? "pending", state: "unverified", error: e.message.slice(0, 300) }; }
     const stage = w?.stage === "created"
       ? (current?.pane === w.pane && current?.tab === w.tab ? current.stage : undefined) : w?.stage;
-    const state = t.state === "switching" ? "switching" : a?.state === "blocked" ? "blocked" : t.state === "starting" && launcherAlive(t.launcher) ? "starting" : w && !a ? "lost" : a?.state ?? (t.state === "starting" ? "uncertain" : t.state);
+    const state = ["switching", "cancelling"].includes(t.state) ? t.state : a?.state === "blocked" ? "blocked" : t.state === "starting" && launcherAlive(t.launcher) ? "starting" : w && !a ? "lost" : a?.state ?? (t.state === "starting" ? "uncertain" : t.state);
     const complete = t.state === "running" && w && receipt(w)?.complete && ["idle", "done"].includes(state);
     return { task: t.id, pane: w?.pane ?? t.pane ?? "pending", state: complete ? "review" : state, ...(stage === "created" ? { delivery: "not_submitted" } : t.state === "uncertain" ? { delivery: "uncertain" } : {}) };
   });
@@ -228,10 +229,11 @@ export function runStatus() {
   const context = run.config ? contextStatus(run, workers, verified) : null;
   for (const t of tasks) {
     const quota = context?.quotas.find((q) => q.pane === t.pane);
-    if (quota && !["review", "switching"].includes(t.state)) { t.state = "blocked"; t.quota = quota.scope; }
+    if (quota && !["review", "switching", "cancelling"].includes(t.state)) { t.state = "blocked"; t.quota = quota.scope; }
   }
   const exhausted = tasks.find((t) => t.quota);
   const switching = tasks.find((t) => t.state === "switching");
+  const cancelling = tasks.find((t) => t.state === "cancelling");
   const blocked = tasks.find((t) => t.state === "blocked");
   const ready = tasks.find((t) => t.delivery === "not_submitted" && ["idle", "done"].includes(t.state));
   return { owner: run.owner.pane, phase: run.phase, capacity: limit(run), occupied: tasks.length, queued: queued.length, tasks,
@@ -247,7 +249,7 @@ export function runStatus() {
     ...(!tasks.length && queued.length ? { backlog: queued.slice(0, 8).map((t) => ({ task: t.id, phase: t.phase, after: t.deps })), ...(queued.length > 8 ? { more: queued.length - 8 } : {}) } : {}),
     ...(!tasks.length && !queued.length && !parked.length ? { complete: true } : {}),
     ...(exhausted ? { quota: "Provider capacity exhausted, not task completion. Switch in this run; preserve worktree and lease. No WIP commit or new run needed." } : {}),
-    help: exhausted ? switchHelp(run, exhausted.pane, workers.find((w) => w.pane === exhausted.pane)?.kind) : switching ? [`herdr-axi run switch ${switching.task}`] : [blocked ? `herdr-axi read ${blocked.pane} --raw` : ready ? `herdr-axi run recover ${ready.pane}` : parkedAttention[0]?.help ?? (tasks.some((t) => !["working", "starting"].includes(t.state)) ? "herdr-axi run inbox" : context?.warnings.length ? `herdr-axi read ${context.warnings[0].pane}` : queued.length && tasks.length < limit(run) ? "herdr-axi run next" : tasks.length ? "herdr-axi watch" : parked.length ? `herdr-axi run close ${parked[0]}` : run.tasks.length ? "herdr-axi run finish" : "herdr-axi run --help")] };
+    help: cancelling ? [`herdr-axi run cancel ${cancelling.task}`] : exhausted ? switchHelp(run, exhausted.pane, workers.find((w) => w.pane === exhausted.pane)?.kind) : switching ? [`herdr-axi run switch ${switching.task}`] : [blocked ? `herdr-axi read ${blocked.pane} --raw` : ready ? `herdr-axi run recover ${ready.pane}` : parkedAttention[0]?.help ?? (tasks.some((t) => !["working", "starting"].includes(t.state)) ? "herdr-axi run inbox" : context?.warnings.length ? `herdr-axi read ${context.warnings[0].pane}` : queued.length && tasks.length < limit(run) ? "herdr-axi run next" : tasks.length ? "herdr-axi watch" : parked.length ? `herdr-axi run close ${parked[0]}` : run.tasks.length ? "herdr-axi run finish" : "herdr-axi run --help")] };
 }
 
 // Compare actionable state, not telemetry timestamps/percentages or display text.
@@ -494,13 +496,61 @@ async function executeRunCommand(action, o) {
     return { phase, capacity: cap, ...(retired.length ? { retired } : {}), help: [retired.some((w) => w.error) ? "herdr-axi run inbox" : updated.tasks.some((t) => t.state === "queued" && t.phase === phase) ? "herdr-axi run next" : pending(updated).length ? "herdr-axi watch" : "herdr-axi run queue --help"] };
   }
   if (action === "cancel") {
-    changeRun((r, { afterCommit }) => {
-      const t = r.tasks.find((t) => t.id === o._[0]);
-      if (!t || t.state !== "queued") throw runError("Only queued tasks can be cancelled; never abandon live work");
-      t.state = "cancelled";
-      afterCommit.push(() => writerLease(r, t, true));
+    const task = [...run.tasks].reverse().find((t) => t.id === o._[0] || t.pane === o._[0]);
+    if (!task || task.state === "accepted") throw runError("Cancel requires an unfinished owned task; accepted workers use run close", "NOT_CANCELLABLE", ["herdr-axi run cancel --help"]);
+    if (["queued", "cancelled"].includes(task.state)) {
+      changeRun((r, { afterCommit }) => {
+        const t = r.tasks.find((t) => t.id === task.id);
+        if (t.state !== task.state) throw runError("Task changed; retry", "RUN_BUSY");
+        t.state = "cancelled";
+        afterCommit.push(() => writerLease(r, t, true));
+      });
+      return { cancelled: task.id, help: ["herdr-axi run status"] };
+    }
+    const retry = `herdr-axi run cancel ${task.id}`;
+    if (["starting", "switching", "cancelling"].includes(task.state) && launcherAlive(task.launcher)) throw runError("Task control still running; wait before cancelling", "RUN_BUSY", [retry]);
+    if (task.state !== "cancelling" && (!o.evidence?.trim() || o.evidence.length > 4000)) throw runError("Stopping unfinished work requires --evidence (1..4000 chars): authorization, saved partial state and background jobs. No acceptance required.", "CANCEL_EVIDENCE_REQUIRED", [`${retry} --evidence 'Authorized stop; partial state and background jobs reviewed'`]);
+    if (task.state === "cancelling" && o.evidence && o.evidence !== task.cancellation.evidence) throw runError("Cancellation already checkpointed; resume without changing evidence", "CANCEL_PENDING", [retry]);
+    const rows = listAgents({ all: true });
+    const worker = task.cancellation?.from ?? ownedWorkers(run).find((w) => w.name === task.name && !w.closed);
+    const live = safeWorker(run, worker, rows);
+    let checkpoint = task.cancellation;
+    if (!checkpoint) {
+      let output = "", source = "unavailable";
+      if (live) {
+        try { output = runHerdr(["agent", "read", worker.pane, "--source", "recent-unwrapped", "--lines", "2000"], { timeoutMs: 3000, text: true }); source = "history"; }
+        catch { output = runHerdr(["agent", "read", worker.pane, "--source", "visible", "--lines", "60"], { timeoutMs: 2000, text: true }); source = "visible"; }
+      }
+      const git = spawnSync("git", ["-C", task.cwd, "status", "--porcelain=v1", "--untracked-files=all"], { encoding: "utf8", timeout: 3000, maxBuffer: 262144, env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } });
+      if (git.error) throw runError(`Cannot checkpoint worktree status: ${git.error.message}`, "CHECKPOINT_FAILED");
+      checkpoint = { at: new Date().toISOString(), from: worker, evidence: o.evidence, output: output.slice(-32000), capture: { source, truncated: true }, gitStatus: git.status === 0 ? git.stdout.slice(0, 8000) : `unavailable: ${git.stderr.slice(0, 600)}` };
+    }
+    changeRun((r) => {
+      const t = r.tasks.find((t) => t.id === task.id);
+      if (t.state !== task.state || t.launcher !== task.launcher || t.name !== task.name) throw runError("Task changed; retry", "RUN_BUSY");
+      t.cancellation = checkpoint; t.state = "cancelling"; t.launcher = process.pid; t.pane = worker.pane;
+      if (!r.workers.some((w) => w.name === worker.name)) r.workers.push(worker);
     });
-    return { cancelled: o._[0] };
+    try {
+      await engineCall(["close", worker.name, "--cancel", path.join(runDir(), "run.json")], run);
+      for (const [kind, id] of [["tab", worker.tab], ["pane", worker.pane], ["pane", worker.monitor]]) {
+        if (!id && kind === "pane" && worker.stage === "created") continue;
+        try { runHerdr([kind, "get", id]); throw runError("Registered resources remain", "CANCEL_PENDING"); }
+        catch (e) { if (e.code !== "UNKNOWN_AGENT") throw e; }
+      }
+      await publishRun((r, { afterCommit }) => {
+        const t = r.tasks.find((t) => t.id === task.id);
+        if (t.state !== "cancelling" || t.cancellation.from.generation !== worker.generation) throw runError("Cancellation changed", "CANCEL_PENDING");
+        r.workers.find((w) => w.name === worker.name).closed = true;
+        t.state = "cancelled"; t.evidence = checkpoint.evidence.slice(0, 1000);
+        delete t.launcher; delete t.error;
+        afterCommit.push(() => writerLease(r, t, true));
+      });
+    } catch (e) {
+      try { await publishRun((r) => { const t = r.tasks.find((t) => t.id === task.id); if (t.state === "cancelling") { delete t.launcher; t.error = e.message.slice(0, 600); } }); } catch { /* durable checkpoint retains capacity and lease */ }
+      throw runError(`Cancellation incomplete; checkpoint and reservation retained: ${e.message}`, "CANCEL_PENDING", [retry]);
+    }
+    return { cancelled: task.id, closed: worker.pane, tab: worker.tab, capture: checkpoint.capture.source, note: "Owned tab, agent and monitor verified absent. Not accepted; files/worktree untouched. Bounded checkpoint saved; detached jobs are not stopped. Remove external worktrees only after reviewing saved/dirty work, never as a way to close panes.", help: ["herdr-axi run status"] };
   }
   const rows = listAgents({ all: true });
   if (action === "keys") {
@@ -597,6 +647,7 @@ async function executeRunCommand(action, o) {
   }
   if (action === "recover") {
     const t = [...run.tasks].reverse().find((t) => t.id === o._[0] || t.pane === o._[0]);
+    if (t?.state === "cancelling") throw runError("Cancellation checkpoint exists; resume cancellation, not recovery", "CANCEL_PENDING", [`herdr-axi run cancel ${t.id}`]);
     if (!t || !["starting", "uncertain", "running"].includes(t.state)) throw runError("Task is not active");
     if (t.state === "starting" && t.launcher) {
       try { process.kill(t.launcher, 0); throw runError("Launcher still running; wait for its result"); }
@@ -620,7 +671,7 @@ async function executeRunCommand(action, o) {
         return { requeued: t.id, note: "Registered tab and panes verified absent; no prompt resent.", help: ["herdr-axi run next"] };
       }
     }
-    if (t.state === "running") throw runError("Running task still has registered resources; inspect before cleanup");
+    if (t.state === "running") throw runError("Registered resources remain. Recover requeues absent workers; to stop this task and close its whole tab, cancel with explicit evidence. Do not remove its worktree.", "RESOURCES_REMAIN", [`herdr-axi run cancel ${t.id} --evidence 'Authorized stop; partial state and background jobs reviewed'`]);
     const worker = workerRecord(run, t);
     const live = safeWorker(run, worker, rows);
     if (!live || !["working", "blocked", "idle", "done"].includes(live.state)) throw runError("Cannot recover an absent or unknown worker");
@@ -701,7 +752,7 @@ async function executeRunCommand(action, o) {
     if (!o.evidence?.trim()) throw runError("accept requires --evidence describing coordinator review and checks");
     if (!live || !["idle", "done"].includes(live.state) || !receipt(worker)?.complete) {
       const quota = live && live.state !== "working" ? quotaError(runHerdr(["agent", "read", pane, "--source", "visible", "--lines", "24"], { timeoutMs: 1000, text: true })) : null;
-      throw runError(quota ? "Quota exhausted, not completed. Switch the existing task; no acceptance or new run needed." : "Acceptance requires live settlement and this generation's completion receipt", quota ? "QUOTA_EXHAUSTED" : "NOT_COMPLETE", quota ? switchHelp(run, pane, worker.kind) : undefined);
+      throw runError(quota ? "Quota exhausted, not completed. Switch the existing task; no acceptance or new run needed." : "Acceptance requires live settlement and this generation's completion receipt. To stop unfinished work instead, use cancel with explicit evidence.", quota ? "QUOTA_EXHAUSTED" : "NOT_COMPLETE", quota ? switchHelp(run, pane, worker.kind) : ["herdr-axi run inbox", `herdr-axi run cancel ${pane} --evidence 'Authorized stop; partial state and background jobs reviewed'`]);
     }
     let report;
     try {
@@ -745,7 +796,7 @@ async function executeRunCommand(action, o) {
   }
   if (action === "close") {
     changeRun((r) => {
-      if (pending(r).some((t) => t.pane === pane) || task?.state !== "accepted") throw runError("Close requires coordinator acceptance", "NOT_ACCEPTED");
+      if (pending(r).some((t) => t.pane === pane) || task?.state !== "accepted") throw runError("Close requires acceptance. To stop unfinished work and its monitor, use cancel; never fabricate completion or remove the worktree.", "NOT_ACCEPTED", [`herdr-axi run cancel ${pane} --evidence 'Authorized stop; partial state and background jobs reviewed'`]);
       r.workers.find((w) => w.pane === pane).closing = true;
     });
     await engineCall(["close", worker.name], run);

@@ -408,3 +408,33 @@ that the runtime registry survived closure, stale help wording, and an old asser
 that allowed late post-close input notifications; expectations/docs were reconciled
 with the verified cleanup behavior. New failure-injection tests cover retained-lease
 rollback, owner publication failure, live/dead locks, stale quota and watcher transfer.
+
+## Explicit cancellation and orphan tabs (6 September 2026)
+
+- Reproduced structurally: unfinished task → `close` rejects acceptance → raw
+  worker-pane closure leaves monitor/tab → `recover` still sees resources.
+- `run cancel <pane-or-task-id> --evidence "authorized stop; partial state"`:
+  durable bounded checkpoint, verified whole-tab closure, then cancelled state and
+  lease release. Never completion/acceptance, Git mutation or worktree removal.
+- Retry tests: failed checkpoint leaves worker running; failed final publication
+  retains cancellation/lease; retry recognizes the tombstone and never closes twice.
+- Fixture topology now stores monitor panes independently of agents. Covers deleted
+  worktree + missing worker + surviving monitor, extra panes, changed session/terminal,
+  owner protection, active control, blocked startup without receipt, archive retention.
+- New monitor cwd: receipt directory, not worker worktree. Managed engine calls also
+  use the run directory. Existing live monitor shells are not modified retroactively.
+
+Live smoke: isolated `/private/tmp/herdr-axi-cancel-live.e7QB04/project`, run sibling
+`run`; Copilot worker `w1B:pY`, tab `w1B:tQ`, name `axi-073d86fe-922a2224`.
+Copilot stopped at folder trust before submission; no approval sent. New `run cancel`
+saved visible output, closed the exact owned tab and verified absence. `run finish`
+archived the test and pruned three runtime files. No task output created, no other
+agent/tab controlled. The bounded archive remains outside the repository.
+
+Live limitation: startup trust prevented creating the monitor and executing the
+scratch task. Monitor-only cleanup and active-worker cancellation were fixture-tested,
+not live-tested. The user's pre-existing orphan tabs were intentionally untouched.
+
+Final validation: Bash 44/44; JavaScript 93/93, including the stale-launcher-PID
+regression. Node/Bash syntax and diff checks passed. No new dependency or scheduler;
+existing close/receipt/archive paths reused.
