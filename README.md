@@ -9,7 +9,7 @@ status, bounded task queues and pane-safe control.
 From this private repository; GitHub access required:
 
 ```sh
-git clone https://github.com/jxn-cmd/herdr-axi.git
+git clone https://github.com/maccie01/herdr-axi.git
 cd herdr-axi
 npm ci
 npm link
