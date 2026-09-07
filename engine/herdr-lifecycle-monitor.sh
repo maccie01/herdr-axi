@@ -357,6 +357,10 @@ while true; do
   current_state=$(state "$agent_name") || {
     if report_lost; then exit 0; else exit 1; fi
   }
+  if [[ -n "${HERDR_MONITOR_READY:-}" ]]; then
+    printf 'herdr-monitor-ready:%s\n' "$HERDR_MONITOR_READY"
+    unset HERDR_MONITOR_READY
+  fi
   if [[ "$current_state" == "working" && "$pending_rearm" == "true" ]]; then
     apply_pending_rearm || exit 1
   fi

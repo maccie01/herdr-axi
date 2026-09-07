@@ -115,7 +115,7 @@ case "$group:$action" in
   agent:get)
     [[ ! -e "$case_dir/agent-get-fail" ]] || exit 1
     name="${1:-worker}"
-    [[ "$name" != "pane-1" ]] || name=worker
+    [[ "$name" != "pane-1" ]] || name=$(read_value "$case_dir/started-name" worker)
     status=$(status_for "$name")
     kind=$(read_value "$case_dir/kind" copilot)
     workspace=$(read_value "$case_dir/workspace" ws)
@@ -128,9 +128,10 @@ case "$group:$action" in
       --arg kind "$kind" \
       --arg workspace "$workspace" \
       --arg session "$session" \
+      --arg terminal "$(read_value "$case_dir/terminal" terminal-1)" \
       --arg tab_id "$tab_id" \
       --arg pane_id "$pane_id" \
-      '{result:{agent:{name:$name,agent_status:$status,agent:$kind,workspace_id:$workspace,agent_session:{value:$session},tab_id:$tab_id,pane_id:$pane_id,cwd:"/tmp"}}}'
+      '{result:{agent:{name:$name,agent_status:$status,agent:$kind,workspace_id:$workspace,agent_session:{value:$session},terminal_id:$terminal,tab_id:$tab_id,pane_id:$pane_id,cwd:"/tmp"}}}'
     ;;
   agent:prompt)
     target="${1:?}"
@@ -156,10 +157,16 @@ case "$group:$action" in
         release_case_lock
         exit 1
       fi
+      prompt_mode=$(read_value "$case_dir/worker-prompt-mode" success)
+      if [[ "$prompt_mode" == blocked ]]; then
+        printf '%s\n' blocked > "$case_dir/status"
+        release_case_lock
+        jq -nc '{error:{code:"agent_blocked"}}'
+        exit 1
+      fi
       worker_prompts=$(read_value "$case_dir/worker-prompts" 0)
       printf '%s\n' "$((worker_prompts + 1))" > "$case_dir/worker-prompts"
       printf '%s\n' "$message" > "$case_dir/visible"
-      prompt_mode=$(read_value "$case_dir/worker-prompt-mode" success)
       case "$prompt_mode" in
         success)
           printf '%s\n' working > "$case_dir/status"
@@ -182,12 +189,6 @@ case "$group:$action" in
           : > "$case_dir/start-on-read"
           release_case_lock
           jq -nc '{error:{code:"agent_prompt_stalled"}}'
-          exit 1
-          ;;
-        blocked)
-          printf '%s\n' blocked > "$case_dir/status"
-          release_case_lock
-          jq -nc '{error:{code:"agent_blocked"}}'
           exit 1
           ;;
         *)
@@ -262,6 +263,7 @@ case "$group:$action" in
     fi
     ;;
   agent:start)
+    printf '%s\n' "$1" > "$case_dir/started-name"
     if [[ -e "$case_dir/start-blocked" ]]; then
       printf '%s\n' blocked > "$case_dir/status"
       if [[ -r "$case_dir/start-hook" ]]; then
@@ -295,7 +297,7 @@ case "$group:$action" in
     : > "$case_dir/tab-alive"
     : > "$case_dir/pane-1-alive"
     rm -f "$case_dir/pane-ready"
-    jq -nc '{result:{root_pane:{pane_id:"pane-1"},tab:{tab_id:"tab-1"}}}'
+    jq -nc '{result:{root_pane:{pane_id:"pane-1",terminal_id:"terminal-1"},tab:{tab_id:"tab-1"}}}'
     ;;
   tab:get)
     acquire_case_lock
@@ -334,6 +336,10 @@ case "$group:$action" in
     printf '%s\n' closed > "$case_dir/closed"
     ;;
   pane:wait-output)
+    if [[ "${1:-}" == monitor-1 && -e "$case_dir/monitor-no-start" ]]; then
+      jq -nc '{error:{code:"timeout",message:"monitor did not start"}}'
+      exit 1
+    fi
     [[ ! -e "$case_dir/pane-wait-fail" ]] || exit 1
     ready_delay=$(read_value "$case_dir/pane-ready-delay" 0)
     sleep "$ready_delay"
@@ -1783,6 +1789,53 @@ test_blocked_working_cycle_preserves_assignment_and_proof() (
   assert_file_absent "$FAKE_HERDR_CASE/tab-alive" "resumed assignment remains cancellable"
 )
 
+test_rejected_prompt_reuses_monitor_and_cannot_replay_ambiguous_delivery() (
+  setup_case rejected-prompt
+  export HERDR_AXI_MANAGED_TASK=1
+  prompt_file="$FAKE_HERDR_CASE/worker.txt"
+  printf '%s\n' "bounded task" > "$prompt_file"
+  printf '%s\n' blocked > "$FAKE_HERDR_CASE/worker-prompt-mode"
+  if bash "$orchestrator_script" start --name worker --kind copilot --cwd "$FAKE_HERDR_CASE" \
+    --prompt-file "$prompt_file" --workspace ws --orchestrator-agent orch >/dev/null 2>&1; then fail "blocked prompt claimed submission"; fi
+  registry="$HERDR_RECEIPT_ROOT/ws/worker.json"
+  assert_eq rejected "$(jq -r '.stage' "$registry")" "definite rejection durable"
+  assert_eq 0 "$(file_value "$FAKE_HERDR_CASE/worker-prompts")" "blocked rejects before input"
+  generation=$(jq -r '.generation' "$registry")
+  printf '%s\n' idle > "$FAKE_HERDR_CASE/status"
+  printf '%s\n' stalled-hidden > "$FAKE_HERDR_CASE/worker-prompt-mode"
+  if bash "$orchestrator_script" retry worker --prompt-file "$prompt_file" >/dev/null 2>&1; then fail "ambiguous retry claimed success"; fi
+  assert_eq submitting "$(jq -r '.stage' "$registry")" "ambiguous retry is not rejected"
+  assert_eq "$generation" "$(jq -r '.previous_generation' "$registry")" "retry linked generation"
+  assert_eq 1 "$(file_value "$FAKE_HERDR_CASE/worker-prompts")" "one actual delivery"
+  if bash "$orchestrator_script" retry worker --prompt-file "$prompt_file" >/dev/null 2>&1; then fail "ambiguous delivery was replayable"; fi
+  assert_eq 1 "$(file_value "$FAKE_HERDR_CASE/worker-prompts")" "second retry sends nothing"
+  assert_eq 1 "$(call_count '^pane split ')" "existing monitor retained"
+  assert_eq 1 "$(call_count '^tab create ')" "existing tab retained"
+)
+
+test_registry_native_identity_survives_start_and_fences_capture() (
+  setup_case registry-native-identity
+  # shellcheck source=herdr-receipt.sh
+  source "$receipt_script"
+  prompt_file="$FAKE_HERDR_CASE/worker.txt"
+  printf '%s\n' "bounded task" > "$prompt_file"
+  bash "$orchestrator_script" start --name worker --kind copilot \
+    --cwd "$FAKE_HERDR_CASE" --prompt-file "$prompt_file" --workspace ws --orchestrator-agent orch >/dev/null
+  registry="$HERDR_RECEIPT_ROOT/ws/worker.json"
+  assert_eq terminal-1 "$(jq -r '.native_identity.terminal' "$registry")" "durable terminal"
+  assert_eq session-1 "$(jq -r '.native_identity.session' "$registry")" "durable session"
+  before=$(< "$registry")
+  printf '%s\n' replacement-terminal > "$FAKE_HERDR_CASE/terminal"
+  if herdr_registry_capture_identity "$registry" true 2>/dev/null; then fail "capture adopted replacement terminal"; fi
+  assert_eq "$before" "$(< "$registry")" "failed capture preserves registry"
+  printf '%s\n' terminal-1 > "$FAKE_HERDR_CASE/terminal"
+  printf '%s\n' replacement-session > "$FAKE_HERDR_CASE/session"
+  if herdr_registry_capture_identity "$registry" 2>/dev/null; then fail "observation adopted replacement session"; fi
+  assert_eq "$before" "$(< "$registry")" "failed observation preserves registry"
+  herdr_registry_capture_identity "$registry" true
+  assert_eq replacement-session "$(jq -r '.native_identity.session' "$registry")" "own prompt can rotate native session"
+)
+
 test_worker_prompt_failure_is_not_success() (
   setup_case worker-prompt-failure
   write_complete_transcript
@@ -1949,6 +2002,113 @@ test_managed_inbox_never_prompts_owner() (
   assert_eq "$(receipt_read_field 10)" "$(jq -r '.generation' "${HERDR_MONITOR_RECEIPT}.inbox")" "inbox generation"
   [[ "$(jq '.summary | length' "${HERDR_MONITOR_RECEIPT}.inbox")" -le 600 ]] || fail "unbounded inbox"
   assert_eq delivered "$(receipt_read_field 4)" "inbox receipt completion"
+)
+
+test_completion_report_survives_later_lifecycle_events() (
+  for format in current legacy; do
+    setup_case "completion-report-$format"
+    write_complete_transcript
+    HERDR_MONITOR_INBOX=1 run_hook settled "$(payload)"
+    if [[ "$format" == legacy ]]; then
+      jq 'del(.completion)' "${HERDR_MONITOR_RECEIPT}.inbox" > "$TMPDIR/legacy-inbox"
+      mv "$TMPDIR/legacy-inbox" "${HERDR_MONITOR_RECEIPT}.inbox"
+    fi
+    printf '%s\n' blocked > "$FAKE_HERDR_CASE/status"
+    HERDR_MONITOR_INBOX=1 run_hook input '{"message":"UNRELATED_PERMISSION_QUESTION"}'
+    assert_eq input "$(jq -r '.event' "${HERDR_MONITOR_RECEIPT}.inbox")" "input remains actionable"
+    for event in error lost; do
+      HERDR_MONITOR_INBOX=1 run_hook "$event" '{"message":"Later event"}'
+      assert_eq "$event" "$(jq -r '.event' "${HERDR_MONITOR_RECEIPT}.inbox")" "$event remains actionable"
+      assert_eq 'native completion' "$(jq -r '.completion.detail' "${HERDR_MONITOR_RECEIPT}.inbox")" "$format result survives $event"
+      assert_eq generation-one "$(jq -r '.completion.generation' "${HERDR_MONITOR_RECEIPT}.inbox")" "$format report bound to generation"
+    done
+    printf '%s\n' done > "$FAKE_HERDR_CASE/status"
+    HERDR_MONITOR_INBOX=1 run_hook settled '{"last_assistant_message":"Later screen, not original report"}'
+    assert_eq 'native completion' "$(jq -r '.completion.detail' "${HERDR_MONITOR_RECEIPT}.inbox")" "duplicate settled cannot overwrite report"
+    arm_completion_generation generation-two
+    HERDR_MONITOR_INBOX=1 run_hook input '{"message":"New task approval"}'
+    assert_eq null "$(jq -r '.completion' "${HERDR_MONITOR_RECEIPT}.inbox")" "new generation excludes old result"
+    HERDR_MONITOR_INBOX=1 run_hook settled '{"last_assistant_message":"NEW_COMPLETION"}'
+    assert_eq NEW_COMPLETION "$(jq -r '.completion.detail' "${HERDR_MONITOR_RECEIPT}.inbox")" "new generation owns new report"
+  done
+)
+
+test_completion_truncation_distinguishes_summary_from_result() (
+  for source in payload native; do
+    for size in 1000 3500 3501; do
+      setup_case "completion-truncation-$source-$size"
+      write_complete_transcript
+      report=$(jq -nr --argjson size "$size" '"x" * $size')
+      if [[ "$source" == native ]]; then
+        jq -nc --arg text "$report" '{type:"session.task_complete",data:{summary:$text}}' >> "$(transcript_path)"
+        report_payload='{}'
+      else
+        report_payload=$(jq -nc --arg text "$report" '{last_assistant_message:$text}')
+      fi
+      HERDR_MONITOR_INBOX=1 run_hook settled "$report_payload"
+      expected=false
+      if (( size > 3500 )); then expected=true; fi
+      assert_eq true "$(jq -r '.truncated' "${HERDR_MONITOR_RECEIPT}.inbox")" "$source summary shortened"
+      assert_eq "$expected" "$(jq -r '.completion.truncated' "${HERDR_MONITOR_RECEIPT}.inbox")" "$source saved result truncation at $size"
+      assert_eq "$((size > 3500 ? 3500 : size))" "$(jq '.completion.detail | length' "${HERDR_MONITOR_RECEIPT}.inbox")" "$source retained detail length"
+    done
+  done
+)
+
+test_split_monitor_preserves_selected_backend() (
+  setup_case split-monitor-backend
+  worker_prompt="$FAKE_HERDR_CASE/worker.txt"
+  printf '%s\n' 'bounded task' > "$worker_prompt"
+  HERDR_MONITOR_INBOX=1 bash "$worker_script" --name worker --kind copilot \
+    --cwd "$FAKE_HERDR_CASE" --prompt-file "$worker_prompt" \
+    --workspace ws --orchestrator-agent orch >/dev/null
+  monitor_command=$(< "$FAKE_HERDR_CASE/monitor-command")
+  selected_backend="$(cd -- "$fake_bin" && pwd)/herdr"
+  rg -Fq -- "--env HERDR_BIN=$selected_backend" "$FAKE_HERDR_CASE/calls" || fail "native hooks lost backend selection"
+  mkdir "$FAKE_HERDR_CASE/server-bin"
+  ln -s /usr/bin/false "$FAKE_HERDR_CASE/server-bin/herdr"
+  env -u HERDR_BIN PATH="$FAKE_HERDR_CASE/server-bin:$PATH" \
+    bash -c "exec ${monitor_command#* }" > "$TMPDIR/monitor-output" &
+  monitor_pid=$!
+  trap 'kill "$monitor_pid" 2>/dev/null || true; wait "$monitor_pid" 2>/dev/null || true' EXIT
+  for attempt in $(seq 1 100); do
+    if rg -q '^agent: working' "$TMPDIR/monitor-output"; then break; fi
+    sleep 0.02
+  done
+  rg -q '^agent: working' "$TMPDIR/monitor-output" || fail "selected backend healthy worker not observed"
+  expected_ready="herdr-monitor-ready:$(jq -r '.generation' "$HERDR_RECEIPT_ROOT/ws/worker.json")"
+  rg -Fxq "$expected_ready" "$TMPDIR/monitor-output" || fail "real monitor did not emit generation-bound startup acknowledgement"
+  assert_file_absent "${HERDR_MONITOR_RECEIPT}.inbox" "wrong backend must not create false lost event"
+  : > "$FAKE_HERDR_CASE/agent-get-fail"
+  : > "$FAKE_HERDR_CASE/release-waits"
+  wait_for_file "${HERDR_MONITOR_RECEIPT}.inbox" 300 || fail "selected backend loss not observed"
+  wait "$monitor_pid"
+  trap - EXIT
+  assert_eq lost "$(jq -r '.event' "${HERDR_MONITOR_RECEIPT}.inbox")" "selected backend real loss delivered"
+)
+
+test_monitor_start_ack_required_before_prompt() (
+  setup_case monitor-start-ack
+  worker_prompt="$FAKE_HERDR_CASE/worker.txt"
+  printf '%s\n' 'bounded task' > "$worker_prompt"
+  : > "$FAKE_HERDR_CASE/monitor-no-start"
+  if bash "$worker_script" --name worker --kind copilot --cwd "$FAKE_HERDR_CASE" \
+    --prompt-file "$worker_prompt" --workspace ws --orchestrator-agent orch > "$TMPDIR/output" 2>&1; then
+    fail "missing monitor acknowledgement reported successful startup"
+  fi
+  rg -q MONITOR_START_UNVERIFIED "$TMPDIR/output" || fail "missing startup diagnostic"
+  assert_eq 0 "$(file_value "$FAKE_HERDR_CASE/worker-prompts")" "unmonitored worker receives no task"
+  assert_eq 0 "$(call_count '^tab close')" "uncertain monitor startup retains owned topology"
+  registry="$HERDR_RECEIPT_ROOT/ws/worker.json"
+  assert_eq created "$(jq -r '.stage' "$registry")" "not-submitted startup stage"
+  assert_eq monitor-1 "$(jq -r '.monitor_pane' "$registry")" "monitor registered before acknowledgement"
+  rg -q '^pane split .*--env DISABLE_AUTO_UPDATE=true' "$FAKE_HERDR_CASE/calls" || fail "split can consume command in update prompt"
+  if bash "$worker_script" --resume --name worker --kind copilot --cwd "$FAKE_HERDR_CASE" \
+    --prompt-file "$worker_prompt" --workspace ws --orchestrator-agent orch > "$TMPDIR/retry" 2>&1; then
+    fail "uncertain monitor startup allowed duplicate resume"
+  fi
+  assert_eq 1 "$(call_count '^pane split')" "resume cannot create duplicate monitor"
+  assert_eq 1 "$(call_count '^pane run')" "resume cannot resend command into unknown foreground UI"
 )
 
 test_split_monitor_preserves_delivery_mode() (
@@ -2494,6 +2654,12 @@ test_created_stage_handoff_without_monitor_or_receipt() (
 )
 
 tests=(
+  test_rejected_prompt_reuses_monitor_and_cannot_replay_ambiguous_delivery
+  test_monitor_start_ack_required_before_prompt
+  test_registry_native_identity_survives_start_and_fences_capture
+  test_completion_truncation_distinguishes_summary_from_result
+  test_completion_report_survives_later_lifecycle_events
+  test_split_monitor_preserves_selected_backend
   test_split_monitor_preserves_delivery_mode
   test_quota_protocol_failures_preserve_reports_and_diagnose_node
   test_unknown_readiness_preserves_generation_bound_completion

@@ -135,7 +135,8 @@ export function registeredWorker(run, task) {
   try { r = JSON.parse(fs.readFileSync(file, "utf8")); }
   catch (e) { if (e.code === "ENOENT") return null; throw runError(`Cannot verify worker registry ${file}: ${e.message}`, "WORKER_CHANGED"); }
   if (!r || r.name !== task.name || r.workspace_id !== run.workspace || !r.agent_pane || !r.tab_id || !r.generation || r.receipt_file !== path.join(path.dirname(file), `${task.name}.event`)) throw runError(`Malformed worker registry: ${file}`, "WORKER_CHANGED");
-  return { name: task.name, pane: r.agent_pane, tab: r.tab_id, monitor: r.monitor_pane, workspace: run.workspace, kind: task.kind, cwd: task.cwd, model: task.model, effort: task.effort, policy: task.policy, contextWindowTokens: task.contextWindowTokens, receipt: r.receipt_file, generation: r.generation, stage: r.stage };
+  return { name: task.name, pane: r.agent_pane, tab: r.tab_id, monitor: r.monitor_pane, workspace: run.workspace, kind: task.kind, cwd: task.cwd, model: task.model, effort: task.effort, policy: task.policy, contextWindowTokens: task.contextWindowTokens, receipt: r.receipt_file, generation: r.generation, stage: r.stage,
+    ...(r.native_identity ? { terminal: r.native_identity.terminal || undefined, session: r.native_identity.session || undefined } : {}), ...(r.previous_generation ? { previousGeneration: r.previous_generation } : {}) };
 }
 
 export function ownedWorkers(run, { issues } = {}) {

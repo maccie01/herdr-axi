@@ -88,6 +88,8 @@ const RUN_HELP = {
   recover: `herdr-axi run recover <pane-or-task-id>
   Inspect first. Resume approved startup, acknowledge uncertain submission without resend,
   or requeue only after all registered resources are verified absent. To stop unfinished work + monitor: run cancel --help.
+  Unconfirmed monitor startup: cancel, not recover; no duplicate monitor. Native identity drift never grants ownership.
+  Definite pre-input rejection: inspect/authorize dialog, then recover in-place. Ambiguous delivery never grants replay.
   Accepted/cancelled tasks: repair their leftover lease only, even archived/offline.`,
   leases: `herdr-axi run leases
   Exact lease paths, owner and holder tasks. Unknown ownership requires inspection, never automatic deletion.`,
@@ -95,8 +97,10 @@ const RUN_HELP = {
   Remove only run.lock for a verified dead transaction holder. Does not release worktree leases.`,
   finish: `herdr-axi run finish
   Accepted/cancelled tasks + closed workers required. Archive detail; prune known runtime files.`,
-  history: `herdr-axi run history [--task <task-id> | --all]
-  Compact task/review/decision trail; --all lists latest eight managed runs for this project.`,
+  history: `herdr-axi run history [--task <task-id> [--revision N] | --all]
+  Compact task/review/decision trail; --all lists latest eight managed runs for this project.
+  --task: current result and revision index. --revision: one saved report, 1-based; result <=3500 chars, prompt <=4000.
+  Generation, source and truncation retained; works offline and after finish until detail retention expires.`,
   gc: `herdr-axi run gc
   Expire finished managed records only: detail 30d, summary 180d by default. Also runs on init/finish.
   Active, locked, unknown files and explicit --dir runs never age-delete automatically.`,
