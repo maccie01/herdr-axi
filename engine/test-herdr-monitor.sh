@@ -1982,6 +1982,7 @@ test_prompt_ack_and_no_nested_agents() (
   bash "$worker_script" --name worker --kind codex --cwd "$FAKE_HERDR_CASE" \
     --prompt-file "$worker_prompt" --workspace ws --orchestrator-agent orch --label 'Byte review · codex' >/dev/null
   assert_eq 'Byte review · codex' "$(< "$FAKE_HERDR_CASE/tab-label")" "readable tab label"
+  rg -q -- '--env DISABLE_AUTO_UPDATE=true' "$FAKE_HERDR_CASE/calls" || fail "worker shell may consume startup command in update prompt"
   rg -q -- '--wait --until working --until blocked --until idle --until done --timeout 15000' "$FAKE_HERDR_CASE/calls" || fail "startup waits for settlement"
   rg -q 'Do not start subagents' "$FAKE_HERDR_CASE/visible" || fail "nested workers not prohibited"
   rg -q -- '--ratio 0.75' "$FAKE_HERDR_CASE/calls" || fail "worker layout not 75/25"
