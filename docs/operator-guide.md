@@ -111,6 +111,12 @@ limit”. Ordinary retryable rate limits are excluded.
 - Visible permission/trust selectors override retained quota text; input hooks stay input events.
 - Saved quota receipts: historical evidence, never current switching authority.
 - Managed workers/monitors inherit the initiating Node executable; missing Node produces an explicit diagnostic.
+- Selected backend pinned across worker/native-hook/monitor environments; fresh split shells cannot silently fall back to a different `herdr`.
+- Monitor startup: shell updates disabled; generation-bound acknowledgement required within 10 seconds before task delivery. `MONITOR_START_UNVERIFIED`: inspect, then explicit cancellation; no duplicate monitor on recovery.
+- Native terminal/session identity stored in the engine registry before coordinator publication. Recovery cannot adopt a replacement occupant; failed publication can recover the original without resending.
+- Explicit backend `agent_blocked` rejection: no input sent; inspect/authorize the dialog, then `run recover` retries once in the same pane and monitor. Timeout/unknown delivery: never automatic replay.
+- Completion reports retained separately from later input/lost notifications in the same inbox. Selected review returns the saved result once; invalid reports never offer acceptance.
+- Task-scoped watch: invalid proof waits with a diagnostic; context I/O errors remain visible. Existing errors do not create an immediate re-wake loop.
 
 ```sh
 herdr-axi run switch w1:pP --kind codex --model gpt-5.6-sol --effort high \
@@ -135,8 +141,10 @@ checkpoint; tombstone and reports stay until `run finish` archives and prunes th
 Native provider sessions, detached jobs and external worktrees are not deleted.
 Valid current-generation proof plus native settlement takes precedence over a quota
 banner, even before the first hook records completion; the result stays reviewable.
-After a completed replacement, same-worker revisions omit the old terminal handoff
-tail; a fresh or different parked replacement after worker loss receives the checkpoint again.
+
+- Replacement prompt: current contract first; bounded, quoted handoff metadata only. Old terminal/proof instructions stay in the saved checkpoint; targeted retrieval only when needed.
+- Read-only applies to the project/worktree. The final generation-bound external receipt and its atomic temporary file remain required; never for unfinished work.
+- After replacement completion, same-worker revisions omit handoff metadata; a fresh replacement receives the checkpoint pointer again.
 
 ### Orchestrator exhausted
 
@@ -371,7 +379,8 @@ requested as deliverables.
 | Command | Retained evidence / cleanup |
 | --- | --- |
 | `run history` | Bounded task and decision summaries |
-| `run history --task ID` | Prompt/revision detail; archived history also works outside Herdr |
+| `run history --task ID` | Current result, prompt and numbered revision summaries; offline/archived access |
+| `run history --task ID --revision N` | One saved revision: generation, source, truncation, result ≤3500 chars, prompt ≤4000; 1-based index |
 | `run history --all` | Latest eight managed runs for the selected project |
 | `run finish` | Requires accepted/cancelled tasks and closed workers; compresses detail, preserves results/inboxes, removes known runtime files |
 | `run gc` | Expires completed managed detail after 30 days, summaries after 180; also runs on init/finish |
