@@ -56,6 +56,7 @@ herdr-axi run queue parser --role implementer --cwd /path/to/worktree \
 - Batch: omit `--start`, queue independent tasks, then `run next` once.
 - Explicit user-requested worker: `--role implementer --kind claude --model claude-opus-5 --effort high`; no config edit/re-init.
 - Override retains role access/native-child limits; changed model clears the old model's context-window estimate.
+- A `--kind` other than the role's requires an explicit `--model`; no implicit provider substitution.
 - Application AWS/API budgets and coding-agent subscriptions: separate scopes; no inferred budget transfer or cheaper-model fallback.
 
 `next` reserves available slots and starts eligible workers concurrently; matching
@@ -224,9 +225,12 @@ Do not close or dispatch to the blocking pane. Continue independent work, or mov
 the queued task: `run move <task-id> --cwd <existing-separate-worktree>`.
 Role, prompt, phase, dependencies and relative area stay intact; `next` rechecks
 conflicts. Check absolute paths in the preserved prompt before starting.
-The conflict response also offers executable Git snapshot commands; these require
-permission to change Git metadata. **HEAD only**:
-dirty/untracked work is excluded. Not suitable for reviewing in-flight changes.
+The conflict response also offers executable Git snapshot commands when the
+blocking worktree has a verified HEAD commit; these require permission to change
+Git metadata. **HEAD only**: dirty/untracked work is excluded. Not suitable for
+reviewing in-flight changes. Without a verified HEAD there is no snapshot command:
+serialize behind the current task, or `run move` to an existing independent
+directory that already contains the required inputs.
 External worktrees remain yours to remove with Git after worker closure; no force.
 Retry `next` only after resolving the constraint, not after another status/read.
 
@@ -256,7 +260,7 @@ Other commands: `herdr-axi <command> --help`. There is no standalone `start` com
 | --- | --- |
 | `herdr-axi` / `fleet` | Owned run status; global discovery without a selected run |
 | `agents [--state STATE] [--kind KIND]` | Pane IDs, names, kinds and states |
-| `run inbox` | Results and attention; includes needed status, summaries ≤600 characters/worker |
+| `run inbox` | Results and attention; includes needed status, summaries ≤600 characters/worker, plus the selected review's saved result (≤3500 characters) |
 | `read <pane>` | Compact visible text; 60 lines / 8000 Unicode characters |
 | `read <pane> --raw` | Preserve layout for diagrams, tables and approval menus |
 | `read <pane> --full` | Available history; ≤2000 lines, no default character cap |
