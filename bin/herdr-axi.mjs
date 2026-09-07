@@ -1,5 +1,8 @@
 #!/usr/bin/env node
+import { readFileSync } from "node:fs";
 import { runAxiCli, AxiError } from "axi-sdk-js";
+
+const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 import { home, agents, fleetCmd, read, wait, dispatch, watch, run } from "../src/commands.mjs";
 import { guide } from "../src/guide.mjs";
 
@@ -137,7 +140,7 @@ await runAxiCli({
       "No standalone start: run init -> queue -> next. No manual pane/layout preflight.",
       "VALIDATION_ERROR", [...(process.env.HERDR_AXI_RUN ? [] : ["herdr-axi run init"]), "herdr-axi run queue --help"]);
   },
-  version: "0.1.0",
+  version,
   description: "Herdr fleet control: init -> returned queue --start. Optional TOON help: guide <intent keywords>. Owned pane IDs only.",
   topLevelHelp: HELP,
   getCommandHelp: (c) => {
