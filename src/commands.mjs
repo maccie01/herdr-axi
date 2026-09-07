@@ -68,6 +68,7 @@ export function home() {
 
 export function agents(args) {
   const o = parseArgs(args, { state: "string", kind: "string", all: "boolean" });
+  if (o._.length) throw new AxiError("agents takes no positional arguments; use --state or --kind", "INVALID_VALUE", ["herdr-axi agents --help"]);
   const scoped = !!loadRun() && !o.all;
   if (o.state && !STATES.includes(o.state))
     throw new AxiError(`invalid state: ${o.state}`, "INVALID_STATE", [`Valid: ${STATES.join(", ")}`, "herdr-axi agents --help"]);
@@ -179,9 +180,9 @@ export function dispatch(args) {
 
 export function watch(args = []) {
   requireHerdrEnv();
-  const o = parseArgs(args, { "timeout-ms": "string" });
+  const o = parseArgs(args, { "timeout-ms": "string", task: "string" });
   if (o._.length) throw runError("watch takes no engine arguments; use run commands");
-  return watchRun(positiveInt(o["timeout-ms"] ?? 30000, "timeout-ms"));
+  return watchRun(positiveInt(o["timeout-ms"] ?? 30000, "timeout-ms"), o.task);
 }
 
 export function run(args) {
@@ -193,7 +194,7 @@ export function run(args) {
     move: { cwd: "string", area: "string" },
     takeover: { from: "string", evidence: "string" },
     switch: { role: "string", kind: "string", model: "string", effort: "string", summary: "string", cancel: "boolean" },
-    phase: { cap: "string" }, accept: { evidence: "string", "result-file": "string" }, revise: { prompt: "string", "prompt-file": "string" },
+    phase: { cap: "string" }, accept: { evidence: "string", "result-file": "string" }, revise: { prompt: "string", "prompt-file": "string", "result-file": "string" },
     cancel: { evidence: "string" }, close: {}, recover: {},
   };
   if (!Object.hasOwn(specs, action)) throw runError(`Unknown run action: ${action}`);

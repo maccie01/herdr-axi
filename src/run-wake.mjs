@@ -13,7 +13,7 @@ export function runWake(dir) {
     watcher = fs.watch(dir, { recursive: true }, (_, filename) => {
       const name = path.basename(String(filename ?? ""));
       // Ignore our own telemetry, watch records, locks and temporary writes.
-      if (name === "run.json" || /\.event(?:\.inbox|\.monitor-error)?$/.test(name)) signal();
+      if (name === "run.json" || /\.event(?:\.inbox|\.monitor-error|\.proof\.[A-Za-z0-9]+)?$/.test(name)) signal();
     });
     watcher.on("error", () => watcher.close());
   } catch { /* Timer reconciliation remains available on unsupported filesystems. */ }

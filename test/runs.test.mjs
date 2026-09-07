@@ -548,7 +548,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
     } finally { f.clean(); }
   });
 
-  for (const [quota, action] of [[false, "watch"], [true, "watch"], [true, "switch"], [false, "accept"], [true, "accept"], [false, "revise"]]) test(`${action} collects late native proof without losing completed work${quota ? " despite quota banner" : ""}`, () => {
+  for (const [quota, action] of [[false, "watch"], [false, "task-watch"], [true, "watch"], [true, "switch"], [false, "accept"], [true, "accept"], [false, "revise"]]) test(`${action} collects late native proof without losing completed work${quota ? " despite quota banner" : ""}`, () => {
     const f = fixture();
     try {
       const w = exhaustedWorker(f), aFile = path.join(f.dir, `${w.pane}.agent`), a = JSON.parse(fs.readFileSync(aFile));
@@ -580,7 +580,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
         assert(!f.calls().some((c) => c.action === "close"));
         assert.equal(f.state().tasks[0].state, "running");
       }
-      const out = f.ok(["watch", "--timeout-ms", "100"]);
+      const out = f.ok(["watch", ...(action === "task-watch" ? ["--task", "quota-task"] : []), "--timeout-ms", "100"]);
       assert.match(out, /LATE_REPORT/); assert.match(out, /review/); assert.match(out, /run accept/);
       assert.doesNotMatch(out, /herdr-axi run inbox|herdr-axi run switch/);
       f.ok(["run", "accept", w.pane, "--evidence", "Verified actual result and checks"]);
@@ -1651,6 +1651,34 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
     } finally { f.clean(); }
   });
 
+  test("task-scoped watch waits past unrelated loss and wakes with the selected report", async () => {
+    const f = fixture(); let watching;
+    try {
+      f.queue("lost"); f.queue("healthy"); f.ok(["run", "next"]);
+      const state = f.state();
+      const [lost, healthy] = ["lost", "healthy"].map((id) => state.workers.find((w) => w.pane === state.tasks.find((t) => t.id === id).pane));
+      fs.unlinkSync(path.join(f.dir, `${lost.pane}.agent`));
+      const inbox = f.ok(["run", "inbox"]);
+      assert.match(inbox, /run recover lost/); assert.doesNotMatch(inbox, /agents --all/);
+      assert.match(inbox, /watch --task healthy/);
+      assert.match(f.execute(["watch", "--task", "absent"]).output, /UNKNOWN_TASK/);
+      const start = Date.now();
+      const timeout = f.ok(["run", "watch", "--task", "healthy", "--timeout-ms", "300"]);
+      assert(Date.now() - start >= 300); assert.match(timeout, /reason: timeout/); assert.match(timeout, /watching: healthy/);
+      const agentFile = path.join(f.dir, `${healthy.pane}.agent`), native = JSON.parse(fs.readFileSync(agentFile));
+      native.agent_status = "done"; fs.writeFileSync(agentFile, JSON.stringify(native));
+      assert.match(f.ok(["watch", "--task", "healthy", "--timeout-ms", "300"]), /reason: timeout/, "native settlement alone is not a finished task");
+      watching = f.asyncRun(["watch", "--task", "healthy", "--timeout-ms", "6000"]);
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      f.complete(healthy);
+      const result = await watching;
+      assert.equal(result.status, 0, result.output); assert.match(result.output, /reason: (state-change|attention)/);
+      assert.match(result.output, /watching: healthy/); assert.match(result.output, /checks passed/);
+      assert(result.output.includes(`run accept ${healthy.pane}`));
+      assert.equal(f.state().tasks[0].state, "running", "no implicit resolution of unrelated lost work");
+    } finally { if (watching) await watching; f.clean(); }
+  });
+
   test("selection rollback removes leases even when durable state publication fails", () => {
     const f = fixture();
     try {
@@ -1888,6 +1916,36 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       const recovered = f.execute(["run", "recover", "a"], { HERDR_ENV: "" });
       assert.equal(recovered.status, 0, recovered.output); assert.match(recovered.output, /leaseReleased: true/);
       assert(!fs.existsSync(lease)); assert.equal(f.calls().length, before, "archived repair is offline, exact ownership only");
+    } finally { f.clean(); }
+  });
+
+  test("revise preserves prior evidence and refuses corrupt reports before resubmission", () => {
+    const f = fixture();
+    try {
+      f.queue("a"); f.ok(["run", "next"]);
+      const w = f.state().workers[0]; f.complete(w);
+      const file = `${w.receipt}.inbox`, original = fs.readFileSync(file);
+      for (const payload of ["broken", "null", JSON.stringify({ generation: "old", summary: "stale" })]) {
+        fs.writeFileSync(file, payload);
+        const before = fs.readFileSync(path.join(f.env.HERDR_AXI_RUN, "run.json"), "utf8");
+        const r = f.execute(["run", "revise", w.pane, "--prompt", "Correction; recheck"]);
+        assert.equal(r.status, 1, r.output);
+        assert.match(r.output, /RESULT_UNAVAILABLE/);
+        assert.equal(fs.readFileSync(path.join(f.env.HERDR_AXI_RUN, "run.json"), "utf8"), before);
+        assert.equal(f.calls().filter((c) => c.action === "prompt").length, 1);
+      }
+      const report = { ...JSON.parse(original), detail: "Prior detailed checks and rationale", truncated: true };
+      fs.writeFileSync(file, JSON.stringify(report));
+      f.ok(["run", "revise", w.pane, "--prompt", "Correction; recheck"]);
+      assert.equal(f.state().tasks[0].revisions[0].result, report.detail);
+      assert.equal(f.state().tasks[0].revisions[0].truncated, true);
+      assert.equal(f.state().tasks[0].revisions[0].generation, w.generation);
+      const next = f.state().workers[0]; f.complete(next);
+      fs.writeFileSync(`${next.receipt}.inbox`, "broken");
+      const replacement = path.join(f.dir, "reviewed.txt"); fs.writeFileSync(replacement, "Reviewed replacement; exact checks preserved");
+      f.ok(["run", "revise", next.pane, "--prompt", "Final correction", "--result-file", replacement]);
+      assert.equal(f.state().tasks[0].revisions[1].resultSource, "coordinator-replacement");
+      assert.equal(f.state().tasks[0].revisions[1].result, fs.readFileSync(replacement, "utf8"));
     } finally { f.clean(); }
   });
 

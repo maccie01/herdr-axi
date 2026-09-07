@@ -24,6 +24,13 @@ test("run wake ignores telemetry and coalesces persisted inbox events, including
     assert(Date.now() - started < 200, "event between status and wait is retained");
     const quiet = Date.now(); await wake.wait(80);
     assert(Date.now() - quiet >= 65, "consumed event must not wake repeatedly");
+    let proofWoke = false;
+    const proof = wake.wait(1000).then(() => { proofWoke = true; });
+    fs.writeFileSync(path.join(dir, "receipts", "worker.event.proof.testgen.tmp"), "partial");
+    await delay(60); assert.equal(proofWoke, false, "partial proof is not published evidence");
+    fs.renameSync(path.join(dir, "receipts", "worker.event.proof.testgen.tmp"), path.join(dir, "receipts", "worker.event.proof.testgen"));
+    await delay(100); assert.equal(proofWoke, true, "published late proof wakes before fallback");
+    await proof;
   } finally { wake.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
