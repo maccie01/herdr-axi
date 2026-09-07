@@ -106,12 +106,13 @@ herdr-axi run queue parser --role implementer \
 | Worktree exclusion | One writer per canonical worktree across runs; queued relocation via `run move` |
 | Model policy | Nearest project config → role defaults; explicit per-task model/effort; fixed autonomous launch modes |
 | Manual-mode guard | Claude auto-capable model + visible Auto footer before submission; no bypass fallback |
+| Monitor-start guard | Shell update prompts disabled; generation-bound start acknowledgement before task delivery; failure retains cancellable topology |
 | Native reviewers | Optional bounded read-only leaf subagents; separate budget; parent integrates |
 | Context warnings | Defaults 70% / 85%; fresh readings actionable; unknown/stale disclosed; no auto-interrupt |
 | Provider recovery | Explicit `run switch`; same task, dirty files, dependencies and reservation |
 | Owner recovery | Authorized `run takeover`; same run; no automatic replacement launch |
 | Stop + cleanup | Checkpointed `run cancel`; whole worker tab, including orphan monitor |
-| Private history | `history`, `finish`, `gc`; evidence outside Git; selective retention |
+| Private history | `history`, `finish`, `gc`; saved results outside Git; targeted `history --task ID --revision N` |
 | Fail loudly | Unknown flags rejected; exit 0 success / 1 error / 2 unknown command |
 
 - Full commands, configuration, recovery cases and limits: [Operator guide](docs/operator-guide.md).

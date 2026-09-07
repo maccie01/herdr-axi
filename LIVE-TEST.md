@@ -638,3 +638,48 @@ by these tests. Existing fake backends; dependency-free Node tests.
 - Final cleanup audit found five additional global receipts belonging to recorded D/E test workers. Moved these plus the two F files recoverably into scratch `misrouted-evidence/`; foreign files/native histories untouched. Across D–H: one test orchestrator, nine workers, ten created tabs, five archived runs.
 - Focused launch/wake tests: **5/5** with native filesystem notifications available. Restricted-sandbox run failed the filesystem-wake assertion; no test weakened or skipped to hide that environment limitation.
 - Final engine rerun: **56/56**, including slow-footer and clean-environment monitor regressions; syntax/whitespace clean. JS changes remain covered by the earlier full **158/158** run. No no-mistakes pipeline claim: binary/doctor work, but this repository has no initialized gate and its daemon was stopped.
+
+## Adversarial fixes and cross-kind live checks — 7 September 2026
+
+- Baseline: `43c2e81`; scratch `/private/tmp/herdr-axi-fixes.HW5MfL`; parent `w1B:p2`; original tabs `w1B:t1,t2` protected.
+- Three implementation agents with disjoint scopes; cross-reviews of identity and report consumers. No repository-editing worker tabs or foreign-agent control.
+- Root-operated live rounds, not a blind-orchestrator efficiency benchmark. Round 4 encountered a real Copilot monthly quota; no induced exhaustion of Claude/Codex subscriptions.
+
+| Round | Real behavior / independent checks | Outcome |
+| --- | --- | --- |
+| 1, two Sonnet/medium workers | Writer: `[2,3,5]` → count/sum; revision adds mean; reader: exact `welcome\n`; files independently asserted; old revision retrieved before/after archive | Task/proof/revision paths pass; monitor loss test fails at 20 seconds |
+| 1, failure diagnosis | Both fresh monitor shells had Oh-my-zsh update prompts; `pane run` input consumed as dialog answers; no monitor process. Later raw diagnostic exposed `env` truncated to `nv` | Real startup defect; no claim that initial backend-routing fix alone passed |
+| 2, two fresh Sonnet/medium verifiers | Split update prompts disabled; generation-bound monitor startup acknowledgement before submission; both start on first attempt, no trust/recovery loop | Both completion reports collected in one watch |
+| 2, deliberate reader-pane loss | Only owned settled agent pane closed; filesystem watcher checks correct inbox/generation and original completion object | `lost` in **2,173 ms**; completion object unchanged; remaining monitor tab cancelled through AXI |
+| 3, Codex/Sol medium | Update explicitly skipped, scratch trust explicitly approved; count/sum/mean checked; same-pane revision checks product 30; generation reports returned by targeted watch | Both turns pass; independent arithmetic assertion; accepted, whole tab closed |
+| 3, Copilot/Sol medium | Startup appeared ready before folder-trust UI; initial prompt delivery uncertain; after inspected trust response, no task output and 0 AIC | Cancelled without guessing delivery or resending; no acceptance; separate definite-rejection regression required |
+| 4, Copilot/Sol medium | Startup trust correctly reported as no submission; explicit current-session trust, same-pane recovery; actual monthly quota displayed | Earlier submitted prompt hid fresh quota; detector corrected, real inbox then reports monthly exhaustion and executable switch |
+| 4, Copilot → Sonnet | Same task/worktree/checkpoint retained; old agent+monitor tab closed; Sonnet checks exact `welcome\n`, 8 bytes | Task result correct, proof refused as historical pasted instructions; no acceptance, whole replacement tab cancelled; handoff prompt refinement required |
+| 5, corrected Copilot → Sonnet | One scoped watch returns real monthly quota and switch command; explicit switch preserves task/checkpoint; Sonnet receives current contract without historical terminal instructions | One scoped watch returns saved TOON result plus current-generation settlement; exact input bytes and durable receipt independently asserted; accepted and closed |
+
+| Confirmed boundary | Fix / executable regression |
+| --- | --- |
+| Recovery adopts replacement native identity | Engine registry retains terminal/session atomically; uncertain and publication-failed recovery compare saved identity, never learn from replacement |
+| Lost publication during legitimate followup | Engine-recorded generation lineage permits original-session recovery without resending; terminal drift still refused |
+| Later input/lost event overwrites completion | Latest alert and generation-bound completion share one atomic inbox; legacy promotion, no carryover to a new generation |
+| Acceptance advice uses wrong/unavailable report | Shared report validation before accept/revise and inbox advice; selected saved result returned once, not duplicated or replaced with current terminal text |
+| Monitor inherits wrong backend / startup UI | Explicit backend/Node/receipt routing; shell updates disabled; bounded startup acknowledgement; unconfirmed topology cancellable, duplicate monitor refused |
+| Invalid proof wakes watch repeatedly | Exact proof bytes; malformed/missing proof remains pending; invalid-proof diagnosis on timeout |
+| Scoped watch hides context I/O errors | Existing error preserved without immediate repeated wake; newly occurring error changes watched state |
+| Saved revision inaccessible after archive | `run history --task ID --revision N`; bounded offline detail, explicit expiry |
+| Late dialog rejects prompt before input | Persist explicit backend `agent_blocked`; approved retry reuses pane/monitor with linked generation; ambiguous timeouts never replay |
+| Rejected retry after failed publication skips a generation | Publish verified intermediate worker with recovery reservation before rearming; concurrent recovery submits once |
+| Earlier submitted prompt masks fresh quota | Distinguish historical input from current consent; framed native error detection; unmarked multiline pasted errors remain ambiguous and refused |
+| Quota alert recommends result acceptance | Acceptance note only when a validated saved completion exists |
+| Old terminal instructions contaminate replacement assignment | Current contract first; explicit external receipt-only exception; bounded quoted checkpoint metadata, no old terminal/proof injection; full checkpoint retained |
+
+- Round 1: worker panes `w1B:p2N,p2M`; monitors `p2P,p2Q`; tabs `w1B:t1P,t1N` closed; archived.
+- Round 2: worker panes `w1B:p2S,p2R`; monitors `p2T,p2V`; tabs `w1B:t1R,t1Q` closed; archived.
+- Round 3: worker panes `w1B:p2W,p2X`; monitors `p2Z,p2Y`; tabs `w1B:t1S,t1T` closed; archived.
+- Round 4: Copilot `w1B:p20` / monitor `p31` / tab `t1V`; Sonnet `w1B:p32` / monitor `p33` / tab `t1W`; both closed; archived. Four runs contain only `run.json` + `detail.json.gz`; zero scratch leases.
+- Round 5: Copilot `w1B:p34` / monitor `p35` / tab `t1X`; Sonnet `w1B:p36` / monitor `p37` / tab `t1Y`; both closed; archived. Temporary proof already consumed by hook when independently inspected; durable receipt and inbox fingerprint match generation `oS64w5xC`.
+- Final cleanup audit: **10 workers/tabs closed, 5 runs archived, 0 leases**; only original `w1B:t1,t2` remain. No foreign pane input, worktree removal or native-session deletion.
+- Integrated baseline before late-delivery refinement: Node **173/173**, Bash **61/61**; focused saved-report/monitor-error help **2/2**. Tests execute fake backends; no suite reaches the real fleet.
+- Next integrated run: Node **177/177**, Bash **62/62**. Final live refinements additionally covered by quota **5/5**, handoff contract/lifecycle **4/4**, saved-report/quota-help **2/2**. Final stable full Node rerun: **180/180**, zero skipped/failed; targeted retired-checkpoint query executed against the real handoff record.
+- Independent adversarial checks: identity/recovery **6/6**, quota **5/5**, delivered handoff prompt **1/1**; 3 concurrent recovery races, one submission each. Syntax/whitespace clean; **24** local documentation links resolve.
+- Limits: Copilot cannot complete work while its actual monthly quota is exhausted; verified fallback instead. Claude/Codex quota variants remain deterministic tests, not live exhaustion. Ambiguous unmarked quota-like text after submitted input is deliberately not destructive-switch authority.
