@@ -170,7 +170,7 @@ function engineCall(args, run) {
     child.stdout.on("data", (b) => { out = (out + b).slice(-32000); });
     child.stderr.on("data", (b) => { err = (err + b).slice(-4000); });
     child.on("error", reject);
-    child.on("close", (code) => code === 0 ? resolve(out) : reject(runError(`Engine failed (${code}); inspect before retrying. ${err.trim()}`, /(?:current registered generation|registered lifecycle generation changed)/.test(err) ? "GENERATION_DRIFT" : err.includes("MONITOR_START_UNVERIFIED") ? "MONITOR_START_UNVERIFIED" : err.includes("PROMPT_REJECTED") ? "PROMPT_REJECTED" : "ENGINE_ERROR")));
+    child.on("close", (code) => code === 0 ? resolve(out) : reject(runError(`Engine failed (${code}); inspect before retrying. ${err.trim()}`, /(?:current registered generation|registered lifecycle generation changed)/.test(err) ? "GENERATION_DRIFT" : err.includes("MONITOR_START_UNVERIFIED") ? "MONITOR_START_UNVERIFIED" : err.includes("MONITOR_SUPERVISION_LOST") ? "MONITOR_SUPERVISION_LOST" : err.includes("PROMPT_REJECTED") ? "PROMPT_REJECTED" : "ENGINE_ERROR")));
   });
 }
 
@@ -193,6 +193,11 @@ function workerRecord(run, task) {
   if (!(w.terminal || w.session)) throw runError("Native worker identity was not recorded; cannot adopt the current occupant. Inspect startup; recover only after registered resources are absent.", "WORKER_CHANGED");
   safeWorker(run, w, [projectAgent(a)]);
   return w;
+}
+
+function assignmentGeneration(task, worker) {
+  if (task?.assignmentAfter && worker?.generation === task.assignmentAfter)
+    throw runError("The new assignment has no new delivery generation; this receipt/report belongs to the previous task. Inspect and cancel the unsubmitted assignment; never accept the old report or resend blindly.", "ASSIGNMENT_NOT_SUBMITTED", [`herdr-axi run cancel ${task.id} --evidence 'Unsubmitted assignment and preserved partial state inspected; authorized cleanup'`, `herdr-axi run history --task ${task.id}`]);
 }
 
 async function retireWorker(run, worker, mode) {
@@ -241,7 +246,7 @@ async function launch(task, run) {
       : ["start", ...(task.resume ? ["--resume"] : []), "--name", task.name, "--label", label, "--kind", task.kind, ...(task.model ? ["--model", task.model, "--effort", task.effort] : []), "--cwd", task.cwd, "--prompt-file", file, "--workspace", run.workspace, "--orchestrator-agent", run.owner.pane], run);
   } catch (e) { error = e; }
   let worker;
-  try { worker = workerRecord(run, task); } catch (e) { error ??= e; }
+  try { worker = workerRecord(run, task); assignmentGeneration(task, worker); } catch (e) { error ??= e; }
   try {
     await publishRun((r) => {
       const t = r.tasks.find((t) => t.id === task.id);
@@ -266,6 +271,7 @@ async function launch(task, run) {
     } catch (e) { labelError = e.message.slice(0, 300); }
   }
   const startup = error && ["created", "rejected"].includes(worker?.stage);
+  const unsubmitted = task.assignmentAfter && worker?.generation === task.assignmentAfter;
   const blocked = startup && (worker.stage === "rejected" || error.message.includes("agent_not_ready"));
   const monitorFailed = worker?.stage === "created" && worker.monitor;
   let startupOutput;
@@ -274,6 +280,7 @@ async function launch(task, run) {
     catch { /* diagnostic only; recorded startup remains recoverable */ }
   }
   return { task: task.id, ...(worker ? { pane: worker.pane } : {}), state: blocked ? "blocked" : error ? "uncertain" : "running", ...(error ? { error: error.message.slice(0, 600) } : {}), ...(labelError ? { labelError } : {}),
+    ...(unsubmitted ? { submitted: false, note: "No new assignment generation; previous report preserved, not evidence for this task. Inspect and cancel; no blind resend.", help: [`herdr-axi run cancel ${task.id} --evidence 'Unsubmitted assignment and preserved partial state inspected; authorized cleanup'`] } : {}),
     ...(startup ? { submitted: false, ...(startupOutput ? { startupOutput, startupLimit: "last 24 lines / 2400 characters; expand only if insufficient" } : {}), note: monitorFailed ? "Monitor startup unconfirmed; no task submitted. Inspect and cancel before a new startup; no duplicate monitor or blind command retry." : "No task input sent. Inspect the dialog; approve only with authorization, then recover once idle. Existing pane retained; no automatic trust or updates.", help: monitorFailed ? [`herdr-axi run cancel ${task.id} --evidence 'Unsubmitted startup inspected; authorized cleanup'`] : [`herdr-axi read ${worker.pane} --raw --lines 60 --chars 8000`, `herdr-axi run recover ${worker.pane}`] } : {}) };
 }
 
@@ -288,10 +295,12 @@ export function runStatus() {
     const w = workers.find((w) => (t.pane ? w.pane === t.pane : w.name === t.name) && !w.closed);
     const a = w ? safeWorker(run, w, rows, { observe: true }) : null;
     let current;
-    try { current = !w || ["created", "rejected"].includes(w.stage) ? registeredWorker(run, t) : null; }
+    try { current = !w || ["created", "rejected"].includes(w.stage) || (t.assignmentAfter && w.generation === t.assignmentAfter) ? registeredWorker(run, t) : null; }
     catch (e) { return { task: t.id, pane: w?.pane ?? t.pane ?? rows.find((a) => a.backendName === t.name && a.workspace === run.workspace)?.pane ?? "pending", state: "unverified", error: e.message.slice(0, 300) }; }
     const stage = ["created", "rejected"].includes(w?.stage)
       ? (current?.pane === w.pane && current?.tab === w.tab ? current.stage : undefined) : w?.stage;
+    if (t.assignmentAfter && (current?.generation ?? w?.generation) === t.assignmentAfter && !["cancelling", "switching"].includes(t.state) && !(t.state === "starting" && launcherAlive(t.launcher)))
+      return { task: t.id, pane: w.pane, state: "uncertain", delivery: "not_submitted", code: "ASSIGNMENT_NOT_SUBMITTED" };
     const state = ["switching", "cancelling"].includes(t.state) ? t.state : a?.state === "blocked" ? "blocked" : t.state === "starting" && launcherAlive(t.launcher) ? "starting" : w && !a ? "lost" : a?.state ?? (t.state === "starting" ? "uncertain" : t.state);
     const complete = t.state === "running" && w && receipt(w)?.complete && ["idle", "done"].includes(state);
     return { task: t.id, pane: w?.pane ?? t.pane ?? "pending", state: complete ? "review" : state, ...(t.errorCode ? { code: t.errorCode } : {}), ...(["created", "rejected"].includes(stage) ? { delivery: "not_submitted" } : t.state === "uncertain" ? { delivery: "uncertain" } : {}) };
@@ -317,9 +326,11 @@ export function runStatus() {
   let help;
   const drifted = tasks.find((t) => t.code === "GENERATION_DRIFT");
   const monitorFailed = tasks.find((t) => t.code === "MONITOR_START_UNVERIFIED");
+  const unsubmitted = tasks.find((t) => t.code === "ASSIGNMENT_NOT_SUBMITTED");
   if (drifted) help = [`herdr-axi run history --task ${drifted.task}`, `herdr-axi read ${drifted.pane} --raw`];
   else if (cancelling) help = [`herdr-axi run cancel ${cancelling.task}`];
   else if (monitorFailed) help = [`herdr-axi run cancel ${monitorFailed.task} --evidence 'Unsubmitted startup inspected; authorized cleanup'`];
+  else if (unsubmitted) help = [`herdr-axi run cancel ${unsubmitted.task} --evidence 'Unsubmitted assignment and preserved partial state inspected; authorized cleanup'`];
   else if (exhausted) help = switchHelp(run, exhausted.pane, workers.find((w) => w.pane === exhausted.pane)?.kind);
   else if (switching) help = [`herdr-axi run switch ${switching.task}`];
   else if (blocked) help = [`herdr-axi read ${blocked.pane} --raw`];
@@ -358,12 +369,13 @@ export async function watchRun(timeout = 30000, task) {
   const selected = loadRun();
   if (!selected?.finishedAt) ownerCheck(selected);
   if (task && !selected.tasks.some((t) => t.id === task)) throw runError(`Unknown task: ${task}`, "UNKNOWN_TASK", ["herdr-axi run status"]);
-  let proofError;
+  let proofError, unproven;
   // Task-scoped waits leave other unresolved work visible, but it must not
   // repeatedly wake a coordinator waiting on an independent dependency.
   const focus = (s) => {
     if (!task) return s;
     let current = s.tasks?.find((t) => t.task === task);
+    unproven = undefined;
     if (current && ["idle", "done"].includes(current.state) && !current.delivery && !current.code) {
       const w = loadRun().workers.find((w) => w.pane === current.pane && !w.closed);
       // Intermediate native settlement isn't a result. A late proof IS a
@@ -380,7 +392,7 @@ export async function watchRun(timeout = 30000, task) {
         } catch (e) {
           if (e.code !== "ENOENT") proofError = { pane: w.pane, code: "COMPLETION_PROOF_UNAVAILABLE", error: e.message.slice(0, 300) };
         }
-        if (!valid) current = { ...current, state: "working" };
+        if (!valid) { unproven = { pane: w.pane, state: current.state }; current = { ...current, state: "working" }; }
       }
     }
     return { owner: s.owner, finished: s.finished, tasks: current ? [current] : [], contextError: s.contextError, contextWarnings: s.contextWarnings?.filter((w) => w.pane === current?.pane), ownershipIssues: s.ownershipIssues?.filter((i) => i.task === task) };
@@ -417,7 +429,18 @@ export async function watchRun(timeout = 30000, task) {
       if (!latest.finished && latest.owner !== first.owner) return { changed: true, reason: "owner-changed", owner: latest.owner, note: "Stop old-owner supervision; replacement owns this run." };
       if (key !== watchKey(focus(latest))) return await attention(latest, true, "state-change");
     }
-    return { changed: false, reason: "timeout", ...(task ? { watching: task } : {}), pending: focus(latest).tasks.length, ...(latest.contextError ? { contextError: latest.contextError } : {}), ...(proofError ? { proofError } : {}), note: waitingNote, help: proofError ? [`herdr-axi read ${proofError.pane} --raw`] : task ? [`herdr-axi watch --task ${task}`] : latest.help };
+    const view = focus(latest);
+    // Intermediate native settlement waits for proof only through this timeout.
+    if (unproven && !proofError) {
+      let output;
+      try { output = runHerdr(["agent", "read", unproven.pane, "--source", "visible", "--lines", "24"], { timeoutMs: 1000, text: true }).slice(-2400); }
+      catch { /* diagnostic only; the reported native state stands */ }
+      return { changed: false, reason: "missing-proof", watching: task, pane: unproven.pane, state: unproven.state, pending: view.tasks.length, ...(latest.contextError ? { contextError: latest.contextError } : {}),
+        ...(output ? { output, outputLimit: "last 24 lines / 2400 characters; expand only if insufficient" } : {}),
+        note: "Native turn settled without this generation's completion receipt; no validated completion is available. Inspect the worker once and resolve what it is waiting for; never synthesize proof, accept unfinished work or resend the prompt.",
+        help: [`herdr-axi read ${unproven.pane} --raw --lines 60 --chars 8000`, "herdr-axi run inbox"] };
+    }
+    return { changed: false, reason: "timeout", ...(task ? { watching: task } : {}), pending: view.tasks.length, ...(latest.contextError ? { contextError: latest.contextError } : {}), ...(proofError ? { proofError } : {}), note: waitingNote, help: proofError ? [`herdr-axi read ${proofError.pane} --raw`] : task ? [`herdr-axi watch --task ${task}`] : latest.help };
   } finally { wake.close(); fs.rmSync(file, { force: true }); }
 }
 
@@ -556,6 +579,7 @@ async function executeRunCommand(action, o) {
     for (const t of pending(run)) {
       const w = run.workers.find((w) => w.pane === t.pane && !w.closed);
       if (!w) continue;
+      if (t.assignmentAfter && w.generation === t.assignmentAfter) continue;
       try {
         const inbox = JSON.parse(fs.readFileSync(`${w.receipt}.inbox`, "utf8"));
         const completion = inbox?.completion;
@@ -832,6 +856,7 @@ async function executeRunCommand(action, o) {
     }
     if (t.state === "running") throw runError("Registered resources remain. Recover requeues absent workers; to stop this task and close its whole tab, cancel with explicit evidence. Do not remove its worktree.", "RESOURCES_REMAIN", [`herdr-axi run cancel ${t.id} --evidence 'Authorized stop; partial state and background jobs reviewed'`]);
     const worker = workerRecord(run, t);
+    assignmentGeneration(t, worker);
     const live = safeWorker(run, worker, rows);
     if (!live || !["working", "blocked", "idle", "done"].includes(live.state)) throw runError("Cannot recover an absent or unknown worker");
     if (["created", "rejected"].includes(worker.stage)) {
@@ -852,6 +877,8 @@ async function executeRunCommand(action, o) {
       const current = r.tasks.find((p) => p.id === t.id);
       if (current.state !== t.state) throw runError("Task changed; retry");
       current.state = "running"; current.pane = worker.pane;
+      assignmentGeneration(current, worker);
+      delete current.error; delete current.errorCode;
       r.workers = [...r.workers.filter((w) => w.pane !== worker.pane), worker];
     });
     return { recovered: worker.pane, help: ["herdr-axi watch"] };
@@ -891,7 +918,8 @@ async function executeRunCommand(action, o) {
         // Herdr names are lowercase and at most 32 characters; task IDs need
         // not inherit that backend restriction or collide when truncated.
         t.name = reusable?.name ?? `axi-${r.id}-${randomUUID().slice(0, 8)}`;
-        if (reusable) t.pane = reusable.pane;
+        if (reusable) { t.pane = reusable.pane; t.assignmentAfter = reusable.generation; }
+        else delete t.assignmentAfter;
         selected.push({ ...t });
       }
       const otherPhases = [...new Set(r.tasks.filter((t) => t.state === "queued" && t.phase !== r.phase).map((t) => t.phase))];
@@ -917,6 +945,7 @@ async function executeRunCommand(action, o) {
   const worker = run.workers.find((w) => w.pane === pane && !w.closed);
   let live = safeWorker(run, worker, rows);
   const task = taskFor(run, pane);
+  if (["accept", "revise"].includes(action)) assignmentGeneration(task, worker);
   if (action === "accept" && !o.evidence?.trim()) throw runError("accept requires --evidence describing coordinator review and checks");
   const revisionPrompt = action === "revise" ? taskPrompt(o) : null;
   // A settled native turn can precede hook collection. Reconcile its existing
@@ -933,6 +962,7 @@ async function executeRunCommand(action, o) {
     const report = workerReport(worker, o["result-file"]);
     changeRun((r, { afterCommit }) => {
       const t = r.tasks.find((t) => t.id === task.id);
+      assignmentGeneration(t, worker);
       if (t.state !== "running" || r.workers.find((w) => w.pane === pane)?.generation !== worker.generation) throw runError("Task changed or delivery uncertain; inspect before accepting");
       t.state = "accepted"; t.evidence = o.evidence.slice(0, 1000);
       Object.assign(t, report);
@@ -955,7 +985,7 @@ async function executeRunCommand(action, o) {
       t.revisions.push({ at: new Date().toISOString(), generation: worker.generation, prompt: t.prompt, ...report });
       const handoff = t.handoffs?.findLast((h) => h.state === "retired");
       if (handoff) { handoff.completedGeneration = worker.generation; handoff.completedBy = worker.name; }
-      t.prompt = prompt; t.state = "starting"; t.launcher = process.pid;
+      t.prompt = prompt; t.state = "starting"; t.launcher = process.pid; t.assignmentAfter = worker.generation;
       return { ...t };
     });
     return launch(next, run);

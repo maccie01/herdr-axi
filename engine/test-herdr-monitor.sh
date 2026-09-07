@@ -341,6 +341,9 @@ case "$group:$action" in
       exit 1
     fi
     [[ ! -e "$case_dir/pane-wait-fail" ]] || exit 1
+    if [[ "${1:-}" == monitor-1 ]]; then
+      printf '%s\t%s\n' "$FAKE_MONITOR_PID" "$(/bin/ps -p "$FAKE_MONITOR_PID" -o lstart= | awk '{$1=$1; print}')" > "${HERDR_MONITOR_RECEIPT}.monitor-owner"
+    fi
     ready_delay=$(read_value "$case_dir/pane-ready-delay" 0)
     sleep "$ready_delay"
     : > "$case_dir/pane-ready"
@@ -380,6 +383,7 @@ cat > "$fake_bin/ps" <<'EOF'
 set -euo pipefail
 
 case_dir="${FAKE_HERDR_CASE:-}"
+[[ ! -e "$case_dir/ps-fail-all" ]] || exit 0
 target_pid=""
 for ((index=1; index <= $#; index++)); do
   if [[ "${!index}" == "-p" ]]; then
@@ -483,6 +487,7 @@ setup_case() {
   export HERDR_MONITOR_AGENT=worker
   export HERDR_MONITOR_LABEL=worker
   export HERDR_MONITOR_RECEIPT="$HERDR_RECEIPT_ROOT/ws/worker.event"
+  export FAKE_MONITOR_PID=$$
   unset HERDR_MONITOR_RESULT_FILE
   unset FAKE_HERDR_APPEND_USER
   mkdir -p \
@@ -564,6 +569,7 @@ write_worker_registry() {
   : > "$FAKE_HERDR_CASE/tab-alive"
   : > "$FAKE_HERDR_CASE/pane-1-alive"
   : > "$FAKE_HERDR_CASE/monitor-1-alive"
+  printf '%s\t%s\n' "$FAKE_MONITOR_PID" "$(/bin/ps -p "$FAKE_MONITOR_PID" -o lstart= | awk '{$1=$1; print}')" > "$registry_dir/$name.event.monitor-owner"
 }
 
 remove_current_completion_proof() {
@@ -1789,6 +1795,83 @@ test_blocked_working_cycle_preserves_assignment_and_proof() (
   assert_file_absent "$FAKE_HERDR_CASE/tab-alive" "resumed assignment remains cancellable"
 )
 
+test_monitor_identity_fences_new_assignments() (
+  for action in followup retry; do
+    for fault in missing unreadable directory malformed unknown dead live; do
+      setup_case "supervision-$action-$fault"
+      export HERDR_AXI_MANAGED_TASK=1 HERDR_MONITOR_INBOX=1
+      write_complete_transcript
+      if [[ "$action" == followup ]]; then run_hook settled "$(payload)"; fi
+      write_worker_registry
+      registry="$HERDR_RECEIPT_ROOT/ws/worker.json"
+      if [[ "$action" == retry ]]; then
+        jq '.stage="rejected" | .delivery_error="agent_blocked"' "$registry" > "$TMPDIR/registry"
+        mv "$TMPDIR/registry" "$registry"
+      fi
+      owner="${HERDR_MONITOR_RECEIPT}.monitor-owner"
+      case "$fault" in
+        missing) rm "$owner" ;;
+        unreadable) chmod 000 "$owner" ;;
+        directory) rm "$owner"; mkdir "$owner" ;;
+        malformed) printf '%s\n' incomplete > "$owner" ;;
+        unknown)
+          printf '%s\n' "$FAKE_MONITOR_PID" > "$FAKE_HERDR_CASE/ps-fail-pid"
+          printf '%s\n' 100 > "$FAKE_HERDR_CASE/ps-fail-count"
+          ;;
+        dead)
+          # The actual lifecycle process exits; its pane deliberately survives.
+          HERDR_MONITOR_READY=testready bash "$monitor_script" worker worker orch "$HERDR_MONITOR_RECEIPT" "$hook_script" > "$TMPDIR/monitor" &
+          monitor_pid=$!
+          trap 'kill "$monitor_pid" 2>/dev/null || true; wait "$monitor_pid" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 150); do
+            if rg -q '^herdr-monitor-ready:testready$' "$TMPDIR/monitor"; then break; fi
+            sleep 0.02
+          done
+          rg -q '^herdr-monitor-ready:testready$' "$TMPDIR/monitor" || fail "monitor never became ready"
+          assert_eq "$monitor_pid" "$(cut -f 1 "$owner")" "real process owns identity"
+          kill "$monitor_pid"
+          wait "$monitor_pid" 2>/dev/null || true
+          trap - EXIT
+          assert_file_present "$FAKE_HERDR_CASE/monitor-1-alive" "pane survives monitor exit"
+          ;;
+      esac
+      before=$(< "$HERDR_MONITOR_RECEIPT")
+      generation=$(jq -r '.generation' "$registry")
+      printf '%s\n' idle > "$FAKE_HERDR_CASE/status"
+      printf '%s\n' 'new bounded task' > "$TMPDIR/prompt"
+      if bash "$orchestrator_script" "$action" worker --prompt-file "$TMPDIR/prompt" > "$TMPDIR/result" 2>&1; then
+        [[ "$fault" == live ]] || fail "$action accepted $fault supervision"
+        assert_eq 1 "$(file_value "$FAKE_HERDR_CASE/worker-prompts")" "$action live monitor permits one input"
+      else
+        [[ "$fault" != live ]] || fail "$action rejected live supervision: $(< "$TMPDIR/result")"
+        rg -q MONITOR_SUPERVISION_LOST "$TMPDIR/result" || fail "missing actionable supervision error: $(< "$TMPDIR/result")"
+        assert_eq 0 "$(file_value "$FAKE_HERDR_CASE/worker-prompts")" "$action $fault sends no input"
+        assert_eq "$generation" "$(jq -r '.generation' "$registry")" "$action $fault preserves generation"
+        assert_eq "$before" "$(< "$HERDR_MONITOR_RECEIPT")" "$action $fault preserves receipt"
+      fi
+      if [[ "$fault" == unreadable ]]; then chmod 600 "$owner"; fi
+    done
+  done
+)
+
+test_monitor_ready_requires_published_identity() (
+  for fault in process-start publication; do
+    setup_case "monitor-identity-$fault"
+    write_complete_transcript
+    if [[ "$fault" == process-start ]]; then
+      : > "$FAKE_HERDR_CASE/ps-fail-all"
+    else
+      mkdir "${HERDR_MONITOR_RECEIPT}.monitor-owner"
+    fi
+    if HERDR_MONITOR_READY=unsafe bash "$monitor_script" worker worker orch "$HERDR_MONITOR_RECEIPT" "$hook_script" > "$TMPDIR/result" 2>&1; then
+      fail "monitor acknowledged $fault failure"
+    fi
+    if rg -q '^herdr-monitor-ready:' "$TMPDIR/result"; then fail "ready emitted without durable identity"; fi
+    rg -q MONITOR_START_UNVERIFIED "$TMPDIR/result" || fail "missing startup repair guidance"
+    assert_eq 0 "$(call_count '^agent get')" "unidentified monitor cannot acknowledge backend readiness"
+  done
+)
+
 test_rejected_prompt_reuses_monitor_and_cannot_replay_ambiguous_delivery() (
   setup_case rejected-prompt
   export HERDR_AXI_MANAGED_TASK=1
@@ -2654,6 +2737,8 @@ test_created_stage_handoff_without_monitor_or_receipt() (
 )
 
 tests=(
+  test_monitor_identity_fences_new_assignments
+  test_monitor_ready_requires_published_identity
   test_rejected_prompt_reuses_monitor_and_cannot_replay_ambiguous_delivery
   test_monitor_start_ack_required_before_prompt
   test_registry_native_identity_survives_start_and_fences_capture

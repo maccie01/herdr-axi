@@ -127,6 +127,37 @@ render_result() {
     "$script_dir/herdr-hook-notify.sh" "$event" </dev/null
 }
 
+# A surviving pane is not evidence that its lifecycle process is still running.
+require_live_monitor() {
+  local name="$1" receipt_file="$2"
+  local registry_file="$registry_dir/$name.json"
+  local monitor_pane monitor_pid="" monitor_start="" pane_info generation notice reason=""
+  if [[ ! -e "$registry_file" && "${HERDR_AXI_MANAGED_TASK:-}" != 1 ]]; then return 0; fi
+  monitor_pane=$(jq -r '.monitor_pane // empty' "$registry_file" 2>/dev/null || true)
+  pane_info=$(herdr pane get "$monitor_pane" 2>/dev/null || true)
+  if [[ -z "$monitor_pane" ]] || ! jq -e --slurpfile registry "$registry_file" \
+    '.result.pane | .pane_id == $registry[0].monitor_pane and .tab_id == $registry[0].tab_id and .workspace_id == $registry[0].workspace_id' \
+    <<<"$pane_info" >/dev/null 2>&1; then
+    reason="registered monitor pane unavailable or changed"
+  elif [[ ! -f "${receipt_file}.monitor-owner" || ! -r "${receipt_file}.monitor-owner" ]] ||
+    ! { IFS=$'\t' read -r monitor_pid monitor_start < "${receipt_file}.monitor-owner"; } 2>/dev/null; then
+    reason="monitor process identity unavailable"
+  elif [[ "$(herdr_lock_owner_state "$monitor_pid" "$monitor_start")" != live ]]; then
+    reason="monitor process not affirmatively live"
+  fi
+  generation=$(jq -r '.generation // empty' "$registry_file" 2>/dev/null || true)
+  if [[ -z "$reason" && -r "${receipt_file}.monitor-error" ]]; then
+    notice=$(head -c 4096 "${receipt_file}.monitor-error" 2>/dev/null || true)
+    if [[ "$notice" == "-"$'\t'* || ( -n "$generation" && "$notice" == "$generation"$'\t'* ) ]]; then
+      reason="monitor reported ${notice#*$'\t'}"
+    fi
+  fi
+  if [[ -n "$reason" ]]; then
+    printf '%s\n' "MONITOR_SUPERVISION_LOST: $name: $reason; no prompt sent. Inspect herdr-axi run inbox; cancel the task explicitly with herdr-axi run cancel before replacement. Do not retry input or restart an unverified monitor." >&2
+    return 1
+  fi
+}
+
 refresh_registry_generation() {
   local name="$1"
   local receipt_file="$2"
@@ -401,6 +432,7 @@ case "$command_name" in
       exit 1
     }
     receipt_file="$HERDR_RECEIPT_FILE"
+    require_live_monitor "$name" "$receipt_file" || exit 1
     if [[ -e "$registry_dir/$name.json" ]]; then
       herdr_registry_capture_identity "$registry_dir/$name.json" || exit 1
     fi
@@ -453,9 +485,8 @@ case "$command_name" in
     jq -e '.result.agent.agent_status == "idle" or .result.agent.agent_status == "done"' <<<"$info" >/dev/null || {
       printf '%s\n' "herdr-orchestrator: rejected prompt is not ready; inspect its dialog" >&2; exit 1;
     }
-    monitor_pane=$(jq -er '.monitor_pane' "$registry_file") || exit 1
-    herdr pane get "$monitor_pane" >/dev/null || exit 1
     receipt_file="$HERDR_RECEIPT_FILE"
+    require_live_monitor "$name" "$receipt_file" || exit 1
     herdr_receipt_lock_acquire "$receipt_file" || exit 1
     completion_generation=$(jq -er 'select(.stage == "rejected" and .delivery_error == "agent_blocked") | .generation' "$registry_file") ||
       close_locked_error "retry requires durable pre-submit rejection: $name"
