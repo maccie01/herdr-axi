@@ -407,7 +407,7 @@ bash engine/test-herdr-monitor.sh
 Dependency-free `node:test` regressions plus Bash engine tests; both isolate their
 fake backend from the live fleet. Bash lock-identity checks need process inspection
 (`ps`), which restrictive sandboxes may block. Historical live evidence and known
-limits: [LIVE-TEST.md on dev](https://github.com/jxn-cmd/herdr-axi/blob/dev/LIVE-TEST.md).
+limits: [LIVE-TEST.md on dev](https://github.com/maccie01/herdr-axi/blob/dev/LIVE-TEST.md).
 
 | Branch | Contents / promotion |
 | --- | --- |
