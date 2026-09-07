@@ -5,13 +5,19 @@ import { fileURLToPath } from "node:url";
 // rate-limit retries are not evidence of exhausted subscription/session capacity.
 export function quotaError(text) {
   const lines = text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").split("\n");
-  // Visible history is not the active prompt. A permission/trust selector wins
-  // over any retained quota line; never turn a request for consent into closure.
-  if (lines.some((line) => /(?:do you (?:want|trust)|would you like|allow .+\?|yes,? (?:i trust|allow)|(?:enter|return) to confirm|\b(?:y\/n|yes\/no)\b|^[\s│┃]*[❯›>]\s*\S)/i.test(line))) return null;
+  // A real consent dialog anywhere on screen wins over retained quota history.
+  // Generic submitted prompts are history, not necessarily consent selectors.
+  if (lines.some((line) => /(?:do you (?:want|trust)|would you like|allow .+\?|yes,? (?:i trust|allow)|(?:enter|return) to confirm|\b(?:y\/n|yes\/no)\b|^[\s│┃]*[❯›>]\s*(?:\d+[.)]\s*)?(?:yes|no|allow|deny|trust|accept|reject)\b)/i.test(line))) return null;
   for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim().replace(/\s*[│┃]$/, "");
+    const line = lines[i].trim().replace(/^[│┃]\s*/, "").replace(/\s*[│┃]$/, "");
+    if (/^[❯›>]\s*\S/.test(line)) return null;
     const match = line.match(/^(?:[✗×!●•■]\s*)?(You have exceeded your monthly quota|Session limit reached|You(?:'|’)ve (?:hit|reached) your (?:(?:usage|session|weekly|monthly) )?limit|You have reached your (?:usage|session|weekly|monthly) limit)(?:\s|[.!:(]|$)/i);
-    if (match) return { code: "QUOTA_EXHAUSTED", scope: /monthly/i.test(match[1]) ? "monthly" : /weekly/i.test(match[1]) ? "weekly" : "session", message: line.slice(0, 240) };
+    if (match) {
+      // Unmarked lines after a submitted prompt may still be pasted input.
+      // Require a native error marker in that ambiguous case, never guess closure.
+      if (!/^[✗×!●•■]/.test(line) && lines.slice(0, i).some((before) => /^[\s│┃]*[❯›>]\s*\S/.test(before))) return null;
+      return { code: "QUOTA_EXHAUSTED", scope: /monthly/i.test(match[1]) ? "monthly" : /weekly/i.test(match[1]) ? "weekly" : "session", message: line.slice(0, 240) };
+    }
     if (/^[●•]\s|^\$\s/.test(line)) return null; // later activity supersedes an old error
   }
   return null;

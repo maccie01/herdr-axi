@@ -8,7 +8,7 @@ if [[ "${HERDR_MONITOR_RENDER_ONLY:-}" != "1" && -z "${HERDR_MONITOR_ORCHESTRATO
   exit 0
 fi
 
-for dependency in herdr jq awk tail head find mktemp cksum dirname sleep ln stat ps wc; do
+for dependency in "${HERDR_BIN:-herdr}" jq awk tail head find mktemp cksum dirname sleep ln stat ps wc; do
   command -v "$dependency" >/dev/null || exit 0
 done
 
@@ -152,7 +152,7 @@ native_transcript_tail() {
           end
           | select(type == "string" and length > 0)
           | gsub("[[:space:]]+"; " ")
-          | .[0:3500]
+          | .[0:3501]
         ' 2>/dev/null |
         tail -n 1
       ;;
@@ -169,12 +169,12 @@ native_transcript_tail() {
                 if ($text | test("(?m)^\\s*task:")) then .report = $text else . end
               else . end
             else . end) |
-          (if .report != "" then .report else .last end) | .[0:3500]
+          (if .report != "" then .report else .last end) | .[0:3501]
         ' 2>/dev/null
       ;;
     codex)
       tail -n 500 "$path" 2>/dev/null |
-        jq -r 'select(.type == "response_item" and .payload.type == "message" and .payload.role == "assistant") | [.payload.content[]? | .text // empty] | join(" ") | select(length > 0) | gsub("[[:space:]]+"; " ") | .[0:3500]' 2>/dev/null |
+        jq -r 'select(.type == "response_item" and .payload.type == "message" and .payload.role == "assistant") | [.payload.content[]? | .text // empty] | join(" ") | select(length > 0) | gsub("[[:space:]]+"; " ") | .[0:3501]' 2>/dev/null |
         tail -n 1
       ;;
   esac
@@ -320,6 +320,8 @@ fi
 if [[ "$event_kind" == "error" && -n "$hook_message" ]]; then
   detail="${hook_message}"$'\n'"${detail}"
 fi
+detail_truncated=false
+if (( $(printf '%s' "$detail" | wc -c) > 3500 )); then detail_truncated=true; fi
 detail=$(printf '%s\n' "$detail" | head -c 3500)
 
 case "$event_kind" in
@@ -403,12 +405,23 @@ fi
 
 delivered=false
 if [[ "${HERDR_MONITOR_INBOX:-0}" == "1" ]]; then
-  # One atomic, generation-bound inbox item per worker. The coordinator pulls
-  # summaries in batches; hooks never type into its terminal.
+  # Current lifecycle notification and completion evidence share one atomic item.
+  # Input/lost events must not replace the completed report used for acceptance.
   inbox_tmp=$(mktemp "${receipt_file}.inbox.tmp.XXXXXXXX")
+  previous_inbox=/dev/null
+  if [[ -e "${receipt_file}.inbox" ]]; then previous_inbox="${receipt_file}.inbox"; fi
   if jq -nc --arg event "$event_kind" --arg generation "$receipt_generation" \
     --arg summary "$detail" --arg fingerprint "$fingerprint" --argjson quota "$quota_json" \
-    '{event:$event,generation:$generation,fingerprint:$fingerprint,summary:($summary | .[0:600]),detail:($summary | .[0:3500]),truncated:($summary | length > 600)} + (if $quota != null then {quota:$quota} else {} end)' > "$inbox_tmp" &&
+    --argjson detail_truncated "$detail_truncated" \
+    --slurpfile previous "$previous_inbox" '
+      {event:$event,generation:$generation,fingerprint:$fingerprint,summary:($summary | .[0:600]),detail:($summary | .[0:3500]),truncated:($summary | length > 600)} |
+      (if $event == "settled" then . + {truncated:$detail_truncated} else
+        (($previous[0].completion // ($previous[0] | select(.event == "settled"))) |
+          select(.event == "settled" and .generation == $generation) |
+          {event,generation,fingerprint,summary,detail,truncated}) // null
+      end) as $completion |
+      . + (if $completion != null then {completion:$completion} else {} end) +
+      (if $quota != null then {quota:$quota} else {} end)' > "$inbox_tmp" &&
     mv -f "$inbox_tmp" "${receipt_file}.inbox"; then
     delivered=true
   else

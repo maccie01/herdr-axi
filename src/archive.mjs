@@ -28,19 +28,32 @@ function cleanupControls(dir) {
   }
   if (directory) try { fs.rmdirSync(operations); } catch (e) { if (!["ENOTEMPTY", "ENOENT", "EEXIST"].includes(e.code)) throw e; }
 }
-export function history(run, taskId) {
+export function history(run, taskId, revision) {
+  const help = [taskId ? `herdr-axi run history --task ${taskId}` : "herdr-axi run history --help"];
+  if (revision !== undefined && (!taskId || !/^[1-9][0-9]*$/.test(String(revision)) || !Number.isSafeInteger(Number(revision)))) throw runError("--revision needs --task and a positive integer (1-based)", "INVALID_VALUE", help);
   let detail = run;
   if (taskId && run.finishedAt && regular(path.join(runDir(), "detail.json.gz"))) detail = JSON.parse(gunzipSync(fs.readFileSync(path.join(runDir(), "detail.json.gz")), { maxOutputLength: 100000000 }));
   const tasks = detail.tasks.filter((t) => !taskId || t.id === taskId);
   if (taskId && !tasks.length) throw runError("Unknown task ID");
+  if (revision !== undefined) {
+    if (run.finishedAt && detail === run) throw runError("Revision detail expired; restore detail.json.gz from a backup", "DETAIL_EXPIRED", help);
+    const v = tasks[0].revisions?.[Number(revision) - 1];
+    if (!v) throw runError("Unknown revision; use an index from the task history", "INVALID_VALUE", help);
+    return { run: run.id, task: taskId, revision: Number(revision), at: v.at,
+      ...(v.generation ? { generation: v.generation } : {}),
+      prompt: v.prompt?.slice(0, 4000) || "(not retained)", ...(v.prompt?.length > 4000 ? { promptTruncated: true } : {}),
+      ...(v.result ? { result: v.result.slice(0, 3500) } : { summary: v.summary || "(not retained)", note: "Detailed result not retained for this revision." }),
+      ...(v.resultSource ? { resultSource: v.resultSource } : {}), truncated: !!v.truncated || v.result?.length > 3500,
+      help };
+  }
   return { run: run.id, project: run.project, ...(run.finishedAt ? { finished: run.finishedAt } : {}),
     ...(run.ownerHandoffs?.length ? { ownerHandoffs: run.ownerHandoffs.map((h) => ({ at: h.at, from: h.from.pane, to: h.to.pane, evidence: h.evidence.slice(0, 600) })) } : {}),
     ...(taskId && tasks[0]?.resultSource ? { resultSource: tasks[0].resultSource } : {}),
     ...(taskId && tasks[0]?.cancellation ? { cancellation: { at: tasks[0].cancellation.at, evidence: tasks[0].cancellation.evidence.slice(0, 1000), capture: tasks[0].cancellation.capture } } : {}),
-    tasks: tasks.slice(-8).map((t) => ({ task: t.id, phase: t.phase, role: t.role || t.kind, state: t.state, cwd: t.cwd, area: t.area, ...(t.summary && !(taskId && t.result) ? { summary: t.summary } : {}), ...(t.evidence ? { evidence: t.evidence } : {}), ...(t.commit ? { commit: t.commit } : {}), ...(taskId ? { prompt: t.prompt?.slice(0, 4000) || "(detail expired)", ...(t.prompt?.length > 4000 ? { truncated: true } : {}), ...(t.result ? { result: t.result.slice(0, 3500) } : {}), revisions: (t.revisions ?? []).map((v) => ({ at: v.at, prompt: v.prompt.slice(0, 1000), summary: v.summary })) } : {}) })),
+    tasks: tasks.slice(-8).map((t) => ({ task: t.id, phase: t.phase, role: t.role || t.kind, state: t.state, cwd: t.cwd, area: t.area, ...(t.summary && !(taskId && t.result) ? { summary: t.summary } : {}), ...(t.evidence ? { evidence: t.evidence } : {}), ...(t.commit ? { commit: t.commit } : {}), ...(taskId ? { prompt: t.prompt?.slice(0, 4000) || "(detail expired)", ...(t.prompt?.length > 4000 ? { truncated: true } : {}), ...(t.result ? { result: t.result.slice(0, 3500) } : {}), revisions: (t.revisions ?? []).map((v, i) => ({ revision: i + 1, at: v.at, prompt: v.prompt.slice(0, 1000), summary: v.summary })) } : {}) })),
     ...(taskId && tasks[0]?.handoffs?.length ? { handoffs: tasks[0].handoffs.map((h) => ({ at: h.at, from: h.from.kind, to: h.to.kind, model: h.to.model, quota: h.quota.scope, state: h.state, summary: h.summary.slice(0, 600), capture: h.capture })) } : {}),
     ...(tasks.length > 8 ? { more: tasks.length - 8 } : {}), events: (detail.events ?? []).filter((e) => !taskId || e.task === taskId).slice(-8),
-    help: [tasks.length && !taskId ? `herdr-axi run history --task ${tasks.at(-1).id}` : "herdr-axi run history --all"] };
+    help: [taskId && tasks[0]?.revisions?.length ? `herdr-axi run history --task ${taskId} --revision ${tasks[0].revisions.length}` : tasks.length && !taskId ? `herdr-axi run history --task ${tasks.at(-1).id}` : "herdr-axi run history --all"] };
 }
 
 export function projectHistory(project) {

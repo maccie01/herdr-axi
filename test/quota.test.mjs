@@ -25,6 +25,8 @@ test("permission/trust UI supersedes retained quota text for every provider", ()
   for (const dialog of ["Do you want to proceed?\n❯ 1. Yes\n  2. No", "Accessing workspace:\nYes, I trust this folder\nEnter to confirm", "Allow tool execution?\n(y/n)", "❯ Allow once\n  Deny"]) {
     assert.equal(quotaError(`You have exceeded your monthly quota\n${dialog}`), null);
     assert.equal(quotaError(`You've hit your session limit\n${dialog}`), null);
+    assert.equal(quotaError(`${dialog}\nYou have exceeded your monthly quota`), null);
+    assert.equal(quotaError(`${dialog}\nYou've hit your session limit`), null);
   }
 });
 
@@ -35,4 +37,35 @@ test("quota detection recognizes native limits, not instructions, costs, retry l
   for (const message of ["You've hit your limit · resets 7pm", "● You've reached your session limit", "■ You’ve hit your usage limit. Try again later", "! You have reached your usage limit"]) assert.equal(quotaError(message).code, "QUOTA_EXHAUSTED");
   assert.equal(quotaError("You've reached your weekly limit").scope, "weekly");
   for (const text of ['Explain "You have exceeded your monthly quota"', '> You have exceeded your monthly quota', '"Session limit reached"', 'Session: 236.28 AIC used', 'Rate limit exceeded; retry in 2s', '✗ You have exceeded your monthly quota\n● Continuing the task', '✗ You have exceeded your monthly quota\n$ Shell run tests']) assert.equal(quotaError(text), null, text);
+});
+
+test("fresh Copilot quota follows a submitted prompt; newer consent still wins", () => {
+  const frame = [
+    "┃ ❯ Read input.txt and report its contents. Do not edit files. ┃",
+    "┃                                                        ┃",
+    "┃ ✗ You have exceeded your monthly quota (Request ID: abc) ┃",
+    "┃                                                        ┃",
+    "┃ ❯                                                      ┃",
+    "┃ /commands · GPT-5.6 Sol                                 ┃",
+  ].join("\n");
+  assert.equal(quotaError(frame)?.scope, "monthly");
+  for (const newer of ["┃ ❯ Allow once ┃\n┃   Deny ┃", "┃ Do you want to proceed? ┃\n┃ Enter to confirm ┃", "┃ ● Continuing the task ┃"]) {
+    assert.equal(quotaError(`${frame}\n${newer}`), null, newer);
+  }
+  for (const message of ["✗ You have exceeded your monthly quota", "● You've hit your session limit", "■ You’ve hit your usage limit"]) {
+    assert.equal(quotaError(`❯ Submitted earlier task\n${message}\n❯`)?.code, "QUOTA_EXHAUSTED", message);
+    assert.equal(quotaError(`${message}\n❯ A newer user prompt`), null, message);
+  }
+  const cli = spawnSync(process.execPath, [fileURLToPath(new URL("../src/quota.mjs", import.meta.url))], { input: frame, encoding: "utf8" });
+  assert.equal(cli.status, 0, cli.stderr);
+  assert.equal(JSON.parse(cli.stdout).scope, "monthly");
+});
+
+test("unmarked quota in multiline submitted input is not native evidence", () => {
+  for (const message of ["You have exceeded your monthly quota (Request ID: example)", "Session limit reached", "You've hit your session limit"]) {
+    for (const text of [`❯ Explain this error from the report:\n  ${message}\n❯`, `┃ ❯ Explain this error: ┃\n┃   ${message} ┃\n┃ ❯ ┃`]) {
+      assert.equal(quotaError(text), null, text);
+    }
+    assert.equal(quotaError(message)?.code, "QUOTA_EXHAUSTED", "standalone native error remains supported");
+  }
 });

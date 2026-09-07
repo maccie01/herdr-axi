@@ -25,6 +25,7 @@ usage() {
     "  $0 inspect NAME [NAME ...]" \
     "  $0 result NAME" \
     "  $0 followup NAME --prompt-file PATH" \
+    "  $0 retry NAME --prompt-file PATH  # explicit pre-submit rejection only" \
     "  $0 close NAME" >&2
   exit 2
 }
@@ -139,7 +140,7 @@ refresh_registry_generation() {
     return 1
   temp_file=$(mktemp "${registry_file}.tmp.XXXXXXXX") || return 1
   if ! jq --arg generation "$generation" \
-    '.generation = $generation' "$registry_file" > "$temp_file"; then
+    '.previous_generation = .generation | .generation = $generation' "$registry_file" > "$temp_file"; then
     rm -f "$temp_file"
     return 1
   fi
@@ -343,7 +344,9 @@ case "$command_name" in
     }
     resolve_agent_paths "$name" "$workspace_id"
     compact_result=$(printf '%s\n' "$start_result" | jq -c '.')
-    printf '%s\n' "$compact_result" > "$registry_dir/$name.json"
+    registry_tmp=$(mktemp "$registry_dir/$name.json.tmp.XXXXXXXX")
+    printf '%s\n' "$compact_result" > "$registry_tmp"
+    mv -f "$registry_tmp" "$registry_dir/$name.json"
     printf '%s\n' "$compact_result"
     ;;
   inspect)
@@ -398,6 +401,9 @@ case "$command_name" in
       exit 1
     }
     receipt_file="$HERDR_RECEIPT_FILE"
+    if [[ -e "$registry_dir/$name.json" ]]; then
+      herdr_registry_capture_identity "$registry_dir/$name.json" || exit 1
+    fi
     herdr_receipt_lock_acquire "$receipt_file" || {
       printf '%s\n' "herdr-orchestrator: followup could not lock receipt: $name" >&2
       exit 1
@@ -426,8 +432,51 @@ case "$command_name" in
     followup_task=$(herdr_append_completion_instruction \
       "$(< "$3")" "$receipt_file" "$completion_generation")
     if ! deliver_prompt "$name" "$followup_task" "$completion_generation"; then
+      if [[ -e "$registry_dir/$name.json" ]]; then
+        herdr_registry_capture_identity "$registry_dir/$name.json" true || true
+      fi
       exit 1
     fi
+    if [[ -e "$registry_dir/$name.json" ]]; then
+      herdr_registry_capture_identity "$registry_dir/$name.json" true || exit 1
+    fi
+    herdr_registry_delivery_stage "$name" "$completion_generation" submitted || exit 1
+    jq -nc --arg name "$name" '{name:$name,prompt_delivered:true}'
+    ;;
+  retry)
+    [[ "${HERDR_AXI_MANAGED_TASK:-}" == 1 && $# == 3 && "$2" == --prompt-file && -r "$3" ]] || usage
+    name="$1"
+    resolve_agent_paths "$name"
+    registry_file="$registry_dir/$name.json"
+    herdr_registry_capture_identity "$registry_file" || exit 1
+    info=$(agent_info "$name")
+    jq -e '.result.agent.agent_status == "idle" or .result.agent.agent_status == "done"' <<<"$info" >/dev/null || {
+      printf '%s\n' "herdr-orchestrator: rejected prompt is not ready; inspect its dialog" >&2; exit 1;
+    }
+    monitor_pane=$(jq -er '.monitor_pane' "$registry_file") || exit 1
+    herdr pane get "$monitor_pane" >/dev/null || exit 1
+    receipt_file="$HERDR_RECEIPT_FILE"
+    herdr_receipt_lock_acquire "$receipt_file" || exit 1
+    completion_generation=$(jq -er 'select(.stage == "rejected" and .delivery_error == "agent_blocked") | .generation' "$registry_file") ||
+      close_locked_error "retry requires durable pre-submit rejection: $name"
+    herdr_receipt_read "$receipt_file" || close_locked_error "retry receipt unavailable: $name"
+    [[ "$receipt_generation" == "$completion_generation" && "$receipt_terminal" != closed &&
+      "$receipt_settled_fingerprint" != "generation:$completion_generation" ]] || close_locked_error "retry generation already settled or changed: $name"
+    # Rejection sent no work. Rearm with a linked generation so the first real
+    # submission may establish its native session without weakening identity.
+    completion_generation=$(herdr_new_generation) || close_locked_error "retry generation unavailable: $name"
+    herdr_receipt_rearm_locked "$receipt_file" rejected-retry "$completion_generation" || close_locked_error "retry rearm failed: $name"
+    refresh_registry_generation "$name" "$receipt_file" "$completion_generation" || close_locked_error "retry registry rearm failed: $name"
+    # Consume retry authority before releasing the lock or sending input.
+    herdr_registry_delivery_stage "$name" "$completion_generation" submitting || close_locked_error "retry reservation failed: $name"
+    herdr_receipt_lock_release
+    retry_task=$(herdr_append_completion_instruction "$(< "$3")" "$receipt_file" "$completion_generation")
+    if ! deliver_prompt "$name" "$retry_task" "$completion_generation"; then
+      herdr_registry_capture_identity "$registry_file" true || true
+      exit 1
+    fi
+    herdr_registry_capture_identity "$registry_file" true || exit 1
+    herdr_registry_delivery_stage "$name" "$completion_generation" submitted || exit 1
     jq -nc --arg name "$name" '{name:$name,prompt_delivered:true}'
     ;;
   close)

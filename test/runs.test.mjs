@@ -47,6 +47,10 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       assert(args.includes("--wait"));
       assert.equal(args[args.indexOf("--timeout") + 1], "15000");
       assert(args.includes("working"), "must acknowledge working rather than wait for settlement");
+      if (fs.existsSync(path.join(dir, "prompt-rejected"))) {
+        const a = find(args[0]); a.agent_status = "blocked"; save(a);
+        console.error(JSON.stringify({ error: { code: "agent_blocked", message: "approval required before any input" } })); process.exit(1);
+      }
       const a = find(args[0]); a.agent_status = "working"; save(a);
       if (fs.existsSync(path.join(dir, "session-rotate"))) { a.agent_session = { value: randomUUID() }; save(a); }
       if (fs.existsSync(path.join(dir, "prompt-uncertain"))) {
@@ -64,7 +68,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       if (fs.existsSync(path.join(dir, "create-fail"))) { console.error("backend unavailable before tab create"); process.exit(1); }
       const id = randomUUID().slice(0, 8);
       const a = { ...owner, pane_id: `wTEST:p${id}`, tab_id: `wTEST:t${id}`, terminal_id: id, name: "", label: args[args.indexOf("--label") + 1], agent: "", agent_status: "idle", cwd: args[args.indexOf("--cwd") + 1] };
-      save(a); emit({ tab: { tab_id: a.tab_id }, root_pane: { pane_id: a.pane_id } });
+      save(a); emit({ tab: { tab_id: a.tab_id }, root_pane: { pane_id: a.pane_id, terminal_id: a.terminal_id } });
     } else if (action === "get") {
       const panes = [...currentOwner(), ...all(), ...monitors()].filter((a) => a.tab_id === args[0]);
       const a = panes[0] ?? missing("tab");
@@ -91,6 +95,8 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
   } else if (action === "get") {
     const a = [...currentOwner(), ...all(), ...monitors()].find((a) => a.pane_id === args[0]) ?? missing("pane");
     emit({ pane: { pane_id: args[0], tab_id: a.tab_id } });
+  } else if (action === "wait-output" && fs.existsSync(path.join(dir, "monitor-not-ready"))) {
+    console.error(JSON.stringify({ error: { code: "timeout", message: "monitor never started" } })); process.exit(1);
   } else if (["run", "wait-output"].includes(action)) emit({ ok: true });
   else throw Error(`unexpected pane ${action}`);
 } else {
@@ -732,6 +738,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       for (const command of [["fleet"], ["run", "inbox"], ["watch", "--timeout-ms", "100"], ["read", w.pane]]) {
         const output = f.ok(command); assert.match(output, /quota|QUOTA_EXHAUSTED/);
         assert(output.includes(`herdr-axi run switch ${w.pane} --kind codex --model gpt-5.6-sol`));
+        assert.doesNotMatch(output, /then accept or revise/, "quota alert is not a saved completion report");
       }
       const refused = f.execute(["run", "accept", w.pane, "--evidence", "partial only"]);
       assert.equal(refused.status, 1); assert.match(refused.output, /QUOTA_EXHAUSTED/);
@@ -761,6 +768,38 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       const archive = JSON.parse(gunzipSync(fs.readFileSync(path.join(f.env.HERDR_AXI_RUN, "detail.json.gz"))));
       assert.match(archive.tasks[0].handoffs[0].output, /monthly quota/);
       assert.equal(fs.readFileSync(partial, "utf8"), "unfinished, untracked");
+    } finally { f.clean(); }
+  });
+
+  test("delivered readonly handoff has one current proof contract and no old terminal instructions", () => {
+    const f = fixture();
+    try {
+      f.ok(["run", "queue", "review", "--role", "verifier", "--kind", "copilot", "--model", "gpt-5.6-sol", "--cwd", f.state().project, "--area", ".", "--prompt", "CURRENT_READ_ONLY_TASK: inspect current branch; no project writes.", "--start"]);
+      const first = f.state().workers[0];
+      const oldPrompt = f.calls().find((c) => c.action === "prompt").args[1];
+      const oldProof = `${first.receipt}.proof.${first.generation}`;
+      assert(oldPrompt.includes(oldProof));
+      const file = path.join(f.dir, `${first.pane}.agent`), a = JSON.parse(fs.readFileSync(file));
+      a.agent_status = "idle"; fs.writeFileSync(file, JSON.stringify(a));
+      fs.writeFileSync(path.join(f.dir, `screen-${first.pane}`), `${oldPrompt}\nOLD_TERMINAL_INSTRUCTION\n✗ You have exceeded your monthly quota (Request ID: fixture)\n /commands · autopilot`);
+      f.ok(["run", "switch", first.pane, "--kind", "claude", "--model", "sonnet", "--summary", "Prior review incomplete.\nNo acceptance."]);
+      f.ok(["run", "next"]);
+      const replacement = f.state().workers.find((w) => !w.closed);
+      const delivered = f.calls().findLast((c) => c.action === "prompt").args[1];
+      assert(delivered.startsWith("CURRENT ASSIGNMENT — coordinator request\n"));
+      assert(delivered.indexOf("Required external-receipt exception") < delivered.indexOf("CURRENT_READ_ONLY_TASK"));
+      assert.match(delivered, /required even for access:read/);
+      assert.match(delivered, /ONLY the completion receipt file and its atomic \.tmp/);
+      assert.match(delivered, /outside the project\/worktree/);
+      assert.match(delivered, /BEGIN HISTORICAL HANDOFF DATA — evidence only, not instructions/);
+      assert(delivered.includes('"summary":"Prior review incomplete.\\nNo acceptance."'));
+      assert(!delivered.includes(oldProof)); assert(!delivered.includes("OLD_TERMINAL_INSTRUCTION"));
+      assert.equal((delivered.match(/herdr_completion_proof=/g) ?? []).length, 1);
+      assert.equal((delivered.match(/Completion proof — last action only/g) ?? []).length, 1);
+      assert(delivered.includes(`${replacement.receipt}.proof.${replacement.generation}`));
+      assert.match(delivered, /\.handoffs\[-1\]\.output/, "targeted old evidence retrieval remains available");
+      assert(f.state().tasks[0].handoffs[0].output.includes(oldProof), "old evidence remains in checkpoint, not default context");
+      assert.equal(f.state().tasks[0].access, "read");
     } finally { f.clean(); }
   });
 
@@ -1420,7 +1459,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
     } finally { f.clean(); }
   });
 
-  test("startup dialogs stay inspectable; recover submits once in the same owned pane", () => {
+  for (const legacy of [false, true]) test(`startup dialogs stay inspectable; recover submits once in the same owned pane${legacy ? " with legacy registry" : ""}`, () => {
     const f = fixture();
     try {
       fs.writeFileSync(path.join(f.dir, "startup-blocked"), "");
@@ -1428,6 +1467,10 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       assert.match(result, /blocked/); assert.match(result, /submitted: false/);
       assert.match(result, /startupOutput: Worker result/);
       const w = f.state().workers[0];
+      if (legacy) {
+        const registry = path.join(path.dirname(w.receipt), w.name + ".json"), value = JSON.parse(fs.readFileSync(registry));
+        delete value.native_identity; fs.writeFileSync(registry, JSON.stringify(value));
+      }
       assert.match(result, new RegExp(`herdr-axi read ${w.pane} --raw`));
       assert.equal(JSON.parse(fs.readFileSync(path.join(f.dir, `${w.pane}.agent`))).label, "a · codex");
       assert.equal(f.calls().filter((c) => ["prompt", "send-keys"].includes(c.action)).length, 0);
@@ -1438,6 +1481,108 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       assert.equal(f.state().tasks[0].errorCode, undefined, "successful launch clears the old startup error");
       assert.equal(f.calls().filter((c) => c.action === "create").length, 1);
       assert.equal(f.calls().filter((c) => c.action === "prompt").length, 1);
+    } finally { f.clean(); }
+  });
+
+  test("unconfirmed monitor startup offers cancellation and never submits or duplicates the monitor", () => {
+    const f = fixture();
+    try {
+      fs.writeFileSync(path.join(f.dir, "monitor-not-ready"), "");
+      f.queue("startup");
+      const result = f.ok(["run", "next"]), w = f.state().workers[0];
+      assert.match(result, /MONITOR_START_UNVERIFIED/); assert.match(result, /submitted: false/);
+      assert.match(result, /herdr-axi run cancel startup/); assert.doesNotMatch(result, /herdr-axi run recover/);
+      assert.equal(w.stage, "created"); assert(w.monitor);
+      assert.match(f.ok(["run", "status"]), /herdr-axi run cancel startup/);
+      for (const args of [["run", "inbox"], ["watch", "--task", "startup", "--timeout-ms", "1000"]])
+        assert.match(f.ok(args), /herdr-axi run cancel startup/);
+      const recovery = f.execute(["run", "recover", "startup"]);
+      assert.equal(recovery.status, 1); assert.match(recovery.output, /MONITOR_START_UNVERIFIED/);
+      assert(!f.calls().some((c) => c.action === "prompt"));
+      assert.equal(f.calls().filter((c) => c.action === "split").length, 1);
+      f.ok(["run", "cancel", "startup", "--evidence", "Unsubmitted monitor startup failed; authorized test cleanup"]);
+      assert.equal(f.calls().filter((c) => c.action === "close").length, 1);
+      assert(!fs.existsSync(path.join(f.dir, `${w.monitor}.monitor`)));
+    } finally { f.clean(); }
+  });
+
+  for (const followup of [false, true]) test(`definite pre-submit rejection recovers ${followup ? "followup" : "startup"} in the existing pane and monitor`, () => {
+    const f = fixture();
+    try {
+      f.queue("first", "shared");
+      if (followup) {
+        f.ok(["run", "next"]); const w = f.state().workers[0]; f.complete(w);
+        f.ok(["run", "accept", w.pane, "--evidence", "First result verified"]);
+        f.queue("second", "shared");
+      }
+      fs.writeFileSync(path.join(f.dir, "prompt-rejected"), "");
+      const rejected = f.ok(["run", "next"]), w = f.state().workers[0], task = f.state().tasks.at(-1);
+      assert.match(rejected, /submitted: false/); assert.match(rejected, /PROMPT_REJECTED/);
+      assert.match(rejected, /run recover/); assert.doesNotMatch(rejected, /Monitor startup unconfirmed|run cancel/);
+      assert.equal(w.stage, "rejected");
+      const attempts = f.calls().filter((c) => c.action === "prompt").length;
+      assert(!f.calls().some((c) => c.action === "send-keys"), "no automatic trust approval");
+      assert.match(f.execute(["run", "recover", task.id]).output, /STARTUP_NOT_READY/);
+      assert.equal(f.calls().filter((c) => c.action === "prompt").length, attempts);
+      f.ok(["dispatch", w.pane, "--keys", "enter"]);
+      fs.unlinkSync(path.join(f.dir, "prompt-rejected"));
+      fs.writeFileSync(path.join(f.dir, "session-rotate"), "");
+      const inbox = f.ok(["run", "inbox"]); assert.match(inbox, /not_submitted/); assert.match(inbox, /run recover/);
+      assert.match(f.ok(["run", "recover", task.id]), /running/);
+      const recovered = f.state().workers[0];
+      assert.equal(recovered.pane, w.pane); assert.equal(recovered.monitor, w.monitor);
+      assert.notEqual(recovered.generation, w.generation); assert(recovered.session);
+      assert.equal(f.calls().filter((c) => c.action === "create").length, 1);
+      assert.equal(f.calls().filter((c) => c.action === "split").length, 1);
+      assert.equal(f.calls().filter((c) => c.action === "prompt").length, attempts + 1);
+      assert.equal(f.execute(["run", "recover", task.id]).status, 1);
+      assert.equal(f.calls().filter((c) => c.action === "prompt").length, attempts + 1);
+    } finally { f.clean(); }
+  });
+
+  test("rejected followup lost publication persists its verified generation before retry rearm", () => {
+    const f = fixture();
+    try {
+      f.queue("first", "shared"); f.ok(["run", "next"]);
+      const original = f.state().workers[0]; f.complete(original);
+      f.ok(["run", "accept", original.pane, "--evidence", "Initial task verified"]);
+      f.queue("second", "shared"); fs.writeFileSync(path.join(f.dir, "prompt-rejected"), "");
+      const code = `import fs from 'node:fs'; import {runCommand} from ${JSON.stringify(new URL("../src/runs.mjs", import.meta.url).href)};
+        const rename=fs.renameSync; fs.renameSync=(from,to)=>{
+          if(String(to).endsWith('/run.json') && JSON.parse(fs.readFileSync(from)).tasks.some(t=>t.state==='uncertain'))
+            throw Object.assign(Error('injected rejected publication failure'),{code:'EIO'});
+          return rename(from,to);
+        }; console.log(JSON.stringify(await runCommand('next',{_:[]})));`;
+      const launched = spawnSync(process.execPath, ["--input-type=module", "-e", code], { env: f.env, encoding: "utf8", timeout: 20000 });
+      assert.equal(launched.status, 0, launched.stderr); assert.match(launched.stdout, /record_pending/);
+      const registry = path.join(path.dirname(original.receipt), original.name + ".json");
+      const rejected = JSON.parse(fs.readFileSync(registry));
+      assert.equal(rejected.stage, "rejected"); assert.equal(rejected.previous_generation, original.generation);
+      assert.equal(f.state().workers[0].generation, original.generation);
+      f.ok(["dispatch", original.pane, "--keys", "enter"]); fs.unlinkSync(path.join(f.dir, "prompt-rejected"));
+      fs.writeFileSync(path.join(f.dir, "session-rotate"), "");
+      assert.match(f.ok(["run", "recover", "second"]), /running/);
+      assert.equal(f.state().tasks.at(-1).state, "running");
+      assert.equal(f.state().workers[0].previousGeneration, rejected.generation);
+      assert(f.state().workers[0].session);
+      assert.equal(f.calls().filter((c) => c.action === "prompt").length, 3);
+      assert.equal(f.calls().filter((c) => c.action === "split").length, 1);
+    } finally { f.clean(); }
+  });
+
+  test("ambiguous acknowledgement after rejected retry never authorizes another prompt", () => {
+    const f = fixture();
+    try {
+      fs.writeFileSync(path.join(f.dir, "prompt-rejected"), "");
+      f.queue("task"); f.ok(["run", "next"]); const w = f.state().workers[0];
+      f.ok(["dispatch", w.pane, "--keys", "enter"]); fs.unlinkSync(path.join(f.dir, "prompt-rejected"));
+      fs.writeFileSync(path.join(f.dir, "prompt-uncertain"), "");
+      const retry = f.ok(["run", "recover", "task"]); assert.match(retry, /uncertain/); assert.doesNotMatch(retry, /submitted: false/);
+      assert.equal(f.state().workers[0].stage, "submitting");
+      const attempts = f.calls().filter((c) => c.action === "prompt").length;
+      f.ok(["run", "recover", "task"]);
+      assert.equal(f.state().tasks[0].state, "running");
+      assert.equal(f.calls().filter((c) => c.action === "prompt").length, attempts);
     } finally { f.clean(); }
   });
 
@@ -1456,6 +1601,136 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       assert.equal(retry.status, 1); assert.match(retry.output, /STARTUP_NOT_READY/);
       assert(retry.output.includes(`herdr-axi read ${w.pane} --raw --lines 60 --chars 8000`));
       assert(!f.calls().some((c) => ["prompt", "send-keys"].includes(c.action)));
+    } finally { f.clean(); }
+  });
+
+  for (const field of ["terminal", "session"]) test(`uncertain recovery cannot adopt replacement ${field} or authorize its cancellation`, () => {
+    const f = fixture();
+    try {
+      fs.writeFileSync(path.join(f.dir, "session-rotate"), "");
+      fs.writeFileSync(path.join(f.dir, "prompt-uncertain"), "");
+      f.queue("identity"); f.ok(["run", "next"]);
+      const before = f.state(), w = before.workers[0];
+      const file = path.join(f.dir, `${w.pane}.agent`), a = JSON.parse(fs.readFileSync(file));
+      if (field === "terminal") a.terminal_id = "replacement-terminal";
+      else a.agent_session.value = "replacement-session";
+      fs.writeFileSync(file, JSON.stringify(a));
+      assert.match(f.ok(["run", "status"]), /lost/);
+      for (const args of [["run", "recover", "identity"], ["run", "cancel", "identity", "--evidence", "Authorized original task only"]]) {
+        const failed = f.execute(args);
+        assert.equal(failed.status, 1, failed.output); assert.match(failed.output, /WORKER_CHANGED/);
+      }
+      assert.deepEqual(f.state().workers, before.workers);
+      assert.equal(f.state().tasks[0].state, "uncertain");
+      assert.equal(f.calls().filter((c) => c.action === "prompt").length, 1);
+      assert(!f.calls().some((c) => c.action === "close"));
+    } finally { f.clean(); }
+  });
+
+  for (const followup of [false, true]) test(`durable native identity fences recovery after ${followup ? "followup" : "initial"} publication failure`, () => {
+    const f = fixture();
+    try {
+      fs.writeFileSync(path.join(f.dir, "session-rotate"), "");
+      f.queue("identity");
+      if (followup) {
+        f.ok(["run", "next"]); const w = f.state().workers[0]; f.complete(w);
+        f.ok(["run", "accept", w.pane, "--evidence", "Original result reviewed"]);
+        f.queue("next-task", "identity");
+      }
+      const code = `import fs from 'node:fs'; import {runCommand} from ${JSON.stringify(new URL("../src/runs.mjs", import.meta.url).href)};
+        const rename=fs.renameSync; fs.renameSync=(from,to)=>{
+          if(String(to).endsWith('/run.json') && JSON.parse(fs.readFileSync(from)).tasks.some(t=>t.state==='running'))
+            throw Object.assign(Error('injected publication failure'),{code:'EIO'});
+          return rename(from,to);
+        }; console.log(JSON.stringify(await runCommand('next',{_:[]})));`;
+      const launched = spawnSync(process.execPath, ["--input-type=module", "-e", code], { env: f.env, encoding: "utf8", timeout: 20000 });
+      assert.equal(launched.status, 0, launched.stderr); assert.match(launched.stdout, /record_pending/);
+      const r = f.state(), t = r.tasks.at(-1), registryFile = path.join(f.env.HERDR_AXI_RUN, "receipts", r.workspace, t.name + ".json");
+      const registry = JSON.parse(fs.readFileSync(registryFile));
+      assert(registry.native_identity.terminal); assert(registry.native_identity.session);
+      if (followup) assert.equal(registry.previous_generation, r.workers[0].generation);
+      const native = path.join(f.dir, registry.agent_pane + ".agent"), original = JSON.parse(fs.readFileSync(native));
+      for (const field of ["terminal", "session"]) {
+        const replacement = structuredClone(original);
+        if (field === "terminal") replacement.terminal_id = "replacement-terminal";
+        else replacement.agent_session.value = "replacement-session";
+        fs.writeFileSync(native, JSON.stringify(replacement));
+        for (const args of [["run", "recover", t.id], ["run", "cancel", t.id, "--evidence", "Original task only"]]) {
+          const refused = f.execute(args); assert.equal(refused.status, 1, refused.output); assert.match(refused.output, /WORKER_CHANGED/);
+        }
+        assert(!f.calls().some((c) => c.action === "close"));
+      }
+      fs.writeFileSync(native, JSON.stringify(original));
+      const prompts = f.calls().filter((c) => c.action === "prompt").length;
+      f.ok(["run", "recover", t.id]);
+      assert.equal(f.state().tasks.at(-1).state, "running");
+      assert.equal(f.state().workers[0].session, original.agent_session.value);
+      assert.equal(f.calls().filter((c) => c.action === "prompt").length, prompts, "recovery never resends");
+    } finally { f.clean(); }
+  });
+
+  test("missing native identity never authorizes control of a live registry-only worker", () => {
+    const f = fixture();
+    try {
+      f.queue("uncaptured"); f.ok(["run", "next"]);
+      const r = f.state(), w = r.workers[0]; r.workers = []; r.tasks[0].state = "uncertain"; f.write(r);
+      const file = path.join(path.dirname(w.receipt), w.name + ".json"), registry = JSON.parse(fs.readFileSync(file));
+      delete registry.native_identity; fs.writeFileSync(file, JSON.stringify(registry));
+      for (const args of [["run", "recover", "uncaptured"], ["run", "cancel", "uncaptured", "--evidence", "Original task only"]]) {
+        const refused = f.execute(args); assert.equal(refused.status, 1, refused.output); assert.match(refused.output, /WORKER_CHANGED/);
+      }
+      assert(!f.calls().some((c) => c.action === "close"));
+    } finally { f.clean(); }
+  });
+
+  test("completion survives a real input hook and is the report displayed and accepted", () => {
+    const f = fixture();
+    try {
+      f.queue("notification"); f.ok(["run", "next"]);
+      const w = f.state().workers[0]; f.complete(w);
+      const file = path.join(f.dir, `${w.pane}.agent`), a = JSON.parse(fs.readFileSync(file));
+      a.agent_status = "blocked"; fs.writeFileSync(file, JSON.stringify(a));
+      const hook = spawnSync("bash", [fileURLToPath(new URL("../engine/herdr-hook-notify.sh", import.meta.url)), "input", JSON.stringify({ title: "Approval", message: "UNRELATED_PERMISSION_QUESTION" })], {
+        env: { ...f.env, HERDR_AXI_NODE: process.execPath, HERDR_MONITOR_ENABLED: "1", HERDR_MONITOR_INBOX: "1", HERDR_MONITOR_AGENT: w.name, HERDR_MONITOR_ORCHESTRATOR: owner.pane_id, HERDR_WORKSPACE_ID: w.workspace, HERDR_RECEIPT_ROOT: path.dirname(path.dirname(w.receipt)), HERDR_MONITOR_RECEIPT: w.receipt }, encoding: "utf8", timeout: 20000,
+      });
+      assert.equal(hook.status, 0, hook.stderr);
+      assert.match(f.ok(["run", "inbox"]), /UNRELATED_PERMISSION_QUESTION/);
+      a.agent_status = "idle"; fs.writeFileSync(file, JSON.stringify(a));
+      const inbox = f.ok(["run", "inbox"]);
+      assert.match(inbox, /checks passed/); assert.doesNotMatch(inbox, /UNRELATED_PERMISSION_QUESTION/);
+      f.ok(["run", "accept", w.pane, "--evidence", "Reviewed original checks"]);
+      assert.equal(f.state().tasks[0].result, "checks passed");
+    } finally { f.clean(); }
+  });
+
+  for (const invalid of ["input", "wrong-generation"]) test(`accept and revise refuse ${invalid} report despite completed receipt`, () => {
+    const f = fixture();
+    try {
+      f.queue("report"); f.ok(["run", "next"]);
+      const w = f.state().workers[0]; f.complete(w);
+      const event = { event: "input", generation: w.generation, summary: "not completion" };
+      if (invalid === "wrong-generation") event.completion = { event: "settled", generation: "old", summary: "old completion" };
+      fs.writeFileSync(w.receipt + ".inbox", JSON.stringify(event));
+      for (const args of [["run", "accept", w.pane, "--evidence", "reviewed"], ["run", "revise", w.pane, "--prompt", "fix"]]) {
+        const failed = f.execute(args);
+        assert.equal(failed.status, 1); assert.match(failed.output, /RESULT_UNAVAILABLE/);
+      }
+      const inbox = f.ok(["run", "inbox"]);
+      assert.match(inbox, /errors/); assert.doesNotMatch(inbox, /herdr-axi run accept/);
+      assert.equal(f.state().tasks[0].state, "running");
+      assert.equal(f.calls().filter((c) => c.action === "prompt").length, 1);
+    } finally { f.clean(); }
+  });
+
+  test("inbox returns bounded saved completion details without reading changed terminal history", () => {
+    const f = fixture();
+    try {
+      f.queue("detail"); f.ok(["run", "next"]); const w = f.state().workers[0]; f.complete(w);
+      const detail = "summary ".repeat(90) + "UNIQUE_SAVED_CHECK";
+      fs.writeFileSync(w.receipt + ".inbox", JSON.stringify({ event: "input", generation: w.generation, summary: "UNRELATED_UI", completion: { event: "settled", generation: w.generation, summary: detail.slice(0, 600), detail, truncated: false } }));
+      const output = f.ok(["run", "inbox"]);
+      assert.match(output, /UNIQUE_SAVED_CHECK/); assert.doesNotMatch(output, /UNRELATED_UI/);
+      assert.match(output, /herdr-axi run accept/); assert(Buffer.byteLength(output) < 4000);
     } finally { f.clean(); }
   });
 
@@ -1994,6 +2269,64 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       assert.equal(result.status, 0, result.output); assert.match(result.output, /labelError/);
       assert(Date.now() - at < 2000, "cosmetic timeout cannot hold publication hostage");
     } finally { if (launch) await launch; f.clean(); }
+  });
+
+  test("task-scoped watch rejects malformed proof bytes without repeated immediate attention", () => {
+    const f = fixture();
+    try {
+      f.queue("proof"); f.ok(["run", "next"]); const w = f.state().workers[0];
+      const file = path.join(f.dir, `${w.pane}.agent`), a = JSON.parse(fs.readFileSync(file));
+      a.agent_status = "idle"; fs.writeFileSync(file, JSON.stringify(a));
+      const proof = `${w.receipt}.proof.${w.generation}`;
+      for (const value of [`${"x".repeat(w.generation.length)}\n`, w.generation, `${w.generation}\r\n`, `${w.generation}\nextra`, "wrong-generation\n"]) {
+        fs.writeFileSync(proof, value);
+        const start = Date.now(), output = f.ok(["watch", "--task", "proof", "--timeout-ms", "300"]);
+        assert(Date.now() - start >= 300, output);
+        assert.match(output, /reason: timeout/); assert.match(output, /INVALID_COMPLETION_PROOF/);
+        assert.doesNotMatch(output, /reason: attention|run accept/);
+      }
+      fs.writeFileSync(proof, `${w.generation}\n`);
+      const output = f.ok(["watch", "--task", "proof", "--timeout-ms", "300"]);
+      assert.match(output, /reason: attention/);
+      assert.doesNotMatch(output, /INVALID_COMPLETION_PROOF/);
+    } finally { f.clean(); }
+  });
+
+  test("task-scoped watch retains context I/O errors without repeatedly waking on an existing failure", () => {
+    const f = fixture();
+    try {
+      f.queue("context"); f.ok(["run", "next"]);
+      const source = `import fs from 'node:fs'; import assert from 'node:assert/strict';
+        import { runStatus, watchRun } from ${JSON.stringify(new URL("../src/runs.mjs", import.meta.url).href)};
+        const write = fs.writeFileSync;
+        fs.writeFileSync = (file, ...args) => { if (String(file).includes('/context.json.')) throw Object.assign(Error('context disk unavailable'), {code: 'EIO'}); return write(file, ...args); };
+        assert.equal(runStatus().contextError, 'context disk unavailable');
+        for (let i = 0; i < 2; i++) {
+          const start = Date.now(), result = await watchRun(300, 'context');
+          assert.equal(result.reason, 'timeout'); assert(Date.now() - start >= 300);
+          assert.equal(result.contextError, 'context disk unavailable');
+        }`;
+      const result = spawnSync(process.execPath, ["--input-type=module", "-e", source], { env: f.env, encoding: "utf8", timeout: 10000 });
+      assert.equal(result.status, 0, result.stderr);
+    } finally { f.clean(); }
+  });
+
+  test("task-scoped watch wakes with a new context I/O diagnostic", () => {
+    const f = fixture();
+    try {
+      f.queue("context"); f.ok(["run", "next"]);
+      const source = `import fs from 'node:fs'; import assert from 'node:assert/strict';
+        import { watchRun } from ${JSON.stringify(new URL("../src/runs.mjs", import.meta.url).href)};
+        const write = fs.writeFileSync, rename = fs.renameSync;
+        let probes = 0;
+        // Keep the successful first probe uncached; the next real probe fails.
+        fs.renameSync = (from, to) => { if (String(to).endsWith('/context.json')) return; return rename(from, to); };
+        fs.writeFileSync = (file, ...args) => { if (String(file).includes('/context.json.') && ++probes > 1) throw Error('new context EIO'); return write(file, ...args); };
+        const result = await watchRun(300, 'context');
+        assert.equal(result.reason, 'state-change'); assert.equal(result.contextError, 'new context EIO');`;
+      const result = spawnSync(process.execPath, ["--input-type=module", "-e", source], { env: f.env, encoding: "utf8", timeout: 10000 });
+      assert.equal(result.status, 0, result.stderr);
+    } finally { f.clean(); }
   });
 
   test("parked identity drift defers its worktree without aborting prior selections", () => {

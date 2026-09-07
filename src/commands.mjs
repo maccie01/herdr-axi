@@ -189,7 +189,7 @@ export function run(args) {
   const [action = "status", ...rest] = args;
   if (action === "watch") return watch(rest);
   const specs = {
-    init: { dir: "string", owner: "string", project: "string" }, status: {}, inbox: {}, next: {}, unlock: {}, leases: {}, config: { full: "boolean" }, history: { task: "string", all: "boolean" }, finish: {}, gc: {},
+    init: { dir: "string", owner: "string", project: "string" }, status: {}, inbox: {}, next: {}, unlock: {}, leases: {}, config: { full: "boolean" }, history: { task: "string", revision: "string", all: "boolean" }, finish: {}, gc: {},
     queue: { kind: "string", role: "string", model: "string", effort: "string", start: "boolean", cwd: "string", area: "string", prompt: "string", "prompt-file": "string", after: "string" },
     move: { cwd: "string", area: "string" },
     takeover: { from: "string", evidence: "string" },

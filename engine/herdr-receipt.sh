@@ -21,6 +21,30 @@ herdr_process_start() {
   ps -p "$1" -o lstart= 2>/dev/null | awk '{$1=$1; print}'
 }
 
+# Native identity survives a coordinator publication failure in the existing
+# registry. Session rotation is permitted only around our own start/prompt.
+herdr_registry_capture_identity() {
+  local file="$1" rotate="${2:-false}" pane info temporary
+  pane=$(jq -er '.agent_pane' "$file") || return 1
+  info=$(herdr agent get "$pane") || return 1
+  temporary=$(mktemp "${file}.tmp.XXXXXXXX") || return 1
+  if ! jq --argjson info "$info" --argjson rotate "$rotate" '
+    $info.result.agent as $a |
+    {terminal: ($a.terminal_id // null), session: ($a.agent_session.value // null)} as $identity |
+    if $a.pane_id == .agent_pane and $a.tab_id == .tab_id and
+      $a.workspace_id == .workspace_id and $a.name == .name and
+      (($identity.terminal | type) == "string" and ($identity.terminal | length) > 0 or
+       ($identity.session | type) == "string" and ($identity.session | length) > 0) and
+      (.native_identity.terminal == null or .native_identity.terminal == $identity.terminal) and
+      ($rotate or .native_identity.session == null or .native_identity.session == $identity.session)
+    then .native_identity = $identity
+    else error("worker native identity unavailable or changed") end' "$file" > "$temporary"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  if ! mv -f "$temporary" "$file"; then rm -f "$temporary"; return 1; fi
+}
+
 herdr_new_generation() {
   local generation_file generation
   generation_file=$(mktemp "${TMPDIR:-/tmp}/herdr-generation.XXXXXXXX") || return 1
@@ -394,11 +418,28 @@ herdr_agent_status() {
     jq -r '.result.agent.agent_status // empty' 2>/dev/null
 }
 
+herdr_registry_delivery_stage() {
+  local name="$1" generation="$2" stage="$3" error="${4:-}" file temporary
+  [[ -n "$HERDR_RECEIPT_REGISTRY_DIR" ]] || return 0
+  file="$HERDR_RECEIPT_REGISTRY_DIR/$name.json"
+  [[ -e "$file" ]] || return 0 # Legacy unmanaged delivery has no registry.
+  temporary=$(mktemp "${file}.tmp.XXXXXXXX") || return 1
+  if ! jq --arg name "$name" --arg generation "$generation" --arg stage "$stage" --arg error "$error" '
+    if .name == $name and .generation == $generation then
+      .stage=$stage | if $error == "" then del(.delivery_error) else .delivery_error=$error end
+    else error("delivery registry generation mismatch") end' "$file" > "$temporary"; then
+    rm -f "$temporary"; return 1
+  fi
+  if ! mv -f "$temporary" "$file"; then rm -f "$temporary"; return 1; fi
+}
+
 herdr_deliver_prompt() {
   local agent_name="$1"
   local task="$2"
   local delivery_marker="$3"
   local prompt_json prompt_status=0 error_code visible state
+  HERDR_PROMPT_REJECTED=false
+  herdr_registry_delivery_stage "$agent_name" "$delivery_marker" submitting || return 1
 
   # Acknowledge a post-submit transition, not the entire task. Native prompt
   # wait rejects the pre-submit idle snapshot; fast completion is also valid.
@@ -412,7 +453,18 @@ herdr_deliver_prompt() {
 
   error_code=$(printf '%s\n' "$prompt_json" |
     jq -r '.error.code // empty' 2>/dev/null || true)
-  [[ "$error_code" == "agent_prompt_stalled" ]] || return 1
+  # Herdr's documented agent_blocked error rejects before sending ANY input.
+  # A timeout/stalled prompt is different: never infer rejection from the screen.
+  if [[ "$error_code" == "agent_blocked" ]]; then
+    herdr_registry_delivery_stage "$agent_name" "$delivery_marker" rejected agent_blocked || return 1
+    HERDR_PROMPT_REJECTED=true
+    printf '%s\n' "PROMPT_REJECTED: agent_blocked; no input sent. Resolve the dialog, then recover this task." >&2
+    return 1
+  fi
+  if [[ "$error_code" != "agent_prompt_stalled" ]]; then
+    printf '%s\n' "herdr prompt failed: ${error_code:-unclassified}; delivery may have occurred" >&2
+    return 1
+  fi
 
   visible=$(herdr agent read "$agent_name" --source visible --lines 100 2>/dev/null || true)
   printf '%s\n' "$visible" | rg -Fq -- "$delivery_marker" || return 1
