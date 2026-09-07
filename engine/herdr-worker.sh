@@ -104,6 +104,7 @@ else
   --env "HERDR_MONITOR_INBOX=${HERDR_MONITOR_INBOX:-0}" \
   --env "HERDR_AXI_RUN=" \
   --env "HERDR_AXI_WORKER=1" \
+  --env DISABLE_AUTO_UPDATE=true \
   --env "HERDR_AXI_BIN=$script_dir/../bin/herdr-axi.mjs" \
   --env "HERDR_AXI_NODE=$HERDR_AXI_NODE" \
   --env "PATH=$script_dir/../bin:$PATH" \
