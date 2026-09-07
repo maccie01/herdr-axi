@@ -403,7 +403,17 @@ bash engine/test-herdr-monitor.sh
 Dependency-free `node:test` regressions plus Bash engine tests; both isolate their
 fake backend from the live fleet. Bash lock-identity checks need process inspection
 (`ps`), which restrictive sandboxes may block. Historical live evidence and known
-limits: [LIVE-TEST.md](../LIVE-TEST.md).
+limits: [LIVE-TEST.md on dev](https://github.com/jxn-cmd/herdr-axi/blob/dev/LIVE-TEST.md).
+
+| Branch | Contents / promotion |
+| --- | --- |
+| `main` | Supported code, executable tests, user documentation, final README images |
+| `dev` | Same code baseline plus curated live-test evidence and figure sources; runtime receipts/logs remain outside Git |
+| Feature branches | Branch from `main`; validate, merge into `main`, then bring `main` into `dev` while retaining dev-only artifacts |
+
+- Never merge all of `dev` into `main`; promote specific code changes through a feature branch.
+- Keep the globally linked checkout on `main`; separate worktree for development.
+- Development evidence retained in Git history, not a confidentiality boundary; scrub sensitive content before making the repository public.
 
 Implementation: [`src/`](../src/) for CLI/run policy; [`engine/`](../engine/) for worker
 lifecycle, generation-bound receipts and verified closure. Built with
