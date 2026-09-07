@@ -3,7 +3,7 @@
 - Independent dependency while another task is lost/blocked: `herdr-axi watch --task TASK`; one watcher/run remains enforced. Other tasks stay visible and unresolved.
 - Task-scoped watch waits through intermediate native idle/done without proof; published late proof triggers collection. Unknown/blocked/lost still requires attention.
 - `revise` preserves the prior generation, bounded report and truncation marker. Missing/corrupt report: repair via inbox, or supply an explicitly reviewed `--result-file FILE`; no silent overwrite.
-- Claude startup: at most four footer checks, three 250ms delays for missing evidence only. Visible manual/plan/bypass mode: immediate refusal, no prompt sent.
+- Claude startup: up to six footer checks; missing evidence backs off 0.25/0.5/1/2/4s. Already-visible Auto: no delay. Visible manual/plan/bypass: immediate refusal, no prompt sent. Still missing: inspect/recover; no automatic approval.
 
 - Quickstart and visual overview: [README](../README.md).
 - Two-call onboarding: `run init`; returned export + `run queue --start` together. No help/config/fleet preflight.
