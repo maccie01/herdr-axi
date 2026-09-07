@@ -94,17 +94,26 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
     emit({ pane: { pane_id: a.pane_id + "MONITOR" } });
   } else if (action === "get") {
     const a = [...currentOwner(), ...all(), ...monitors()].find((a) => a.pane_id === args[0]) ?? missing("pane");
-    emit({ pane: { pane_id: args[0], tab_id: a.tab_id } });
+    emit({ pane: { pane_id: args[0], tab_id: a.tab_id, workspace_id: a.workspace_id } });
   } else if (action === "wait-output" && fs.existsSync(path.join(dir, "monitor-not-ready"))) {
     console.error(JSON.stringify({ error: { code: "timeout", message: "monitor never started" } })); process.exit(1);
-  } else if (["run", "wait-output"].includes(action)) emit({ ok: true });
+  } else if (action === "wait-output") {
+    const receipts = path.join(process.env.HERDR_AXI_RUN, "receipts", "wTEST");
+    const registry = fs.readdirSync(receipts).filter((n) => n.endsWith(".json")).map((n) => JSON.parse(fs.readFileSync(path.join(receipts, n)))).find((w) => w.monitor_pane === args[0]);
+    assert(registry, "monitor readiness requires registered topology");
+    const pid = process.env.AXI_TEST_MONITOR_PID;
+    const start = spawnSync("ps", ["-p", pid, "-o", "lstart="], { encoding: "utf8" }).stdout.trim().replace(/\s+/g, " ");
+    assert(start, "monitor fixture requires a verifiable persistent test process");
+    fs.writeFileSync(`${registry.receipt_file}.monitor-owner`, `${pid}\t${start}\n`);
+    emit({ ok: true });
+  } else if (action === "run") emit({ ok: true });
   else throw Error(`unexpected pane ${action}`);
 } else {
   function fixture() {
     const dir = fs.mkdtempSync(path.join(tmpdir(), "herdr-axi-run-test-"));
     const bin = path.join(dir, "bin"); fs.mkdirSync(bin);
     for (const [name, target] of [["herdr", self], ["node", process.execPath], ["jq", "/opt/homebrew/bin/jq"], ["rg", "/opt/homebrew/bin/rg"]]) fs.symlinkSync(target, path.join(bin, name));
-    const env = { ...process.env, PATH: `${bin}:/usr/bin:/bin`, HERDR_BIN: self, HERDR_ENV: "1", HERDR_PANE_ID: owner.pane_id, HERDR_TAB_ID: owner.tab_id, HERDR_AXI_RUN: path.join(dir, "run"), HERDR_AXI_STATE_HOME: path.join(dir, "state"), AXI_RUN_TEST: dir };
+    const env = { ...process.env, PATH: `${bin}:/usr/bin:/bin`, HERDR_BIN: self, HERDR_ENV: "1", HERDR_PANE_ID: owner.pane_id, HERDR_TAB_ID: owner.tab_id, HERDR_AXI_RUN: path.join(dir, "run"), HERDR_AXI_STATE_HOME: path.join(dir, "state"), AXI_RUN_TEST: dir, AXI_TEST_MONITOR_PID: String(process.pid) };
     const cliCalls = [];
     const execute = (args, extra = {}) => {
       cliCalls.push(args);
@@ -1649,6 +1658,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       const registry = JSON.parse(fs.readFileSync(registryFile));
       assert(registry.native_identity.terminal); assert(registry.native_identity.session);
       if (followup) assert.equal(registry.previous_generation, r.workers[0].generation);
+      assert.doesNotMatch(f.ok(["run", "status"]), /ASSIGNMENT_NOT_SUBMITTED/, "durably rearmed delivery is not an old-assignment preflight failure");
       const native = path.join(f.dir, registry.agent_pane + ".agent"), original = JSON.parse(fs.readFileSync(native));
       for (const field of ["terminal", "session"]) {
         const replacement = structuredClone(original);
@@ -1824,6 +1834,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       f.ok(["run", "cancel", "collision"]);
       fs.writeFileSync(path.join(f.env.HERDR_AXI_RUN, "user-notes"), "keep");
       assert.match(f.ok(["run", "finish"]), /archived: true/);
+      for (const w of started.workers) assert(!fs.existsSync(`${w.receipt}.monitor-owner`), "finished runtime removes the monitor owner identity");
       assert(fs.existsSync(path.join(f.env.HERDR_AXI_RUN, "detail.json.gz")));
       assert(!fs.existsSync(path.join(f.env.HERDR_AXI_RUN, "task-writer.txt")));
       assert(fs.existsSync(path.join(f.env.HERDR_AXI_RUN, "user-notes")));
@@ -1942,7 +1953,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       assert(Date.now() - start >= 300); assert.match(timeout, /reason: timeout/); assert.match(timeout, /watching: healthy/);
       const agentFile = path.join(f.dir, `${healthy.pane}.agent`), native = JSON.parse(fs.readFileSync(agentFile));
       native.agent_status = "done"; fs.writeFileSync(agentFile, JSON.stringify(native));
-      assert.match(f.ok(["watch", "--task", "healthy", "--timeout-ms", "300"]), /reason: timeout/, "native settlement alone is not a finished task");
+      assert.match(f.ok(["watch", "--task", "healthy", "--timeout-ms", "300"]), /reason: missing-proof/, "native settlement alone is diagnosed after the full timeout, not accepted");
       watching = f.asyncRun(["watch", "--task", "healthy", "--timeout-ms", "6000"]);
       await new Promise((resolve) => setTimeout(resolve, 600));
       f.complete(healthy);
@@ -2326,6 +2337,76 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
         assert.equal(result.reason, 'state-change'); assert.equal(result.contextError, 'new context EIO');`;
       const result = spawnSync(process.execPath, ["--input-type=module", "-e", source], { env: f.env, encoding: "utf8", timeout: 10000 });
       assert.equal(result.status, 0, result.stderr);
+    } finally { f.clean(); }
+  });
+
+  for (const reuse of [false, true]) for (const failure of ["task-file", "monitor-missing"]) test(`assignment-generation fence retains the old report after ${reuse ? "reuse" : "revision"} fails before rearm: ${failure}`, () => {
+    const f = fixture();
+    try {
+      f.queue("original", "shared"); f.ok(["run", "next"]);
+      const w = f.state().workers[0]; f.complete(w);
+      const id = reuse ? "replacement" : "original";
+      if (reuse) {
+        f.ok(["run", "accept", w.pane, "--evidence", "Original report independently checked"]);
+        f.queue(id, "shared");
+      }
+      const file = path.join(f.env.HERDR_AXI_RUN, `task-${id}.txt`);
+      if (failure === "task-file") { fs.rmSync(file, { force: true }); fs.mkdirSync(file); }
+      else fs.unlinkSync(path.join(f.dir, `${w.monitor}.monitor`));
+      const failed = f.ok(reuse ? ["run", "next"] : ["run", "revise", w.pane, "--prompt", "NEW assignment, never delivered"]);
+      assert.match(failed, /uncertain/);
+      if (failure === "monitor-missing") assert.match(failed, /MONITOR_SUPERVISION_LOST/);
+      assert.match(failed, /submitted: false/); assert.doesNotMatch(failed, /herdr-axi watch/);
+      assert.equal(f.state().tasks.at(-1).assignmentAfter, w.generation);
+      assert.equal(f.state().workers[0].generation, w.generation);
+      if (failure === "task-file") fs.rmdirSync(file);
+      for (const args of [["run", "recover", id], ["run", "accept", w.pane, "--evidence", "Old report cannot prove new work"]]) {
+        const rejected = f.execute(args); assert.equal(rejected.status, 1, rejected.output); assert.match(rejected.output, /ASSIGNMENT_NOT_SUBMITTED/); assert.match(rejected.output, /run cancel/);
+      }
+      for (const args of [["run", "status"], ["run", "inbox"], ["watch", "--task", id, "--timeout-ms", "100"]]) {
+        const status = f.ok(args); assert.match(status, /ASSIGNMENT_NOT_SUBMITTED/); assert.doesNotMatch(status, /,review|checks passed/); assert.match(status, /run cancel/);
+      }
+      assert.equal(f.calls().filter((c) => c.action === "prompt").length, 1);
+      assert.equal(JSON.parse(fs.readFileSync(`${w.receipt}.inbox`)).summary, "checks passed");
+      assert.equal(reuse ? f.state().tasks[0].result : f.state().tasks[0].revisions[0].result, "checks passed");
+      f.ok(["run", "cancel", id, "--evidence", "Unsubmitted new assignment; preserved original result reviewed; authorized stop"]);
+      assert.equal(f.state().tasks.at(-1).state, "cancelled");
+      assert.equal(f.calls().filter((c) => c.action === "close").length, 1, "explicit cancellation closes the whole owned tab");
+    } finally { f.clean(); }
+  });
+
+  test("successful recovery stops labelling a running task with its old delivery error", () => {
+    const f = fixture();
+    try {
+      fs.writeFileSync(path.join(f.dir, "prompt-uncertain"), "");
+      f.queue("stale"); f.ok(["run", "next"]);
+      assert.equal(f.state().tasks[0].errorCode, "ENGINE_ERROR");
+      fs.unlinkSync(path.join(f.dir, "prompt-uncertain"));
+      const attempts = f.calls().filter((c) => c.action === "prompt").length;
+      assert.match(f.ok(["run", "recover", "stale"]), /recovered/);
+      const t = f.state().tasks[0];
+      assert.equal(t.state, "running"); assert.equal(t.errorCode, undefined); assert.equal(t.error, undefined);
+      assert.doesNotMatch(f.ok(["run", "status"]), /ENGINE_ERROR/);
+      assert.equal(f.calls().filter((c) => c.action === "prompt").length, attempts, "recovery never resends the prompt");
+    } finally { f.clean(); }
+  });
+
+  test("task-scoped watch reports a settled turn without proof instead of re-arming itself", () => {
+    const f = fixture();
+    try {
+      f.queue("unproven"); f.ok(["run", "next"]); const w = f.state().workers[0];
+      const file = path.join(f.dir, `${w.pane}.agent`), a = JSON.parse(fs.readFileSync(file));
+      a.agent_status = "idle"; fs.writeFileSync(file, JSON.stringify(a));
+      fs.writeFileSync(path.join(f.dir, `screen-${w.pane}`), "Earlier context".repeat(1000) + "Final answer; completion proof omitted");
+      const start = Date.now(), output = f.ok(["watch", "--task", "unproven", "--timeout-ms", "300"]);
+      assert(Date.now() - start >= 300, "the full timeout tolerates intermediate settlement");
+      assert.match(output, /reason: missing-proof/); assert.match(output, /state: idle/); assert.match(output, /completion proof omitted/);
+      assert(output.includes(`herdr-axi read ${w.pane} --raw --lines 60 --chars 8000`));
+      assert.doesNotMatch(output, /herdr-axi watch --task unproven|run accept|reason: attention/);
+      assert(Buffer.byteLength(output) < 5000);
+      assert.equal(f.state().tasks[0].state, "running", "no synthesized proof or acceptance");
+      fs.writeFileSync(`${w.receipt}.proof.${w.generation}`, `${w.generation}\n`);
+      assert.match(f.ok(["watch", "--task", "unproven", "--timeout-ms", "300"]), /reason: attention/);
     } finally { f.clean(); }
   });
 

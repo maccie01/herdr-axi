@@ -1,5 +1,23 @@
 # Live test — 2026-09-04
 
+## Followup supervision and missing-proof round — 7 September 2026
+
+| Check | Observed |
+| --- | --- |
+| Runtime | Claude Sonnet 5 / medium / Auto; one read-only scratch worker |
+| Owned resources | Agent `w1B:p38`, monitor `w1B:p39`, tab `w1B:t1Z`; run `run6` under `/private/tmp/herdr-axi-fixes.HW5MfL` |
+| Initial task | `input.txt`: 8 UTF-8 bytes; one watch returned saved review report; independently checked |
+| Supervision | Monitor PID/start record matched native `ps` identity before followup |
+| Revision | Same pane; generation `Bnt0yWwD` → `rCTuqaZw`; explicit encoding-choice question, intentionally incomplete |
+| Bounded wait | `watch --task monitor-roundtrip --timeout-ms 3000`: `missing-proof`, native `done`, question visible in bounded diagnostic; no repeat-watch suggestion |
+| No false completion | No proof or acceptance for the unfinished revision; earlier report retained |
+| Cleanup | `run cancel`: whole tab, agent and monitor verified absent; files untouched; no other panes controlled |
+
+- Earlier no-mistakes v1.60.0 fix round: 30-minute timeout, not a validation pass; independent snapshot retained for repair.
+- no-mistakes updated to v1.64.0 after terminal outcome; `doctor`: database, daemon and configured Claude gate agent healthy.
+- Additional executable regressions: old receipts rejected after failed revision/reuse; absent/unknown/dead monitor identity refuses new input; identity-publication failure prevents startup acknowledgement.
+- Live limitation: missing/unreadable process identity and pre-rearm I/O failure injected only in isolated fake-backend tests, not into user sessions.
+
 Baseline: `5f2a681`; globally installed CLI symlinked to this checkout.
 Scratch repository: `/private/tmp/herdr-axi-live.l79XLB`; branch `axi-live-test`.
 

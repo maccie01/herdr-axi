@@ -52,6 +52,24 @@ state() {
     jq -r '.result.agent.agent_status // empty' 2>/dev/null
 }
 
+# Publish before the ready acknowledgement. Leave the identity after exit so a
+# later rearm can distinguish this dead process from a surviving terminal pane.
+record_monitor_owner() {
+  local started temporary=""
+  started=$(herdr_process_start "$$" || true)
+  if [[ -n "$started" && "$(herdr_lock_owner_state "$$" "$started")" == live ]] &&
+    mkdir -p "$(dirname -- "$receipt_file")" &&
+    temporary=$(mktemp "${receipt_file}.monitor-owner.XXXXXXXX") &&
+    printf '%s\t%s\n' "$$" "$started" > "$temporary" &&
+    [[ ! -d "${receipt_file}.monitor-owner" ]] &&
+    mv -f "$temporary" "${receipt_file}.monitor-owner"; then
+    return 0
+  fi
+  [[ -z "$temporary" ]] || rm -f "$temporary"
+  printf '%s\n' "MONITOR_START_UNVERIFIED: cannot publish live monitor identity for $agent_name; no ready acknowledgement. Inspect process visibility and receipt permissions; cancel the owned task before replacement, do not resend its prompt." >&2
+  return 1
+}
+
 # Display only: small receipt/hint reads, no backend polls or lifecycle mutations.
 # Agent readiness and coordinator acceptance are independent states.
 display_status() {
@@ -353,6 +371,7 @@ apply_pending_rearm() {
   pending_generation=""
 }
 
+record_monitor_owner || exit 1
 while true; do
   current_state=$(state "$agent_name") || {
     if report_lost; then exit 0; else exit 1; fi

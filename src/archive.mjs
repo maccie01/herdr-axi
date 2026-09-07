@@ -106,7 +106,7 @@ export function finishRun() {
   for (const w of r.workers) {
     const expected = path.join(dir, "receipts", r.workspace, `${w.name}.event`);
     if (w.receipt !== expected || !/^axi-[a-z0-9-]+$/.test(w.name) || !/^[a-zA-Z0-9]+$/.test(r.workspace)) continue;
-    files.push(expected, expected + ".inbox", expected + ".monitor-error", path.join(path.dirname(expected), w.name + ".json"), path.join(path.dirname(expected), w.name + ".task"));
+    files.push(expected, expected + ".inbox", expected + ".monitor-error", expected + ".monitor-owner", path.join(path.dirname(expected), w.name + ".json"), path.join(path.dirname(expected), w.name + ".task"));
     if (/^[a-zA-Z0-9]+$/.test(w.generation)) files.push(`${expected}.proof.${w.generation}`);
   }
   let removed = 0;
