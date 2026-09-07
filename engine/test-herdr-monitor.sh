@@ -342,7 +342,12 @@ case "$group:$action" in
     fi
     [[ ! -e "$case_dir/pane-wait-fail" ]] || exit 1
     if [[ "${1:-}" == monitor-1 ]]; then
-      printf '%s\t%s\n' "$FAKE_MONITOR_PID" "$(/bin/ps -p "$FAKE_MONITOR_PID" -o lstart= | awk '{$1=$1; print}')" > "${HERDR_MONITOR_RECEIPT}.monitor-owner"
+      registry="${HERDR_RECEIPT_ROOT:?}/$(read_value "$case_dir/workspace" ws)/$(read_value "$case_dir/started-name" worker).json"
+      owner_receipt=""
+      [[ ! -r "$registry" ]] ||
+        owner_receipt=$(jq -r --arg pane "$1" 'select(.monitor_pane == $pane) | .receipt_file // empty' "$registry")
+      [[ -z "$owner_receipt" ]] ||
+        printf '%s\t%s\n' "$FAKE_MONITOR_PID" "$(/bin/ps -p "$FAKE_MONITOR_PID" -o lstart= | awk '{$1=$1; print}')" > "${owner_receipt}.monitor-owner"
     fi
     ready_delay=$(read_value "$case_dir/pane-ready-delay" 0)
     sleep "$ready_delay"

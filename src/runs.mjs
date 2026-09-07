@@ -45,6 +45,7 @@ function workerReport(worker, replacement) {
     if (report?.generation !== worker.generation || typeof report.summary !== "string" || typeof (report.detail ?? report.summary) !== "string" || !(report.detail ?? report.summary).trim()) throw Error("missing/mismatched current report");
     return { summary: report.summary.slice(0, 600), result: (report.detail ?? report.summary).slice(0, 3500), ...(report.truncated || (report.detail ?? report.summary).length > 3500 ? { truncated: true } : {}), ...(replacement ? { resultSource: "coordinator-replacement" } : {}) };
   } catch (e) {
+    if (replacement) throw runError(`Replacement report ${replacement} is unusable: ${e.message}. Correct that file (regular file, 1..3500 characters) and retry, or omit --result-file to use this generation's own report. No acceptance or new generation.`, "RESULT_UNAVAILABLE", [`wc -c ${quote(replacement)}`, "herdr-axi run inbox"]);
     throw runError(`Report unavailable at ${worker.receipt}.inbox: ${e.message}. Retry inbox; if unrecoverable, preserve a reviewed replacement with --result-file FILE. No acceptance or new generation.`, "RESULT_UNAVAILABLE", ["herdr-axi run inbox", `herdr-axi read ${worker.pane} --full`]);
   }
 }
@@ -625,7 +626,7 @@ async function executeRunCommand(action, o) {
     const queued = { queued: id, cwd: location.cwd, area: location.area, worker: { kind, model: role.model, effort: role.effort, access: role.access, mode: launchMode(kind) } };
     if (!o.start) return { ...queued, help: ["herdr-axi run next"] };
     try { return { ...queued, ...await executeRunCommand("next", { _: [] }) }; }
-    catch (e) { throw runError(`Task ${id} is already queued; do not queue again. ${e.message}`, e.code, ["herdr-axi run next"]); }
+    catch (e) { throw runError(`Task ${id} is already queued; do not queue again. ${e.message}`, e.code, e.suggestions?.length ? e.suggestions : ["herdr-axi run next"]); }
   }
   if (action === "move") {
     if (!o.cwd) throw runError("move requires --cwd pointing to an existing isolated worktree");

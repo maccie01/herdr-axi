@@ -202,10 +202,17 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
     const f = fixture();
     try {
       const code = `import fs from 'node:fs'; import assert from 'node:assert/strict';
+        import {AxiError} from 'axi-sdk-js';
         import {runCommand} from ${JSON.stringify(new URL("../src/runs.mjs", import.meta.url).href)};
         const rename = fs.renameSync; let commits=0;
-        fs.renameSync = (a,b) => { if (b.endsWith('/run.json') && ++commits === 2) throw Error('next publication failed'); return rename(a,b); };
-        await assert.rejects(runCommand('queue',{_:['persisted'],role:'implementer',cwd:${JSON.stringify(f.state().project)},area:'.',prompt:'bounded task',start:true}), /already queued; do not queue again/);`;
+        fs.renameSync = (a,b) => { if (b.endsWith('/run.json') && ++commits === 2) throw new AxiError('next publication failed','RUN_UNCERTAIN',['herdr-axi run recover persisted','herdr-axi run leases']); return rename(a,b); };
+        await assert.rejects(runCommand('queue',{_:['persisted'],role:'implementer',cwd:${JSON.stringify(f.state().project)},area:'.',prompt:'bounded task',start:true}), (e) => {
+          assert.match(e.message, /already queued; do not queue again/);
+          assert.match(e.message, /next publication failed/);
+          assert.equal(e.code, 'RUN_UNCERTAIN');
+          assert.deepEqual(e.suggestions, ['herdr-axi run recover persisted','herdr-axi run leases']);
+          return true;
+        });`;
       const result = spawnSync(process.execPath, ["--input-type=module", "-e", code], { env: f.env, encoding: "utf8" });
       assert.equal(result.status, 0, result.stderr); assert.equal(f.state().tasks[0].state, "queued");
       const r = f.state(); r.tasks[0].kind = "claude"; r.tasks[0].model = "haiku"; f.write(r);
@@ -806,7 +813,11 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       assert.equal((delivered.match(/herdr_completion_proof=/g) ?? []).length, 1);
       assert.equal((delivered.match(/Completion proof — last action only/g) ?? []).length, 1);
       assert(delivered.includes(`${replacement.receipt}.proof.${replacement.generation}`));
-      assert.match(delivered, /\.handoffs\[-1\]\.output/, "targeted old evidence retrieval remains available");
+      const retrieval = delivered.match(/specific evidence is needed: ([\s\S]+?)\. Read its output/)?.[1];
+      assert(retrieval, delivered);
+      const evidence = spawnSync("/bin/sh", ["-c", retrieval], { encoding: "utf8", timeout: 20000 });
+      assert.equal(evidence.status, 0, evidence.stdout + evidence.stderr);
+      assert(evidence.stdout.includes(oldProof), "targeted old evidence retrieval remains available");
       assert(f.state().tasks[0].handoffs[0].output.includes(oldProof), "old evidence remains in checkpoint, not default context");
       assert.equal(f.state().tasks[0].access, "read");
     } finally { f.clean(); }
@@ -2232,6 +2243,30 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       f.ok(["run", "revise", next.pane, "--prompt", "Final correction", "--result-file", replacement]);
       assert.equal(f.state().tasks[0].revisions[1].resultSource, "coordinator-replacement");
       assert.equal(f.state().tasks[0].revisions[1].result, fs.readFileSync(replacement, "utf8"));
+    } finally { f.clean(); }
+  });
+
+  test("unusable replacement report names the supplied file instead of blaming the intact inbox", () => {
+    const f = fixture();
+    try {
+      f.queue("a"); f.ok(["run", "next"]);
+      const w = f.state().workers[0]; f.complete(w);
+      const file = path.join(f.dir, "reviewed.md");
+      for (const content of [null, "", "   \n", "x".repeat(3501), "y".repeat(20000)]) {
+        if (content === null) fs.rmSync(file, { force: true }); else fs.writeFileSync(file, content);
+        const r = f.execute(["run", "accept", w.pane, "--evidence", "verified checks", "--result-file", file]);
+        assert.equal(r.status, 1, r.output);
+        assert.match(r.output, /RESULT_UNAVAILABLE/);
+        assert(r.output.includes(file), r.output);
+        assert.match(r.output, /1\.\.3500 characters/);
+        assert(r.output.includes(`wc -c '${file}'`), r.output);
+        assert.doesNotMatch(r.output, /Report unavailable at/);
+        assert.equal(f.state().tasks[0].state, "running");
+      }
+      // The inbox was never the problem: acceptance without --result-file works.
+      f.ok(["run", "accept", w.pane, "--evidence", "verified checks"]);
+      assert.equal(f.state().tasks[0].summary, "checks passed");
+      assert.equal(f.state().tasks[0].resultSource, undefined);
     } finally { f.clean(); }
   });
 
