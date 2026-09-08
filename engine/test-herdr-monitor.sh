@@ -335,24 +335,24 @@ case "$group:$action" in
     fi
     printf '%s\n' closed > "$case_dir/closed"
     ;;
-  pane:wait-output)
-    if [[ "${1:-}" == monitor-1 && -e "$case_dir/monitor-no-start" ]]; then
-      jq -nc '{error:{code:"timeout",message:"monitor did not start"}}'
-      exit 1
-    fi
-    [[ ! -e "$case_dir/pane-wait-fail" ]] || exit 1
-    if [[ "${1:-}" == monitor-1 ]]; then
-      registry="${HERDR_RECEIPT_ROOT:?}/$(read_value "$case_dir/workspace" ws)/$(read_value "$case_dir/started-name" worker).json"
-      owner_receipt=""
-      [[ ! -r "$registry" ]] ||
-        owner_receipt=$(jq -r --arg pane "$1" 'select(.monitor_pane == $pane) | .receipt_file // empty' "$registry")
-      [[ -z "$owner_receipt" ]] ||
-        printf '%s\t%s\n' "$FAKE_MONITOR_PID" "$(/bin/ps -p "$FAKE_MONITOR_PID" -o lstart= | awk '{$1=$1; print}')" > "${owner_receipt}.monitor-owner"
-    fi
-    ready_delay=$(read_value "$case_dir/pane-ready-delay" 0)
-    sleep "$ready_delay"
-    : > "$case_dir/pane-ready"
-    jq -nc '{result:{matched:true}}'
+  pane:run)
+    printf '%s\n' "$*" > "$case_dir/monitor-command"
+    [[ ! -e "$case_dir/monitor-no-start" ]] || exit 0
+    ready_generation=""
+    monitor_receipt=""
+    for monitor_arg in "$@"; do
+      case "$monitor_arg" in
+        HERDR_MONITOR_READY=*) ready_generation="${monitor_arg#*=}" ;;
+        *.event) monitor_receipt="$monitor_arg" ;;
+      esac
+    done
+    [[ -n "$ready_generation" && -n "$monitor_receipt" ]] || exit 0
+    mkdir -p "$(dirname -- "$monitor_receipt")"
+    printf '%s\t%s\n' "$FAKE_MONITOR_PID" "$(/bin/ps -p "$FAKE_MONITOR_PID" -o lstart= | awk '{$1=$1; print}')" > "${monitor_receipt}.monitor-owner"
+    sleep "$(read_value "$case_dir/monitor-ready-delay" 0)"
+    temporary_ready=$(mktemp "${monitor_receipt}.ready.XXXXXXXX")
+    printf '%s\n' "$ready_generation" > "$temporary_ready"
+    mv -f "$temporary_ready" "${monitor_receipt}.monitor-ready"
     ;;
   pane:split)
     : > "$case_dir/monitor-1-alive"
@@ -366,9 +366,6 @@ case "$group:$action" in
     }
     jq -nc --arg pane_id "$pane_id" \
       '{result:{pane:{pane_id:$pane_id,tab_id:"tab-1",workspace_id:"ws"}}}'
-    ;;
-  pane:run)
-    printf '%s\n' "$*" > "$case_dir/monitor-command"
     ;;
   pane:close)
     [[ ! -e "$case_dir/pane-close-fail" ]] || exit 1
@@ -1425,7 +1422,7 @@ test_no_completion_proof_preserves_generation() (
 test_prompt_delivery_for_all_agent_kinds() (
   for kind in copilot claude codex; do
     setup_case "prompt-$kind"
-    printf '%s\n' stalled-visible > "$FAKE_HERDR_CASE/worker-prompt-mode"
+    printf '%s\n' success > "$FAKE_HERDR_CASE/worker-prompt-mode"
     worker_prompt="$FAKE_HERDR_CASE/worker.txt"
     printf '%s\n' "prompt for $kind" > "$worker_prompt"
     worker_output=$(bash "$worker_script" \
@@ -1440,8 +1437,8 @@ test_prompt_delivery_for_all_agent_kinds() (
     case "$kind" in copilot) expected_mode=autopilot ;; codex) expected_mode=approve-for-me ;; claude) expected_verified=true ;; esac
     assert_eq "$expected_mode" "$(jq -r '.permission_mode' <<< "$worker_output")" "$kind reported launch mode"
     assert_eq "$expected_verified" "$(jq -r '.permission_mode_verified' <<< "$worker_output")" "$kind honest runtime verification"
-    assert_eq 1 "$(call_count 'agent send-keys worker enter')" \
-      "$kind explicit Enter count"
+    assert_eq 0 "$(call_count 'agent send-keys worker enter')" \
+      "$kind no explicit Enter after native delivery"
     assert_eq 0 "$(call_count 'pane wait-output pane-1')" \
       "$kind has no prompt-glyph dependency"
     assert_file_present "$FAKE_HERDR_CASE/tab-alive" \
@@ -1464,7 +1461,7 @@ test_prompt_delivery_for_all_agent_kinds() (
   assert_eq 0 "$(call_count 'agent send-keys worker enter')" \
     "slow start received no blind Enter"
 
-  for failure_mode in stalled-hidden blocked; do
+  for failure_mode in stalled-visible stalled-hidden blocked; do
     setup_case "prompt-failure-$failure_mode"
     printf '%s\n' "$failure_mode" > "$FAKE_HERDR_CASE/worker-prompt-mode"
     worker_prompt="$FAKE_HERDR_CASE/worker.txt"
@@ -1478,6 +1475,11 @@ test_prompt_delivery_for_all_agent_kinds() (
       --orchestrator-agent orch >/dev/null 2>&1; then
       fail "$failure_mode prompt unexpectedly succeeded"
     fi
+    assert_eq 0 "$(call_count 'agent send-keys worker enter')" \
+      "$failure_mode fail-closed delivery sends no keys"
+    case "$failure_mode" in blocked) expected_stage=rejected ;; *) expected_stage=stalled ;; esac
+    assert_eq "$expected_stage" "$(jq -r '.stage' "$HERDR_RECEIPT_ROOT/ws/worker.json")" \
+      "$failure_mode durable delivery stage"
     assert_file_present "$FAKE_HERDR_CASE/tab-alive" \
       "$failure_mode uncertain prompt preserves work"
     assert_eq 0 "$(call_count 'tab close tab-1')" \
@@ -1873,6 +1875,8 @@ test_monitor_ready_requires_published_identity() (
     fi
     if rg -q '^herdr-monitor-ready:' "$TMPDIR/result"; then fail "ready emitted without durable identity"; fi
     rg -q MONITOR_START_UNVERIFIED "$TMPDIR/result" || fail "missing startup repair guidance"
+    assert_file_absent "${HERDR_MONITOR_RECEIPT}.monitor-ready" \
+      "$fault monitor publishes no ready marker"
     assert_eq 0 "$(call_count '^agent get')" "unidentified monitor cannot acknowledge backend readiness"
   done
 )
@@ -1892,7 +1896,7 @@ test_rejected_prompt_reuses_monitor_and_cannot_replay_ambiguous_delivery() (
   printf '%s\n' idle > "$FAKE_HERDR_CASE/status"
   printf '%s\n' stalled-hidden > "$FAKE_HERDR_CASE/worker-prompt-mode"
   if bash "$orchestrator_script" retry worker --prompt-file "$prompt_file" >/dev/null 2>&1; then fail "ambiguous retry claimed success"; fi
-  assert_eq submitting "$(jq -r '.stage' "$registry")" "ambiguous retry is not rejected"
+  assert_eq stalled "$(jq -r '.stage' "$registry")" "ambiguous retry fails closed as stalled"
   assert_eq "$generation" "$(jq -r '.previous_generation' "$registry")" "retry linked generation"
   assert_eq 1 "$(file_value "$FAKE_HERDR_CASE/worker-prompts")" "one actual delivery"
   if bash "$orchestrator_script" retry worker --prompt-file "$prompt_file" >/dev/null 2>&1; then fail "ambiguous delivery was replayable"; fi
@@ -2166,6 +2170,8 @@ test_split_monitor_preserves_selected_backend() (
   rg -q '^agent: working' "$TMPDIR/monitor-output" || fail "selected backend healthy worker not observed"
   expected_ready="herdr-monitor-ready:$(jq -r '.generation' "$HERDR_RECEIPT_ROOT/ws/worker.json")"
   rg -Fxq "$expected_ready" "$TMPDIR/monitor-output" || fail "real monitor did not emit generation-bound startup acknowledgement"
+  assert_eq "$(jq -r '.generation' "$HERDR_RECEIPT_ROOT/ws/worker.json")" \
+    "$(< "${HERDR_MONITOR_RECEIPT}.monitor-ready")" "ready marker is generation bound"
   assert_file_absent "${HERDR_MONITOR_RECEIPT}.inbox" "wrong backend must not create false lost event"
   : > "$FAKE_HERDR_CASE/agent-get-fail"
   : > "$FAKE_HERDR_CASE/release-waits"
@@ -2180,11 +2186,13 @@ test_monitor_start_ack_required_before_prompt() (
   worker_prompt="$FAKE_HERDR_CASE/worker.txt"
   printf '%s\n' 'bounded task' > "$worker_prompt"
   : > "$FAKE_HERDR_CASE/monitor-no-start"
-  if bash "$worker_script" --name worker --kind copilot --cwd "$FAKE_HERDR_CASE" \
+  if HERDR_MONITOR_READY_TIMEOUT_SECONDS=1 bash "$worker_script" --name worker --kind copilot --cwd "$FAKE_HERDR_CASE" \
     --prompt-file "$worker_prompt" --workspace ws --orchestrator-agent orch > "$TMPDIR/output" 2>&1; then
     fail "missing monitor acknowledgement reported successful startup"
   fi
   rg -q MONITOR_START_UNVERIFIED "$TMPDIR/output" || fail "missing startup diagnostic"
+  assert_file_absent "${HERDR_MONITOR_RECEIPT}.monitor-ready" \
+    "timed-out startup does not leave the marker behind"
   assert_eq 0 "$(file_value "$FAKE_HERDR_CASE/worker-prompts")" "unmonitored worker receives no task"
   assert_eq 0 "$(call_count '^tab close')" "uncertain monitor startup retains owned topology"
   registry="$HERDR_RECEIPT_ROOT/ws/worker.json"
@@ -2741,9 +2749,51 @@ test_created_stage_handoff_without_monitor_or_receipt() (
   assert_eq 1 "$(call_count '^tab close')" "whole startup tab closed once"
 )
 
+test_monitor_ready_marker_handshake() (
+  setup_case marker-handshake
+  worker_prompt="$FAKE_HERDR_CASE/worker.txt"
+  printf '%s\n' "bounded task" > "$worker_prompt"
+  bash "$worker_script" --name worker --kind copilot --cwd "$FAKE_HERDR_CASE" \
+    --prompt-file "$worker_prompt" --workspace ws --orchestrator-agent orch >/dev/null
+  assert_eq 1 "$(file_value "$FAKE_HERDR_CASE/worker-prompts")" \
+    "published marker submits the task"
+  assert_file_absent "${HERDR_MONITOR_RECEIPT}.monitor-ready" \
+    "acked marker is removed after startup"
+  assert_file_present "${HERDR_MONITOR_RECEIPT}.monitor-owner" \
+    "identity precedes the consumed ready marker"
+  assert_eq 0 "$(call_count 'pane wait-output')" \
+    "startup ack does not use output matching"
+
+  setup_case marker-delayed
+  printf '%s\n' 0.30 > "$FAKE_HERDR_CASE/monitor-ready-delay"
+  worker_prompt="$FAKE_HERDR_CASE/worker.txt"
+  printf '%s\n' "bounded task" > "$worker_prompt"
+  bash "$worker_script" --name worker --kind copilot --cwd "$FAKE_HERDR_CASE" \
+    --prompt-file "$worker_prompt" --workspace ws --orchestrator-agent orch >/dev/null
+  assert_eq 1 "$(file_value "$FAKE_HERDR_CASE/worker-prompts")" \
+    "worker waits for a delayed marker within the timeout"
+
+  setup_case marker-stale
+  printf '%s\n' stale-generation > "${HERDR_MONITOR_RECEIPT}.monitor-ready"
+  : > "$FAKE_HERDR_CASE/monitor-no-start"
+  worker_prompt="$FAKE_HERDR_CASE/worker.txt"
+  printf '%s\n' "must fail closed" > "$worker_prompt"
+  if HERDR_MONITOR_READY_TIMEOUT_SECONDS=1 bash "$worker_script" \
+    --name worker --kind copilot --cwd "$FAKE_HERDR_CASE" \
+    --prompt-file "$worker_prompt" --workspace ws --orchestrator-agent orch > "$TMPDIR/output" 2>&1; then
+    fail "a stale marker with a wrong generation passed startup"
+  fi
+  rg -q MONITOR_START_UNVERIFIED "$TMPDIR/output" || fail "missing stale marker diagnostic"
+  assert_eq 0 "$(file_value "$FAKE_HERDR_CASE/worker-prompts")" \
+    "stale marker submits no task"
+  assert_file_absent "${HERDR_MONITOR_RECEIPT}.monitor-ready" \
+    "failed startup does not leave the marker behind"
+)
+
 tests=(
   test_monitor_identity_fences_new_assignments
   test_monitor_ready_requires_published_identity
+  test_monitor_ready_marker_handshake
   test_rejected_prompt_reuses_monitor_and_cannot_replay_ambiguous_delivery
   test_monitor_start_ack_required_before_prompt
   test_registry_native_identity_survives_start_and_fences_capture

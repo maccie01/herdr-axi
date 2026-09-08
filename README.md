@@ -15,7 +15,7 @@
 
 | Who | Once |
 | --- | --- |
-| Human | Install [Herdr](https://herdr.dev); authenticate the worker CLIs you want to use |
+| Human | Install [Herdr](https://herdr.dev) >= 0.9.0; authenticate the worker CLIs you want to use |
 | Machine | Node ≥20; Bash, `jq`, `rg`, `uuidgen`; Herdr and worker CLIs on inherited `PATH` |
 | CLI | `npm i -g herdr-axi`, or clone and link the checkout globally |
 | Project | Optional [`.herdr-axi.json`](.herdr-axi.json); defaults work without it |
@@ -37,6 +37,7 @@ herdr-axi --version
 ```
 
 - Preserve the global npm bin directory on every agent's `PATH`.
+- Herdr >= 0.9.0 is required on both client and server, verified at `run init` through `herdr status --json` (`npm engines.herdr` is documentation only). An old side fails with `HERDR_VERSION_UNSUPPORTED`; an incompatible private client/server protocol fails with `HERDR_PROTOCOL_INCOMPATIBLE`. Versions, protocols, and endpoint generations are recorded in `run.json`. Endpoint-generation drift only warns because it governs Herdr's UI/SSH transport, while herdr-axi uses the CLI/socket API.
 - Managed workers also receive the package bin path and `HERDR_AXI_BIN` fallback.
 - No global Claude/Codex/Copilot instruction files modified.
 

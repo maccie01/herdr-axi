@@ -70,6 +70,29 @@ herdr_completion_proof_valid() {
   [[ "$value" == "$generation" && "$size" == "$((${#generation} + 1))" ]]
 }
 
+herdr_monitor_ready_publish() {
+  local receipt_file="$1" generation="$2" temporary
+  [[ -n "$receipt_file" && -n "$generation" ]] || return 1
+  mkdir -p "$(dirname -- "$receipt_file")" || return 1
+  temporary=$(mktemp "${receipt_file}.ready.XXXXXXXX") || return 1
+  if ! printf '%s\n' "$generation" > "$temporary"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  if ! mv -f "$temporary" "${receipt_file}.monitor-ready"; then
+    rm -f "$temporary"
+    return 1
+  fi
+}
+
+herdr_monitor_ready_valid() {
+  local receipt_file="$1" generation="$2" value=""
+  [[ -n "$receipt_file" && -n "$generation" ]] || return 1
+  [[ -r "${receipt_file}.monitor-ready" ]] || return 1
+  { IFS= read -r value < "${receipt_file}.monitor-ready"; } 2>/dev/null || true
+  [[ "$value" == "$generation" ]]
+}
+
 herdr_append_completion_instruction() {
   local task="$1"
   local receipt_file="$2"
@@ -413,11 +436,6 @@ herdr_receipt_rearm_if_unchanged() {
   herdr_receipt_lock_release
 }
 
-herdr_agent_status() {
-  herdr agent get "$1" 2>/dev/null |
-    jq -r '.result.agent.agent_status // empty' 2>/dev/null
-}
-
 herdr_registry_delivery_stage() {
   local name="$1" generation="$2" stage="$3" error="${4:-}" file temporary
   [[ -n "$HERDR_RECEIPT_REGISTRY_DIR" ]] || return 0
@@ -437,14 +455,14 @@ herdr_deliver_prompt() {
   local agent_name="$1"
   local task="$2"
   local delivery_marker="$3"
-  local prompt_json prompt_status=0 error_code visible state
+  local prompt_json prompt_status=0 error_code
   HERDR_PROMPT_REJECTED=false
   herdr_registry_delivery_stage "$agent_name" "$delivery_marker" submitting || return 1
 
-  # Acknowledge a post-submit transition, not the entire task. Native prompt
-  # wait rejects the pre-submit idle snapshot; fast completion is also valid.
+  # Herdr 0.9: --wait alone settles on the documented default states plus a
+  # short observed-activity gate; repeating those defaults with --until
+  # overrides them. Keep the caller timeout as the outer bound.
   prompt_json=$(herdr agent prompt "$agent_name" "$task" --wait \
-    --until working --until blocked --until idle --until done \
     --timeout 15000 2>&1) ||
     prompt_status=$?
   if (( prompt_status == 0 )); then
@@ -466,22 +484,10 @@ herdr_deliver_prompt() {
     return 1
   fi
 
-  visible=$(herdr agent read "$agent_name" --source visible --lines 100 2>/dev/null || true)
-  printf '%s\n' "$visible" | rg -Fq -- "$delivery_marker" || return 1
-
-  state=$(herdr_agent_status "$agent_name" || true)
-  case "$state" in
-    working|blocked|done) return 0 ;;
-    idle) ;;
-    *) return 1 ;;
-  esac
-
-  herdr agent send-keys "$agent_name" enter >/dev/null || return 1
-  herdr agent wait "$agent_name" \
-    --until working \
-    --until blocked \
-    --until done \
-    --timeout 6000 >/dev/null 2>&1 || return 1
-  state=$(herdr_agent_status "$agent_name" || true)
-  [[ "$state" == "working" || "$state" == "blocked" || "$state" == "done" ]]
+  # Herdr 0.9 delivers text and Enter as one ordered submission, so a stalled
+  # prompt may still have arrived. Fail closed: no keys, no screen inference;
+  # the registered tab stays up for manual inspection and recovery.
+  herdr_registry_delivery_stage "$agent_name" "$delivery_marker" stalled agent_prompt_stalled || return 1
+  printf '%s\n' "PROMPT_STALLED: agent_prompt_stalled; no activity observed within the wait window, delivery not proven. Herdr 0.9 sends text and Enter as one submission, so the prompt may have arrived. Inspect manually (herdr-axi read <pane> --raw) and recover the task; no keys were sent." >&2
+  return 1
 }

@@ -378,6 +378,10 @@ while true; do
   }
   if [[ -n "${HERDR_MONITOR_READY:-}" ]]; then
     printf 'herdr-monitor-ready:%s\n' "$HERDR_MONITOR_READY"
+    if ! herdr_monitor_ready_publish "$receipt_file" "$HERDR_MONITOR_READY"; then
+      printf '%s\n' "MONITOR_START_UNVERIFIED: cannot publish the ready marker for $agent_name; no ready acknowledgement" >&2
+      exit 1
+    fi
     unset HERDR_MONITOR_READY
   fi
   if [[ "$current_state" == "working" && "$pending_rearm" == "true" ]]; then

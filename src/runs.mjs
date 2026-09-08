@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
-import { runHerdr, listAgents, requireHerdrEnv, projectAgent } from "./herdr.mjs";
+import { runHerdr, listAgents, requireHerdrEnv, projectAgent, herdrVersionProbe, EXPECTED_PROTOCOL_GENERATION } from "./herdr.mjs";
 import { PHASES, runError, runDir, loadRun, changeRun, pending, limit, receipt, registeredWorker, ownedWorkers, takeRunWarnings, processStart, controlActive, taskFor } from "./run-state.mjs";
 import { projectConfig, validateConfig, selectWorker, worktree, nativeSlots, workerRoleSummary, writerLease, leasePath, leaseStatus, hash, DEFAULT_CONFIG } from "./project.mjs";
 import { launchMode, validateLaunch } from "./launch-policy.mjs";
@@ -468,6 +468,7 @@ async function executeRunCommand(action, o) {
   if (!["status", "history", "config", "gc", "leases", "recover"].includes(action)) requireHerdrEnv();
   if (action === "init") {
     if (process.env.HERDR_AXI_WORKER === "1") throw runError("Managed workers cannot become nested orchestrators", "NESTED_RUN");
+    const probe = herdrVersionProbe();
     const caller = callerPane();
     const ownerPane = o.owner ?? caller;
     if (!ownerPane) throw runError("init needs a resolvable caller pane");
@@ -480,11 +481,20 @@ async function executeRunCommand(action, o) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     dir = fs.realpathSync(dir);
     if (dir === project.project || dir.startsWith(project.project + path.sep)) throw runError("Run state resolves inside the project/worktree", "STATE_IN_PROJECT");
-    const run = { schema: 1, id: randomUUID().slice(0, 8), ...project, storage: o.dir ? "explicit" : "managed", createdAt: new Date().toISOString(), workspace: a.workspace_id, owner: { pane: ownerPane, tab: a.tab_id, terminal: a.terminal_id, session: a.agent_session?.value }, phase: "explore", limits: { ...project.config.phases }, tasks: [], workers: [] };
+    const run = { schema: 1, id: randomUUID().slice(0, 8), herdr: { clientVersion: probe.clientVersion, serverVersion: probe.serverVersion, protocol: probe.protocol, serverProtocol: probe.serverProtocol, protocolCompatible: probe.protocolCompatible, endpointProtocolGeneration: probe.protocolGeneration, serverEndpointProtocolGeneration: probe.serverProtocolGeneration, endpointCompatible: probe.endpointCompatible, restartNeeded: probe.restartNeeded, serverBinaryStale: probe.serverBinaryStale }, ...project, storage: o.dir ? "explicit" : "managed", createdAt: new Date().toISOString(), workspace: a.workspace_id, owner: { pane: ownerPane, tab: a.tab_id, terminal: a.terminal_id, session: a.agent_session?.value }, phase: "explore", limits: { ...project.config.phases }, tasks: [], workers: [] };
     try { fs.writeFileSync(path.join(dir, "run.json"), JSON.stringify(run) + "\n", { flag: "wx", mode: 0o600 }); }
     catch (e) { if (e.code === "EEXIST") throw runError("Run already exists; select it, do not overwrite it"); throw e; }
     const roles = workerRoleSummary(run.config);
+    const protocolMismatch = probe.endpointCompatible === false ||
+      (probe.protocolGeneration !== null && probe.protocolGeneration !== EXPECTED_PROTOCOL_GENERATION) ||
+      (probe.serverProtocolGeneration !== null && probe.serverProtocolGeneration !== EXPECTED_PROTOCOL_GENERATION);
+    const staleServer = probe.serverBinaryStale === true;
+    const warnings = [
+      ...(protocolMismatch ? [`Herdr endpoint generations are client=${probe.protocolGeneration ?? "unknown"}, server=${probe.serverProtocolGeneration ?? "unknown"}; herdr-axi expects ${EXPECTED_PROTOCOL_GENERATION}. CLI automation can proceed, but saved SSH/multi-machine UI compatibility needs attention; inspect: herdr status --json`] : []),
+      ...(staleServer ? [`Herdr client ${probe.clientVersion} and server ${probe.serverVersion} differ. Both satisfy herdr-axi, but prompt behavior is server-owned; restart Herdr if you expected the updated server binary.`] : []),
+    ];
     return { run: dir, owner: ownerPane, workspace: run.workspace, project: project.project, config: project.configFile || "defaults", phase: run.phase, capacity: limit(run), ...roles, cleanup: collectArchives(project.project),
+      ...(warnings.length ? { warning: warnings.join(" ") } : {}),
       selection: "Role supplies access/native limits. Explicit model request: add --kind claude --model claude-opus-5 --effort high. No config edit/new run needed. Worker budget != application API budget.",
       note: "Next tool call: replace TASK/WORKTREE/task text; role selected (read-only: verifier). Export + queue together; repeat export in EVERY tool call (shells may reset). --start schedules within caps; batch: omit --start, next once. No fleet/help/config/layout/run.json preflight.",
       help: [`export HERDR_AXI_RUN=${quote(dir)}; herdr-axi run queue TASK --role implementer --cwd WORKTREE --area . --prompt 'task; owned files; checks' --start`, ...(roles.moreRoles ? ["herdr-axi run config --full"] : [])] };

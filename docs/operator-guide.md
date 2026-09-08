@@ -36,6 +36,18 @@ Managed workers also receive the package's bin directory and `HERDR_AXI_BIN` fal
 Set `HERDR_BIN` to select a specific Herdr binary. No global agent instruction
 files are changed.
 
+### Herdr compatibility
+
+herdr-axi requires Herdr >= 0.9.0 on both client and server because prompt/wait
+behavior is server-owned. `run init` reads `herdr status --json`: an old side
+fails with `HERDR_VERSION_UNSUPPORTED`, a private-protocol mismatch fails with
+`HERDR_PROTOCOL_INCOMPATIBLE`, and no run state is created. The client/server
+versions and protocols plus both endpoint generations are stored in `run.json`.
+Endpoint-generation drift only warns: it governs Herdr's client-rendered UI and
+saved SSH-machine transport, while herdr-axi uses the CLI/socket API. A stale but
+compatible server binary also warns; restart Herdr when new server-side behavior
+is required instead of assuming a client-only update changed it.
+
 ## Start a managed run
 
 Run from the **orchestrator's own Herdr pane**. Pass the task inline: bounded

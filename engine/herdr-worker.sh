@@ -288,8 +288,23 @@ printf -v monitor_command '%q %q %q %q %q %q %q %q %q %q %q %q %q' \
   "$receipt_file" \
   "$script_dir/herdr-hook-notify.sh"
 herdr pane run "$monitor_pane" "$monitor_command" >/dev/null
-if ! herdr pane wait-output "$monitor_pane" \
-  --match "herdr-monitor-ready:$completion_generation" --timeout 10000 >/dev/null; then
+# The monitor publishes ${receipt_file}.monitor-ready only after its live
+# identity is published. Output matching is not used; renderers may wrap it.
+monitor_ready_file="${receipt_file}.monitor-ready"
+monitor_ready_verified=false
+monitor_ready_ticks=0
+monitor_ready_limit=$(( (${HERDR_MONITOR_READY_TIMEOUT_SECONDS:-10} * 10) ))
+while (( monitor_ready_ticks < monitor_ready_limit )); do
+  if herdr_monitor_ready_valid "$receipt_file" "$completion_generation"; then
+    monitor_ready_verified=true
+    rm -f "$monitor_ready_file"
+    break
+  fi
+  monitor_ready_ticks=$((monitor_ready_ticks + 1))
+  sleep 0.1
+done
+if [[ "$monitor_ready_verified" != "true" ]]; then
+  rm -f "$monitor_ready_file"
   printf '%s\n' "MONITOR_START_UNVERIFIED: monitor $monitor_pane did not acknowledge startup; task not submitted. Inspect startup and cancel this owned task; no automatic keys or duplicate monitor." >&2
   exit 1
 fi
