@@ -7,7 +7,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { runHerdr, listAgents, requireHerdrEnv, projectAgent, herdrVersionProbe, EXPECTED_PROTOCOL_GENERATION } from "./herdr.mjs";
 import { PHASES, runError, runDir, loadRun, changeRun, pending, limit, receipt, registeredWorker, ownedWorkers, takeRunWarnings, processStart, controlActive, taskFor } from "./run-state.mjs";
 import { projectConfig, validateConfig, selectWorker, worktree, nativeSlots, workerRoleSummary, writerLease, leasePath, leaseStatus, hash, DEFAULT_CONFIG } from "./project.mjs";
-import { launchMode, validateLaunch } from "./launch-policy.mjs";
+import { KINDS, launchMode, validateLaunch } from "./launch-policy.mjs";
 import { runWake } from "./run-wake.mjs";
 import { projectRuns, projectHistory, history, finishRun, collectArchives } from "./archive.mjs";
 import { contextStatus } from "./context.mjs";
@@ -537,7 +537,7 @@ async function executeRunCommand(action, o) {
       throw runError("Takeover requires --from <current-owner-pane> and --evidence (1..4000 chars): authorization and remaining work", "INVALID_TAKEOVER", ["herdr-axi run takeover --help"]);
     if ((run.ownerHandoffs?.length ?? 0) >= 8) throw runError("Eight owner transfers reached; inspect the run", "TAKEOVER_LIMIT");
     const pane = callerPane(), a = liveAgent(pane);
-    if (!a || a.pane_id !== pane || a.workspace_id !== run.workspace || !a.tab_id || !a.terminal_id || !["claude", "codex", "copilot"].includes(a.agent)) throw runError("Replacement must be a live agent in the same workspace", "INVALID_TAKEOVER");
+    if (!a || a.pane_id !== pane || a.workspace_id !== run.workspace || !a.tab_id || !a.terminal_id || !KINDS.includes(a.agent)) throw runError("Replacement must be a live agent in the same workspace", "INVALID_TAKEOVER");
     const workers = ownedWorkers(run, { issues: [] });
     const workerTabs = listAgents({ all: true }).filter((row) => run.tasks.some((t) => t.name && t.name === row.backendName)).map((row) => row.tab);
     if (pane === run.owner.pane || a.tab_id === run.owner.tab || workerTabs.includes(a.tab_id) || run.tasks.some((t) => t.pane === pane || (t.name && t.name === a.name)) || workers.some((w) => !w.closed && (w.pane === pane || w.tab === a.tab_id))) throw runError("Replacement must be a separate non-worker pane/tab", "SELF_TARGET");
@@ -624,7 +624,7 @@ async function executeRunCommand(action, o) {
     const id = o._[0];
     const role = selectWorker(run.config ?? DEFAULT_CONFIG, o);
     const kind = role.kind;
-    if (!idOK(id) || !["claude", "codex", "copilot"].includes(kind) || !o.cwd || !o.area) throw runError("queue needs a short task ID, --role or --kind, --cwd, --area and --prompt TEXT or --prompt-file PATH");
+    if (!idOK(id) || !KINDS.includes(kind) || !o.cwd || !o.area) throw runError("queue needs a short task ID, --role or --kind, --cwd, --area and --prompt TEXT or --prompt-file PATH");
     const location = taskLocation(o.cwd, o.area);
     const prompt = taskPrompt(o);
     const deps = o.after ? o.after.split(",") : [];
@@ -777,7 +777,7 @@ async function executeRunCommand(action, o) {
       if ((task.handoffs?.length ?? 0) >= 4) throw runError("Four provider switches reached; re-scope explicitly", "SWITCH_LIMIT");
       if (o.role && (o.kind || o.model || o.effort)) throw runError("Choose --role OR --kind/--model/--effort", "CONFIG_INVALID");
       const config = run.config ?? DEFAULT_CONFIG;
-      const target = o.role ? config.roles[o.role] : validateConfig({ roles: { replacement: { kind: o.kind, model: o.model, effort: o.effort ?? "high", access: task.access } } }).roles.replacement;
+      const target = o.role ? config.roles[o.role] : validateConfig({ roles: { replacement: { kind: o.kind, model: o.model, effort: o.effort ?? (o.kind === "cursor" ? "model" : "high"), access: task.access } } }).roles.replacement;
       if (!target || o.role === "orchestrator" || target.kind === task.kind || target.access !== task.access) throw runError("Choose another provider with the same read/write access", "CONFIG_INVALID");
       if (pending(run).reduce((n, t) => n + (t.nativeSlots ?? 0), 0) - (task.nativeSlots ?? 0) + nativeSlots(target) > config.nativeSubagentLimit) throw runError("Replacement exceeds native subagent budget", "CAPACITY_FULL");
       if (o.summary !== undefined && (!o.summary.trim() || o.summary.length > 4000)) throw runError("--summary must contain 1..4000 characters");
@@ -907,7 +907,7 @@ async function executeRunCommand(action, o) {
       const defer = (t, reason, detail = {}) => deferred.push({ task: t.id, reason, ...detail });
       const availableParked = () => r.workers.find((w) => !w.closed && !w.closing && !pending(r).some((t) => t.pane === w.pane) && [...r.tasks].reverse().find((t) => t.pane === w.pane)?.state === "accepted" && ["idle", "done"].includes(safeWorker(r, w, rows, { observe: true })?.state));
       for (const t of r.tasks.filter((t) => t.state === "queued" && t.phase === r.phase)) {
-        try { validateLaunch({ ...t, model: t.model ?? (t.kind === "claude" ? "opus" : "gpt-5.6-sol"), effort: t.effort ?? "high" }); }
+        try { validateLaunch({ ...t, model: t.model ?? (t.kind === "cursor" ? undefined : t.kind === "claude" ? "opus" : "gpt-5.6-sol"), effort: t.effort ?? (t.kind === "cursor" ? "model" : "high") }); }
         catch (e) { defer(t, e.message, { help: `herdr-axi run cancel ${t.id}` }); continue; }
         if (pending(r).length >= limit(r)) { defer(t, "primary capacity"); continue; }
         const dependency = t.deps.map((id) => r.tasks.find((d) => d.id === id) ?? { id, state: "missing" }).find((d) => d.state !== "accepted");

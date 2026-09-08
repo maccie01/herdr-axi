@@ -1,6 +1,6 @@
 # herdr-axi
 
-- Agent-facing CLI for Herdr terminal workspaces; one orchestrator; Claude, Codex and Copilot workers.
+- Agent-facing CLI for Herdr terminal workspaces; one orchestrator; Claude, Codex, Copilot and Cursor workers.
 - Compact TOON; bounded concurrency; pane-safe control; recoverable handoffs.
 - [Install](#setup) · [Delegate](#for-agents) · [Features](#features) · [Operator guide](docs/operator-guide.md)
 
@@ -39,7 +39,7 @@ herdr-axi --version
 - Preserve the global npm bin directory on every agent's `PATH`.
 - Herdr >= 0.9.0 is required on both client and server, verified at `run init` through `herdr status --json` (`npm engines.herdr` is documentation only). An old side fails with `HERDR_VERSION_UNSUPPORTED`; an incompatible private client/server protocol fails with `HERDR_PROTOCOL_INCOMPATIBLE`. Versions, protocols, and endpoint generations are recorded in `run.json`. Endpoint-generation drift only warns because it governs Herdr's UI/SSH transport, while herdr-axi uses the CLI/socket API.
 - Managed workers also receive the package bin path and `HERDR_AXI_BIN` fallback.
-- No global Claude/Codex/Copilot instruction files modified.
+- No global Claude/Codex/Copilot/Cursor instruction files modified.
 
 - Human handoff — paste into your orchestrator:
 
@@ -72,6 +72,7 @@ herdr-axi run queue parser --role implementer \
 - Batch: omit `--start`, queue tasks, then `run next` once; `--start` starts all eligible queued tasks within caps.
 - Two tool calls: `init`; then its returned export + `queue --start` together. Set `run phase build` when moving into implementation; no mandatory phase/config tour.
 - Explicit worker choice: add `--kind claude --model claude-opus-5 --effort high`; role access/native limits retained; no config edit or new run.
+- Cursor: `guide "start cursor"`; exact model ID from `cursor-agent models`, `--effort model`; Smart Auto, no force/trust bypass. Context usage unknown; bounded visible reports, registered session and generation proof required.
 
 | While workers run | Action |
 | --- | --- |

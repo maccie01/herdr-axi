@@ -1420,21 +1420,24 @@ test_no_completion_proof_preserves_generation() (
 )
 
 test_prompt_delivery_for_all_agent_kinds() (
-  for kind in copilot claude codex; do
+  for kind in copilot claude codex cursor; do
     setup_case "prompt-$kind"
+    model_args=(--effort high)
+    if [[ "$kind" == cursor ]]; then model_args=(--model composer-2.5 --effort model); fi
     printf '%s\n' success > "$FAKE_HERDR_CASE/worker-prompt-mode"
     worker_prompt="$FAKE_HERDR_CASE/worker.txt"
     printf '%s\n' "prompt for $kind" > "$worker_prompt"
     worker_output=$(bash "$worker_script" \
       --name worker \
       --kind "$kind" \
+      "${model_args[@]}" \
       --cwd "$FAKE_HERDR_CASE" \
       --prompt-file "$worker_prompt" \
       --workspace ws \
       --orchestrator-agent orch)
     expected_mode=auto
     expected_verified=false
-    case "$kind" in copilot) expected_mode=autopilot ;; codex) expected_mode=approve-for-me ;; claude) expected_verified=true ;; esac
+    case "$kind" in copilot) expected_mode=autopilot ;; codex) expected_mode=approve-for-me ;; claude) expected_verified=true ;; cursor) expected_mode=auto-review ;; esac
     assert_eq "$expected_mode" "$(jq -r '.permission_mode' <<< "$worker_output")" "$kind reported launch mode"
     assert_eq "$expected_verified" "$(jq -r '.permission_mode_verified' <<< "$worker_output")" "$kind honest runtime verification"
     assert_eq 0 "$(call_count 'agent send-keys worker enter')" \
@@ -2790,7 +2793,57 @@ test_monitor_ready_marker_handshake() (
     "failed startup does not leave the marker behind"
 )
 
+test_cursor_false_idle_trust_does_not_submit() (
+  setup_case cursor-trust-idle
+  printf '%s\n' cursor > "$FAKE_HERDR_CASE/kind"
+  printf '%s\n' '│ ⚠ Workspace Trust Required │' '│ ▶ [a] Trust this workspace │' > "$FAKE_HERDR_CASE/startup-screen"
+  printf '%s\n' 'Tiny read-only check' > "$FAKE_HERDR_CASE/prompt"
+  if output=$(bash "$worker_script" --name worker --kind cursor --model composer-2.5 \
+    --cwd "$FAKE_HERDR_CASE" --prompt-file "$FAKE_HERDR_CASE/prompt" --workspace ws --orchestrator-agent orch 2>&1); then
+    fail 'Cursor trust dialog treated as ready'
+  fi
+  [[ "$output" == *CURSOR_START_BLOCKED* ]] || fail 'Cursor trust error missing'
+  assert_eq 0 "$(call_count '^agent prompt')" 'Cursor trust never receives task text'
+  assert_eq 0 "$(call_count '^agent send-keys')" 'Cursor trust never auto-approved'
+  assert_file_present "$FAKE_HERDR_CASE/tab-alive" 'Cursor startup remains inspectable'
+  assert_file_absent "$FAKE_HERDR_CASE/monitor-command" 'Cursor guard runs before monitor allocation'
+)
+
+test_cursor_completion_requires_registered_identity_and_proof() (
+  for scenario in complete missing-proof wrong-proof changed-session changed-terminal changed-generation missing-registry working blocked unknown; do
+    setup_case "cursor-$scenario"
+    printf '%s\n' cursor > "$FAKE_HERDR_CASE/kind"
+    arm_completion_generation
+    write_worker_registry
+    registry="$HERDR_RECEIPT_ROOT/ws/worker.json"
+    jq '.native_identity={terminal:"terminal-1",session:"session-1"}' "$registry" > "$TMPDIR/registry"
+    mv "$TMPDIR/registry" "$registry"
+    printf '%s\n' 'task: cursor-check' 'checks: passed' > "$FAKE_HERDR_CASE/visible"
+    case "$scenario" in
+      missing-proof) remove_current_completion_proof ;;
+      wrong-proof) printf '%s\n' old-generation > "${HERDR_MONITOR_RECEIPT}.proof.generation-one" ;;
+      changed-session) printf '%s\n' session-2 > "$FAKE_HERDR_CASE/session" ;;
+      changed-terminal) printf '%s\n' terminal-2 > "$FAKE_HERDR_CASE/terminal" ;;
+      changed-generation) jq '.generation="other"' "$registry" > "$TMPDIR/registry"; mv "$TMPDIR/registry" "$registry" ;;
+      missing-registry) rm "$registry" ;;
+      working|blocked|unknown) printf '%s\n' "$scenario" > "$FAKE_HERDR_CASE/status" ;;
+    esac
+    HERDR_MONITOR_INBOX=1 run_hook settled '{}'
+    if [[ "$scenario" == complete ]]; then
+      assert_eq settled "$(jq -r '.event' "${HERDR_MONITOR_RECEIPT}.inbox")" "Cursor completion without private transcript"
+      assert_eq true "$(jq -r '.completion.truncated' "${HERDR_MONITOR_RECEIPT}.inbox")" "Cursor excerpt never claims full transcript"
+      [[ "$(jq -r '.detail' "${HERDR_MONITOR_RECEIPT}.inbox")" == *'checks: passed'* ]] || fail 'Cursor visible report missing'
+      HERDR_MONITOR_INBOX=1 run_hook settled '{}'
+      assert_eq generation:generation-one "$(receipt_read_field 8)" "Cursor proof survives duplicate settlement"
+    else
+      assert_file_absent "${HERDR_MONITOR_RECEIPT}.inbox" "Cursor $scenario cannot settle"
+    fi
+  done
+)
+
 tests=(
+  test_cursor_false_idle_trust_does_not_submit
+  test_cursor_completion_requires_registered_identity_and_proof
   test_monitor_identity_fences_new_assignments
   test_monitor_ready_requires_published_identity
   test_monitor_ready_marker_handshake

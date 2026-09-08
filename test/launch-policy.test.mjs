@@ -5,8 +5,26 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { validateLaunch, checkLaunchScreen } from "../src/launch-policy.mjs";
+import { validateLaunch, checkLaunchScreen, checkCursorLaunchScreen } from "../src/launch-policy.mjs";
 import { selectWorker, validateConfig } from "../src/project.mjs";
+
+test("Cursor uses explicit native model IDs and Smart Auto without inheriting another provider's effort", () => {
+  const selected = selectWorker(validateConfig(), { role: "verifier", kind: "cursor", model: "composer-2.5" });
+  assert.equal(selected.kind, "cursor"); assert.equal(selected.access, "read"); assert.equal(selected.effort, "model");
+  assert.equal(validateLaunch(selected).mode, "auto-review");
+  assert.equal(validateConfig({ roles: { cursor: { kind: "cursor", model: "gpt-5.6-sol-high", access: "read" } } }).roles.cursor.model, "gpt-5.6-sol-high");
+  for (const model of [undefined, "auto", "--force", "composer;echo", "opus[1m]"]) assert.throws(() => validateLaunch({ kind: "cursor", model }));
+  assert.throws(() => selectWorker(validateConfig(), { kind: "cursor" }), /requires --model/);
+  assert.throws(() => validateLaunch({ kind: "cursor", model: "composer-2.5", effort: "high" }), /effort is selected by its model ID/);
+  assert.throws(() => validateLaunch({ kind: "codex", model: "gpt-5.6-sol", effort: "model" }), /Unsupported/);
+  assert.throws(() => validateConfig({ roles: { cursor: { kind: "cursor", model: "composer-2.5", access: "read", mode: "manual" } } }), /Invalid/);
+});
+
+test("Cursor startup rejects the live trust dialog and pre-session false idle", () => {
+  assert.throws(() => checkCursorLaunchScreen("│ ⚠ Workspace Trust Required │\n│ ▶ [a] Trust this workspace │", "session"), { code: "CURSOR_START_BLOCKED" });
+  assert.throws(() => checkCursorLaunchScreen("cursor-agent --model composer-2.5", ""), { code: "CURSOR_START_UNVERIFIED" });
+  assert.deepEqual(checkCursorLaunchScreen("Cursor Agent\nComposer 2.5\n> ", "session"), { mode: "auto-review", verified: false });
+});
 
 test("worker choices preserve access and child limits; incompatible unattended models fail before launch", () => {
   const config = validateConfig({ roles: { implementer: { contextWindowTokens: 100000, subagents: [{ role: "verifier", max: 1, when: "review" }] } } });

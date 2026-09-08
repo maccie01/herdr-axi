@@ -2,7 +2,7 @@
 
 Stand: 2026-09-08  
 Maschine: `herdr 0.9.0` in `~/.local/bin/herdr` (ersetzt Homebrew 0.8.0)  
-herdr-axi: `0.2.1` unter `/Users/studio/dev/tools/herdr-axi`
+herdr-axi: Refactor-Zweig auf Basis der veröffentlichten `0.3.0`
 
 ---
 
@@ -69,7 +69,7 @@ flip-and-return. Kein P0-Umbau; P3-Refactor kann die Erkennungslatenz senken.
 | Übersprungen | 0.8.2 (nie lokal installiert) | — | — |
 | Protokoll | — | **endpoint_protocol_generation: 1** | `herdr status --json` |
 | Claude-Integration | v8 | **v9** | `ordex/dotfiles/claude/hooks/herdr-agent-state.sh` |
-| herdr-axi | 0.2.0 (npm) | **0.2.1** (lokal) | `~/dev/tools/herdr-axi` |
+| herdr-axi | 0.2.1 vor Analyse | **0.3.0 + Refactor-WIP** | `~/dev/tools/herdr-axi` |
 
 Upstream-Vergleich: `v0.8.0…v0.9.0` umfasst 841 Dateien
 (+123.431/-77.576), der strikte `v0.8.2…v0.9.0`-Diff 623 Dateien
@@ -249,7 +249,7 @@ State: `~/.local/state/herdr-axi/` (Runs, Leases, Archive). Policy: `.herdr-axi.
 **Engine (Bash):**
 
 - `tab create` (mit `--env`, `--no-focus`), `tab close`
-- `pane split`, `pane run`, `pane wait-output --match`
+- `pane split`, `pane run` (der frühere Monitor-Startup via `pane wait-output --match` ist im Refactor durch einen generationsgebundenen Datei-Ack ersetzt)
 - `agent start --kind`, `agent prompt --wait`, `agent wait`, `agent read`, `agent get`, `agent send-keys enter`
 
 ### 5.3 Eigenbau (nicht an Herdr delegiert)
@@ -270,7 +270,7 @@ State: `~/.local/state/herdr-axi/` (Runs, Leases, Archive). Policy: `.herdr-axi.
 
 1. Keine Herdr-Versionsverhandlung (Runtime-Probe fehlt komplett). 0.9 liefert Client-, Server-, private Protokoll- und Endpoint-Daten zusammen über `herdr status --json`.
 2. `agent read --source recent-unwrapped` — bereits in 0.8.2 dokumentiert; 0.9 behebt den fehlenden Viewport-Anteil. Bei idle/bottom kann ein Read die App scrollen; explizite History kann bei working/blocked/unknown mit `agent_not_idle` scheitern, daher bleibt der Visible-Fallback wichtig.
-3. `pane wait-output --match` — Monitor-Startup hängt davon ab (10s Timeout).
+3. Monitor-Startup-Ack — jetzt generationsgebundener `${receipt}.monitor-ready`-Marker; der Worker entfernt ihn nach Validierung. Damit hängt der kritische Pfad nicht von Render-Wrapping/Kitty Graphics ab.
 4. `tab create --env` — viele injizierte Env-Vars.
 5. Orchestrator-Identität = **Pane-ID**, nicht Agent-Name.
 6. Error-Code-Mapping per Message-Substring.
@@ -302,7 +302,7 @@ State: `~/.local/state/herdr-axi/` (Runs, Leases, Archive). Policy: `.herdr-axi.
 
 ## 7. Anpassungs- und Verbesserungsplan
 
-### Phase A — Kompatibilität (sofort, v0.2.2)
+### Phase A — Kompatibilität (aktueller Refactor nach v0.3.0)
 
 1. **`engines.herdr` in package.json** — `"herdr": ">=0.9.0"` + README/Operator-Guide. Wichtig: npm prüft `engines` nicht gegen ein Binary; das eigentliche Gate ist die Runtime-Probe (Punkt 6).
 2. **Smoke gegen 0.9.0** — gezielte Contract-Checks (Status-Shape, Prompt-Delivery, Monitor-Startup, blocked recovery); ressourcenintensive Voll-Suites getrennt und explizit ausführen.
@@ -312,7 +312,7 @@ State: `~/.local/state/herdr-axi/` (Runs, Leases, Archive). Policy: `.herdr-axi.
 6. **Runtime-Versionsprobe** — bei `run init` einmal `herdr status --json` lesen. Client und Server müssen >=0.9 sein; `server.compatible=false` ist fatal. Beide Versionen/Protokolle und Endpoint-Generationen in `run.json` schreiben. Endpoint-Mismatch nur warnen: herdr-axi nutzt CLI/Socket, nicht den TUI/SSH-Endpoint.
 7. **Prompt-Flags an 0.9 anpassen** — `herdr-receipt.sh:446`: Defaults nicht mit `--until` wiederholen; stalled-Enter-Fallback nach Live-Test entfernen, `agent_prompt_stalled` fail-closed (Entscheidung D4).
 
-### Phase B — Nutzen von Herdr 0.9 (v0.3.0)
+### Phase B — Nutzen von Herdr 0.9 (Follow-up nach dem Refactor)
 
 | Feature | Aktion | Ersetzt Eigenbau? |
 |---------|--------|-------------------|
