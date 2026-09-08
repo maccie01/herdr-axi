@@ -18,7 +18,7 @@ herdr_bin=$(type -P "${HERDR_BIN:-herdr}")
 export HERDR_BIN="$(cd -- "$(dirname -- "$herdr_bin")" && pwd)/${herdr_bin##*/}"
 
 usage() {
-  printf '%s\n' "usage: $0 --name NAME --kind copilot|claude|codex --cwd PATH --prompt-file PATH [--label LABEL] [--model MODEL] [--effort LEVEL] [--max-autopilot-continues N] [--workspace ID] [--orchestrator-agent NAME]" >&2
+  printf '%s\n' "usage: $0 --name NAME --kind copilot|claude|codex|cursor --cwd PATH --prompt-file PATH [--label LABEL] [--model MODEL] [--effort LEVEL] [--max-autopilot-continues N] [--workspace ID] [--orchestrator-agent NAME]" >&2
   exit 2
 }
 
@@ -28,7 +28,7 @@ kind=""
 worker_cwd=""
 prompt_file=""
 model=""
-effort="high"
+effort=""
 max_autopilot_continues="3"
 workspace_id=""
 orchestrator_agent="orchestrator"
@@ -57,7 +57,10 @@ done
 [[ -n "$name" && -n "$kind" && -n "$worker_cwd" && -n "$prompt_file" ]] || usage
 [[ -n "$orchestrator_agent" ]] || usage
 [[ -d "$worker_cwd" && -r "$prompt_file" ]] || usage
-[[ "$kind" == "copilot" || "$kind" == "claude" || "$kind" == "codex" ]] || usage
+[[ "$kind" == "copilot" || "$kind" == "claude" || "$kind" == "codex" || "$kind" == "cursor" ]] || usage
+if [[ -z "$effort" ]]; then
+  if [[ "$kind" == "cursor" ]]; then effort=model; else effort=high; fi
+fi
 [[ "$max_autopilot_continues" =~ ^[0-9]+$ && "$max_autopilot_continues" -gt 0 ]] || usage
 [[ -n "$label" ]] || label="$name"
 
@@ -154,6 +157,10 @@ herdr_receipt_rearm "$receipt_file" worker-start "$completion_generation" || {
 }
 
 case "$kind" in
+  cursor)
+    monitoring_mode="event-wait+proof"
+    native_args=(--model "$model" --auto-review --workspace "$worker_cwd" --add-dir "$receipt_dir")
+    ;;
   copilot)
     session_id=$(uuidgen)
     native_args=(
@@ -221,6 +228,15 @@ done
 if ! herdr_registry_capture_identity "$receipt_dir/$name.json" true; then
   cleanup_created_tab=false
   exit 1
+fi
+
+if [[ "$kind" == "cursor" ]]; then
+  cursor_session=$(jq -r '.native_identity.session // empty' "$receipt_dir/$name.json")
+  if ! mode_screen=$(herdr agent read "$agent_pane" --source visible --lines 40) ||
+    ! printf '%s\n' "$mode_screen" | "$HERDR_AXI_NODE" "$script_dir/../src/launch-policy.mjs" --check-cursor-screen --session "$cursor_session" >/dev/null; then
+    cleanup_created_tab=false
+    exit 1
+  fi
 fi
 
 if [[ "$kind" == "claude" ]]; then
@@ -317,6 +333,7 @@ herdr_registry_capture_identity "$receipt_dir/$name.json" true || exit 1
 
 permission_mode_verified=false
 case "$kind" in
+  cursor) permission_mode=auto-review ;;
   copilot) permission_mode=autopilot ;;
   codex) permission_mode=approve-for-me ;;
   claude) permission_mode=auto; permission_mode_verified=true ;;

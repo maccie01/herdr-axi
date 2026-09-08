@@ -25,12 +25,12 @@ const RUN_HELP = {
   Default: worker roles and current limits. --full: complete effective snapshot, including owner, native review contracts, context and retention.
   Already loaded at init; no config preflight needed before queue.`,
   queue: `herdr-axi run queue TASK --role ROLE --cwd WORKTREE --area AREA --prompt "task; checks" [--after ID,ID] [--start]
-  --prompt-file FILE instead of --prompt; exactly one. 128 tasks/run.
-  Runtime override: --kind claude --model claude-opus-5 --effort high; role access/native limits retained. No config edit/new run.
-  Legacy --kind claude|codex|copilot without --role: write access, no native children.
-  --area relative to --cwd; . = whole tree, not isolation. Read-only: choose access:read role from init.
-  --start schedules ALL eligible queued tasks within caps; follow returned help, do not call next again.
-  Batch: omit --start, queue tasks, then run next once. No config/layout preflight.`,
+  --prompt-file FILE instead; exactly one prompt source. 128 tasks/run.
+  Override: --kind KIND --model MODEL --effort LEVEL; role limits retained. Cursor: --effort model; guide cursor.
+  Without --role: --kind claude|codex|copilot|cursor; write access, no native children.
+  --area relative to --cwd; . = whole tree, not isolation. Read-only: access:read role.
+  --start schedules ALL eligible tasks within caps; follow help, do not call next again.
+  Batch: omit --start; queue, then run next once. No config/layout preflight.`,
   move: `herdr-axi run move <queued-task-id> --cwd <existing-worktree> [--area <relative-path>]
   Preserve prompt, role, dependencies and phase; relocate the relative area. Queued tasks without resources only.
   No copy or startup; next rechecks conflicts. Check absolute paths in the preserved prompt.
@@ -70,8 +70,9 @@ const RUN_HELP = {
   close: `herdr-axi run close <pane>
   Accepted owned workers only; whole tab including monitor. Never the owner tab.
   Closing is not cancellation. User requested abort: run cancel <pane> --evidence "authorized stop; partial state/background jobs reviewed" BEFORE acceptance.`,
-  switch: `herdr-axi run switch <pane-or-task-id> --kind claude|codex|copilot --model <model> [--effort high] [--summary "partial work / pending checks"]
+  switch: `herdr-axi run switch <pane-or-task-id> --kind claude|codex|copilot|cursor --model <model> [--effort high] [--summary "partial work / pending checks"]
   Or --role <configured-worker-role>; same read/write access, different provider.
+  Cursor: explicit cursor-agent models ID; --effort model, not high.
   Quota/session limit only; live identity + current quota error required, including native unknown. Never working.
   Check no tools/background jobs are still running; tab closure is not proof that detached jobs stopped.
   Save original task + bounded terminal checkpoint + Git status; retire owned agent+monitor tab WITHOUT acceptance.
@@ -111,7 +112,7 @@ const RUN_HELP = {
 
 const COMMAND_HELP = {
   guide: 'herdr-axi guide [keywords]  # alias: herdr-axi --skill\n  TOON: no keywords = full compact workflow; e.g. guide "start opus", guide "quota switch", guide "stop worker".\n  Local routing; precise recipes only; no backend/model call or action executed.',
-  agents: "herdr-axi agents [--state working|blocked|idle|done|unknown] [--kind claude|codex|copilot] [--all]\n  Selected run by default; --all lists globally. Fields: name, kind, state, pane.\n  No selected run: discovery only, not ownership. New agents: herdr-axi run init, then run queue/next; never raw agent start.",
+  agents: "herdr-axi agents [--state working|blocked|idle|done|unknown] [--kind claude|codex|copilot|cursor] [--all]\n  Selected run by default; --all lists globally. Fields: name, kind, state, pane.\n  No selected run: discovery only, not ownership. New agents: herdr-axi run init, then run queue/next; never raw agent start.",
   fleet: "herdr-axi fleet [--all]\n  Selected run: owned tasks, review queue, capacity. --all: global discovery, not ownership.\n  New agents: herdr-axi run init, then run queue/next. Titles: herdr-axi agents.",
   read: "herdr-axi read <pane> [--raw] [--full] [--lines N] [--chars N]\n  Default: compact text; 60 visible lines, 8000 characters.\n  --raw preserves layout (diagrams, tables, approval menus); limits still apply.\n  --full reads history, still compact unless --raw; 2000-line cap, no default character cap. May require a settled agent.\n  --lines and --chars override defaults; --full never exceeds 2000 lines.\n  --compact remains a compatibility alias for the default; cannot combine with --raw.",
   dispatch: 'herdr-axi dispatch <pane> "<task>" [--no-wait] [--timeout-ms N]\n  Submit and wait for a post-submission settled state. Refuses a working agent.\n  --no-wait confirms submission only; a separate wait may match pre-start idle.\nherdr-axi dispatch <pane> --keys <key> [<key>...]\n  Send explicit UI keys (e.g. down enter) and return immediately. Inspect the dialog before answering; never automatically approve it.',

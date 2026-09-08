@@ -71,7 +71,7 @@ export function contextStatus(run, workers, rows) {
       if (w.kind === "codex") {
         value = contextValue(w.kind, screens.get(w.pane) ?? "");
       }
-      else if (/^[a-fA-F0-9-]{36}$/.test(a.session ?? "")) {
+      else if (["claude", "copilot"].includes(w.kind) && /^[a-fA-F0-9-]{36}$/.test(a.session ?? "")) {
         const transcript = w.kind === "copilot"
           ? path.join(homedir(), ".copilot/session-state", a.session, "events.jsonl")
           : path.join(homedir(), ".claude/projects", w.cwd.replace(/[^a-zA-Z0-9]/g, "-"), a.session + ".jsonl");

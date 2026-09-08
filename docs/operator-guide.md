@@ -356,6 +356,13 @@ orchestrator role cannot change an already-running owner's model.
 | Claude | `--permission-mode auto`; auto-capable Opus/Sonnet/Fable | Explicit Auto footer before initial/resumed task submission; missing/manual mode preserves an unsubmitted tab for inspection/cancel |
 | Codex | `--approve-for-me`; workspace sandbox + automatic review | Native flag only; no claim of observed runtime mode |
 | Copilot | `--autopilot --allow-all`; existing Git deny rules | Native flag only; no claim of observed runtime mode |
+| Cursor | `--auto-review` (Smart Auto); explicit `cursor-agent models` ID | Native flag only; approval/trust may still block; no `--force`, `--yolo` or automatic trust |
+
+- Cursor queue/switch: `--kind cursor --model composer-2.5 --effort model`; choose an available ID, not implicit `auto` routing. Effort belongs to Cursor's exact model ID (e.g. a `-high` variant); separate numeric/named effort overrides refused, not ignored.
+- Cursor project role: `{"kind":"cursor","model":"composer-2.5","effort":"model","access":"write"}`. Existing provider defaults unchanged.
+- Cursor supervision: existing lifecycle monitor, no global/plugin hook edits; registered terminal/session identity + current generation proof + native idle/done required. Unknown readiness cannot settle. Reports use bounded visible output; inspect `read --full` or a reviewed `--result-file` when insufficient.
+- Cursor startup guard: native Herdr can report idle at workspace trust; visible trust or missing session identity leaves the owned tab unsubmitted. Inspect, authorize trust only if appropriate, then `run recover`; never bypass with raw prompt/keys.
+- Cursor context usage remains `contextUnknown`; no private transcript parsing or guessed percentages. Shared conservative quota detector applies; unrecognized Cursor-specific billing messages need inspection/cancellation, not automatic switching.
 
 - Model validation before allocation; known incompatible Claude choices (Haiku, older models, `opusplan`) refused; never substitute or bypass permissions.
 - Account/admin restrictions can still disable Auto; trust/explicit approval prompts remain protected. [Claude mode requirements](https://code.claude.com/docs/en/permission-modes).
