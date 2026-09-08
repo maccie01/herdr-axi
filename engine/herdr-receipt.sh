@@ -459,10 +459,11 @@ herdr_deliver_prompt() {
   HERDR_PROMPT_REJECTED=false
   herdr_registry_delivery_stage "$agent_name" "$delivery_marker" submitting || return 1
 
-  # Herdr 0.9: --wait alone settles on the documented default states plus a
-  # short observed-activity gate; repeating those defaults with --until
-  # overrides them. Keep the caller timeout as the outer bound.
+  # This call proves delivery activity, not task completion. Herdr 0.9 first
+  # requires observed working/blocked activity for a non-working target; then
+  # these exact targets let the transient activity satisfy the wait promptly.
   prompt_json=$(herdr agent prompt "$agent_name" "$task" --wait \
+    --until working --until blocked \
     --timeout 15000 2>&1) ||
     prompt_status=$?
   if (( prompt_status == 0 )); then

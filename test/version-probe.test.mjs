@@ -57,7 +57,7 @@ if (process.argv[2] === "status" || process.argv[2] === "agent") {
 }
 
 process.env.HERDR_BIN = self;
-const { herdrVersionProbe, EXPECTED_PROTOCOL_GENERATION } = await import("../src/herdr.mjs");
+const { herdrVersionProbe } = await import("../src/herdr.mjs");
 
 function withBackendEnv(values, fn) {
   const keys = Object.keys(values);
@@ -89,7 +89,6 @@ const backend = (overrides = {}) => ({
 });
 
 test("probe reads the real Herdr 0.9 status shape", () => {
-  assert.equal(EXPECTED_PROTOCOL_GENERATION, 1);
   const p = withBackendEnv(backend({
     AXI_FAKE_CLIENT_VERSION: "0.10.2-rc.1+build.7",
     AXI_FAKE_SERVER_VERSION: "0.9.4",
@@ -162,6 +161,20 @@ test("init warns on endpoint mismatch but treats it as UI/SSH compatibility", ()
     assert.equal(r.status, 0, output);
     assert.equal(JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8")).herdr.endpointCompatible, false);
     assert.match(output, /saved SSH\/multi-machine UI compatibility/);
+  } finally { cleanup(); }
+});
+
+test("init accepts a matched future endpoint generation without claiming a dependency", () => {
+  const { r, state, output, cleanup } = initRun({
+    AXI_FAKE_CLIENT_GEN: "2", AXI_FAKE_SERVER_GEN: "2",
+  });
+  try {
+    assert.equal(r.status, 0, output);
+    const herdr = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8")).herdr;
+    assert.equal(herdr.endpointProtocolGeneration, 2);
+    assert.equal(herdr.serverEndpointProtocolGeneration, 2);
+    assert.equal(herdr.endpointCompatible, true);
+    assert.doesNotMatch(output, /warning/);
   } finally { cleanup(); }
 });
 

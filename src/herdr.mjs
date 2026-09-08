@@ -76,8 +76,6 @@ function suggestFor(code, pane) {
   return ["Check the server: herdr status"];
 }
 
-export const EXPECTED_PROTOCOL_GENERATION = 1;
-
 const unreachable = (message) => new AxiError(message, "HERDR_UNREACHABLE", suggestFor("HERDR_UNREACHABLE"));
 
 function parseHerdrVersion(raw, source) {

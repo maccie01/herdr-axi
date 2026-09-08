@@ -270,6 +270,13 @@ fi
 completion_task=$(herdr_append_completion_instruction \
   "$task" "$receipt_file" "$completion_generation")
 
+monitor_ready_timeout_seconds="${HERDR_MONITOR_READY_TIMEOUT_SECONDS:-10}"
+if [[ ! "$monitor_ready_timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
+  printf '%s\n' "herdr-worker: HERDR_MONITOR_READY_TIMEOUT_SECONDS must be a positive integer" >&2
+  exit 2
+fi
+monitor_ready_limit=$((monitor_ready_timeout_seconds * 10))
+
 monitor_json=$(herdr pane split \
   --pane "$agent_pane" \
   --direction down \
@@ -303,13 +310,16 @@ printf -v monitor_command '%q %q %q %q %q %q %q %q %q %q %q %q %q' \
   "$orchestrator_agent" \
   "$receipt_file" \
   "$script_dir/herdr-hook-notify.sh"
+# A recovery may reuse the current task generation after a worker-side crash.
+# Remove an unconsumed marker before starting the new monitor so only this
+# pane's post-identity publication can acknowledge startup.
+monitor_ready_file="${receipt_file}.monitor-ready"
+rm -f "$monitor_ready_file"
 herdr pane run "$monitor_pane" "$monitor_command" >/dev/null
 # The monitor publishes ${receipt_file}.monitor-ready only after its live
 # identity is published. Output matching is not used; renderers may wrap it.
-monitor_ready_file="${receipt_file}.monitor-ready"
 monitor_ready_verified=false
 monitor_ready_ticks=0
-monitor_ready_limit=$(( (${HERDR_MONITOR_READY_TIMEOUT_SECONDS:-10} * 10) ))
 while (( monitor_ready_ticks < monitor_ready_limit )); do
   if herdr_monitor_ready_valid "$receipt_file" "$completion_generation"; then
     monitor_ready_verified=true

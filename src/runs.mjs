@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
-import { runHerdr, listAgents, requireHerdrEnv, projectAgent, herdrVersionProbe, EXPECTED_PROTOCOL_GENERATION } from "./herdr.mjs";
+import { runHerdr, listAgents, requireHerdrEnv, projectAgent, herdrVersionProbe } from "./herdr.mjs";
 import { PHASES, runError, runDir, loadRun, changeRun, pending, limit, receipt, registeredWorker, ownedWorkers, takeRunWarnings, processStart, controlActive, taskFor } from "./run-state.mjs";
 import { projectConfig, validateConfig, selectWorker, worktree, nativeSlots, workerRoleSummary, writerLease, leasePath, leaseStatus, hash, DEFAULT_CONFIG } from "./project.mjs";
 import { KINDS, launchMode, validateLaunch } from "./launch-policy.mjs";
@@ -485,12 +485,10 @@ async function executeRunCommand(action, o) {
     try { fs.writeFileSync(path.join(dir, "run.json"), JSON.stringify(run) + "\n", { flag: "wx", mode: 0o600 }); }
     catch (e) { if (e.code === "EEXIST") throw runError("Run already exists; select it, do not overwrite it"); throw e; }
     const roles = workerRoleSummary(run.config);
-    const protocolMismatch = probe.endpointCompatible === false ||
-      (probe.protocolGeneration !== null && probe.protocolGeneration !== EXPECTED_PROTOCOL_GENERATION) ||
-      (probe.serverProtocolGeneration !== null && probe.serverProtocolGeneration !== EXPECTED_PROTOCOL_GENERATION);
+    const endpointMismatch = probe.endpointCompatible === false || probe.restartNeeded === true;
     const staleServer = probe.serverBinaryStale === true;
     const warnings = [
-      ...(protocolMismatch ? [`Herdr endpoint generations are client=${probe.protocolGeneration ?? "unknown"}, server=${probe.serverProtocolGeneration ?? "unknown"}; herdr-axi expects ${EXPECTED_PROTOCOL_GENERATION}. CLI automation can proceed, but saved SSH/multi-machine UI compatibility needs attention; inspect: herdr status --json`] : []),
+      ...(endpointMismatch ? [`Herdr endpoint generations are client=${probe.protocolGeneration ?? "unknown"}, server=${probe.serverProtocolGeneration ?? "unknown"}. CLI automation can proceed, but saved SSH/multi-machine UI compatibility needs attention; inspect: herdr status --json`] : []),
       ...(staleServer ? [`Herdr client ${probe.clientVersion} and server ${probe.serverVersion} differ. Both satisfy herdr-axi, but prompt behavior is server-owned; restart Herdr if you expected the updated server binary.`] : []),
     ];
     return { run: dir, owner: ownerPane, workspace: run.workspace, project: project.project, config: project.configFile || "defaults", phase: run.phase, capacity: limit(run), ...roles, cleanup: collectArchives(project.project),

@@ -1,7 +1,7 @@
 # Herdr 0.9.0 — Änderungsprotokoll und herdr-axi Impact-Analyse
 
-Stand: 2026-09-08  
-Maschine: `herdr 0.9.0` in `~/.local/bin/herdr` (ersetzt Homebrew 0.8.0)  
+Stand: 2026-09-08
+Maschine: `herdr 0.9.0` in `~/.local/bin/herdr` (ersetzt Homebrew 0.8.0)
 herdr-axi: Refactor-Zweig auf Basis der veröffentlichten `0.3.0`
 
 ---
@@ -57,7 +57,7 @@ flip-and-return. Kein P0-Umbau; P3-Refactor kann die Erkennungslatenz senken.
 | D1 Multi-Host | Option B: Herdr-TUI als Sichtschicht; Run lebt auf dem jeweiligen Host, herdr-axi wird dort ausgeführt, ein Aggregator sammelt Status. Kein Run über Maschinen-Grenzen (bricht Receipt-, Lease- und Lock-Modell). |
 | D2 dotfiles/herdr | Option B: Deprecated-Header plus Hinweis auf herdr-axi engine, eine Quelle der Wahrheit. |
 | D3 Mindest-Herdr | Option B: Runtime-Probe über `herdr status --json`; Client **und serverseitiger Behavior-Owner** müssen >=0.9 sein, private Protokoll-Inkompatibilität ist fatal, Endpoint-Generation ist nur eine UI/SSH-Warnung. `engines.herdr` allein reicht nicht. |
-| D4 Enter-Fallback bei stalled | Option A: Live-Test gegen 0.9, dann Fallback entfernen, `agent_prompt_stalled` fail-closed in Registry-Stage. |
+| D4 Enter-Fallback bei stalled | Entfernt: Upstream garantiert geordnete Text+Enter-Submission und warnt, dass stalled/timeout keine Nicht-Zustellung beweist. `agent_prompt_stalled` bleibt fail-closed in der Registry-Stage. |
 
 ---
 
@@ -285,7 +285,7 @@ State: `~/.local/state/herdr-axi/` (Runs, Leases, Archive). Policy: `.herdr-axi.
 
 | Herdr-Änderung | Risiko | Empfohlene Reaktion |
 |----------------|--------|---------------------|
-| `agent prompt --wait` strenger | Mittel | Live-Tests für Delivery/Retry; stalled-Handling prüfen |
+| `agent prompt --wait` strenger | Mittel | Delivery auf `--until working --until blocked` begrenzen; stalled ohne Blind-Retry/Enter behandeln |
 | `agent read` recent inkl. Viewport | Niedrig | Positiv für Checkpoints/Quota; Regression-Test; `recent-unwrapped` ist jetzt dokumentierter Empfehlungspfad |
 | Lifecycle kein Replay | **Niedrig/Mittel** (korrigiert K3) | Bestehender Monitor nutzt `agent wait`, nicht `events.subscribe`; P3-Socket-Umbau nur mit Ack→Buffer→Snapshot→Replay und Reconnect |
 | Worktree group close | Mittel | `run close`/Archive: `--group` wenn Parent+Kinder |
@@ -310,7 +310,7 @@ State: `~/.local/state/herdr-axi/` (Runs, Leases, Archive). Policy: `.herdr-axi.
 4. **Group-Close** — `run close`/Worker-Cleanup schließt Tabs einzeln, nie den Parent-Workspace; Normalpfad unberührt. Docs-Warnung gegen manuelles Schließen des Run-Workspaces genügt, kein Code.
 5. **Dotfiles-Konsolidierung** — `ordex/dotfiles/herdr` als deprecated markieren oder als Symlink/Thin-Wrapper auf herdr-axi engine; eine Quelle der Wahrheit (Entscheidung D2: deprecated markieren).
 6. **Runtime-Versionsprobe** — bei `run init` einmal `herdr status --json` lesen. Client und Server müssen >=0.9 sein; `server.compatible=false` ist fatal. Beide Versionen/Protokolle und Endpoint-Generationen in `run.json` schreiben. Endpoint-Mismatch nur warnen: herdr-axi nutzt CLI/Socket, nicht den TUI/SSH-Endpoint.
-7. **Prompt-Flags an 0.9 anpassen** — `herdr-receipt.sh:446`: Defaults nicht mit `--until` wiederholen; stalled-Enter-Fallback nach Live-Test entfernen, `agent_prompt_stalled` fail-closed (Entscheidung D4).
+7. **Prompt-Flags an 0.9 anpassen** — Delivery ist nicht Completion: `--until working --until blocked` lässt das von Herdr beobachtete Activity-Gate den Startup-Ack erfüllen, statt bis `idle|done` zu warten. Stalled-Enter-Fallback entfernen und `agent_prompt_stalled` fail-closed behandeln (Entscheidung D4).
 
 ### Phase B — Nutzen von Herdr 0.9 (Follow-up nach dem Refactor)
 
@@ -356,7 +356,7 @@ State: `~/.local/state/herdr-axi/` (Runs, Leases, Archive). Policy: `.herdr-axi.
 | Datei | Prüfpunkt |
 |-------|-----------|
 | `src/herdr.mjs` | Version probe; `mapErrorCode` für neue 0.9 Codes |
-| `engine/herdr-receipt.sh` | `agent prompt --wait`: `--until`-Default-Duplikate entfernen; stalled-Enter-Fallback (Zeilen 469 bis 486) nach Live-Test entfernen, fail-closed |
+| `engine/herdr-receipt.sh` | `agent prompt --wait --until working --until blocked`: Aktivitäts-Ack statt Task-Completion; stalled-Enter-Fallback entfernt, fail-closed |
 | `engine/herdr-lifecycle-monitor.sh` | Kein Sofort-Umbau nötig (K3); P3: Raw-Socket-Client gegen duale `agent wait`-Prozesse benchmarken, aber Reconnect/Snapshot korrekt lösen |
 | `engine/herdr-worker.sh` | Ready-Ack (Zeile 291): `pane wait-output --match` durch Datei-Marker ersetzen |
 | `engine/herdr-hook-notify.sh` | Dedup mit native Herdr-Hooks (Cursor) |
@@ -370,7 +370,7 @@ State: `~/.local/state/herdr-axi/` (Runs, Leases, Archive). Policy: `.herdr-axi.
 
 | Prio | Item | Aufwand | Nutzen |
 |------|------|---------|--------|
-| P0 | Live-Smoke 0.9 + D4-Entscheid (stalled-Fallback) | 1 Tag | Stabilität, korrekte Delivery |
+| P0 | Prompt-Contract + fail-closed stalled-Pfad | erledigt im Refactor | Stabilität, keine Doppelzustellung |
 | P0 | Runtime-Versionsprobe (run init) + engines + Docs | 0.5 bis 1 Tag | Fail-fast, Protokoll-Health |
 | P0.5 | Prompt-Flags (`--until`-Duplikate) aufräumen | 0.5 Tag | Korrekte 0.9-Semantik |
 | P0.5 | Dotfiles/herdr deprecated markieren | 0.5 Tag | Wartbarkeit |
@@ -386,8 +386,8 @@ State: `~/.local/state/herdr-axi/` (Runs, Leases, Archive). Policy: `.herdr-axi.
 ## 10. Offene Fragen
 
 Entscheidet (Stand 08.09.2026, siehe Abschnitt 1a): D1 (Multi-Host, Option B),
-D2 (dotfiles deprecated), D3 (Runtime-Probe, unter 0.9 fail), D4 (stalled-Fallback
-nach Live-Test entfernen). Verbleibend:
+D2 (dotfiles deprecated), D3 (Runtime-Probe, beide Seiten unter 0.9 fail),
+D4 (stalled-Fallback entfernt). Verbleibend:
 
 1. Operator-Toast: welche Events verdienen einen Toast (Phasenwechsel, blocked, run finish)?
 2. SSH-Host-Ausführung: direkter `ssh <host> herdr-axi ...` oder Agent-Relay über einen SSH-Pane pro Host?
