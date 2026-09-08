@@ -36,6 +36,7 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
       assert(!fs.existsSync(ready), "startup fixture was not released");
       const a = find(args[args.indexOf("--pane") + 1]);
       a.name = args[0]; a.agent = args[args.indexOf("--kind") + 1]; a.agent_status = "idle";
+      if (a.agent === "cursor") a.agent_session = { value: randomUUID() };
       if (fs.existsSync(path.join(dir, "startup-blocked"))) {
         a.agent_status = "blocked"; save(a);
         console.error(JSON.stringify({ error: { code: "agent_not_ready", message: "startup blocked" } })); process.exit(1);
@@ -154,6 +155,39 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
     fs.writeFileSync(path.join(f.dir, `screen-${w.pane}`), "● Partial implementation; checks pending\n✗ You have exceeded your monthly quota (Request ID: fixture)\n /commands · autopilot");
     return w;
   }
+
+  test("Cursor queue, revision and cancellation preserve owned topology and native model policy", () => {
+    const f = fixture();
+    try {
+      f.ok(["run", "queue", "cursor-work", "--role", "verifier", "--kind", "cursor", "--model", "composer-2.5", "--cwd", f.state().project, "--area", ".", "--prompt", "Read only; report checks", "--start"]);
+      const w = f.state().workers[0];
+      assert.equal(w.kind, "cursor");
+      assert.equal(f.state().tasks[0].effort, "model");
+      const args = f.calls().find(c => c.group === "agent" && c.action === "start").args;
+      assert(args.includes("--auto-review")); assert(args.includes("composer-2.5"));
+      for (const flag of ["--force", "--yolo", "--trust", "--mode", "--effort", "--approve-mcps"]) assert(!args.includes(flag), flag);
+      f.complete(w);
+      f.ok(["run", "revise", w.pane, "--prompt", "Recheck the same file; report only"]);
+      const next = f.state().workers[0];
+      assert.equal(next.pane, w.pane); assert.notEqual(next.generation, w.generation);
+      f.ok(["run", "cancel", next.pane, "--evidence", "Authorized scratch stop; no background jobs"]);
+      assert.equal(f.state().tasks[0].state, "cancelled");
+      assert.equal(f.calls().filter(c => c.group === "tab" && c.action === "close").length, 1);
+      f.ok(["run", "finish"]);
+    } finally { f.clean(); }
+  });
+
+  test("Quota handoff can select Cursor without an invented model or effort", () => {
+    const f = fixture();
+    try {
+      const old = exhaustedWorker(f);
+      f.ok(["run", "switch", old.pane, "--kind", "cursor", "--model", "composer-2.5"]);
+      assert.equal(f.state().tasks[0].effort, "model");
+      f.ok(["run", "next"]);
+      assert.equal(f.state().workers.at(-1).kind, "cursor");
+      assert.notEqual(f.state().workers.at(-1).pane, old.pane);
+    } finally { f.clean(); }
+  });
 
   test("one queue-start call selects the requested Opus worker, verifies auto and completes the owned lifecycle", () => {
     const f = fixture();
@@ -900,19 +934,23 @@ if (["agent", "tab", "pane"].includes(process.argv[2])) {
     } finally { f.clean(); }
   });
 
-  test("one watch wakes for a newly reached quota; subsequent status reuses the bounded probe", async () => {
+  test("one watch delivers quota across the initial-snapshot race; subsequent status reuses the bounded probe", async () => {
     const f = fixture(); let watching;
     try {
       const w = exhaustedWorker(f), file = path.join(f.dir, `${w.pane}.agent`);
-      const a = JSON.parse(fs.readFileSync(file)); a.agent_status = "working"; fs.writeFileSync(file, JSON.stringify(a));
+      const a = JSON.parse(fs.readFileSync(file));
+      const publish = () => { const temp = file + ".tmp"; fs.writeFileSync(temp, JSON.stringify(a)); fs.renameSync(temp, file); };
+      a.agent_status = "working"; publish();
       const before = f.calls().filter((c) => c.action === "list").length;
       watching = f.asyncRun(["watch", "--timeout-ms", "8000"]);
       const deadline = Date.now() + 3000;
       while (f.calls().filter((c) => c.action === "list").length === before && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
-      a.agent_status = "idle"; fs.writeFileSync(file, JSON.stringify(a));
+      a.agent_status = "idle"; publish();
       const result = await watching;
       assert.equal(result.status, 0, result.output);
-      assert.match(result.output, /reason: state-change/);
+      // The backend logs list before reading rows: quota may reach the first
+      // snapshot. Existing attention and a later transition both deliver it.
+      assert.match(result.output, /reason: (state-change|attention)/);
       assert.match(result.output, /monthly/); assert.match(result.output, /herdr-axi run switch/);
       const reads = f.calls().filter((c) => c.action === "read").length;
       f.ok(["fleet"]);

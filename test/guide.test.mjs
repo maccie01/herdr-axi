@@ -4,6 +4,15 @@ import { guide } from "../src/guide.mjs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+test("Cursor guide supplies a precise launch recipe and reports its limitations", () => {
+  const result = guide(["start cursor"]);
+  assert.equal(result.topic, "start");
+  assert.match(result.start[1], /--kind cursor --model CURSOR_MODEL_ID --effort model/);
+  assert.match(result.cursor, /cursor-agent models/);
+  assert.match(result.cursor, /Context unknown/);
+  assert.equal(guide(["cursor"]).topic, "models");
+});
+
 test("guide and skill alias return identical bounded TOON without Herdr or run state", () => {
   const cli = fileURLToPath(new URL("../bin/herdr-axi.mjs", import.meta.url));
   const run = (args) => spawnSync(process.execPath, [cli, ...args], { encoding: "utf8", env: { ...process.env, HERDR_BIN: "/no-backend", HERDR_AXI_RUN: "/no-run" } });

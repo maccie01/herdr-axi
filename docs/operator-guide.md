@@ -12,13 +12,20 @@
 - Two-call onboarding: `run init`; returned export + `run queue --start` together. No help/config/fleet preflight.
 - Optional TOON recipes: `guide "start opus"`, `guide "quota switch"`, `guide "wait notification"`; no keywords = full compact workflow. Zero backend/model calls.
 
-Low-context fleet supervision for [herdr](https://herdr.dev): Claude, Codex and
-Copilot workers, owned by one orchestrator. Compact TOON output, precomputed
+Low-context fleet supervision for [herdr](https://herdr.dev): Claude, Codex,
+Copilot and Cursor workers, owned by one orchestrator. Compact TOON output, precomputed
 status, bounded task queues and pane-safe control.
 
 ## Install
 
-From this private repository; GitHub access required:
+Install from npm:
+
+```sh
+npm i -g herdr-axi
+herdr-axi --version
+```
+
+Or install from source:
 
 ```sh
 git clone https://github.com/maccie01/herdr-axi.git
@@ -30,7 +37,7 @@ herdr-axi --version
 
 Requirements: Node.js ≥20, a live Herdr session, authenticated worker CLIs on
 `PATH`; Bash, `jq`, `rg`, `uuidgen` and standard Unix utilities for the engine.
-`npm link` exposes this checkout globally. Keep Node and the global npm bin
+`npm link` exposes a source checkout globally. Keep Node and the global npm bin
 directory on every agent's inherited `PATH`; shell startup files must preserve it.
 Managed workers also receive the package's bin directory and `HERDR_AXI_BIN` fallback.
 Set `HERDR_BIN` to select a specific Herdr binary. No global agent instruction
@@ -356,6 +363,13 @@ orchestrator role cannot change an already-running owner's model.
 | Claude | `--permission-mode auto`; auto-capable Opus/Sonnet/Fable | Explicit Auto footer before initial/resumed task submission; missing/manual mode preserves an unsubmitted tab for inspection/cancel |
 | Codex | `--approve-for-me`; workspace sandbox + automatic review | Native flag only; no claim of observed runtime mode |
 | Copilot | `--autopilot --allow-all`; existing Git deny rules | Native flag only; no claim of observed runtime mode |
+| Cursor | `--auto-review` (Smart Auto); explicit `cursor-agent models` ID | Native flag only; approval/trust may still block; no `--force`, `--yolo` or automatic trust |
+
+- Cursor queue/switch: `--kind cursor --model composer-2.5 --effort model`; choose an available ID, not implicit `auto` routing. Effort belongs to Cursor's exact model ID (e.g. a `-high` variant); separate numeric/named effort overrides refused, not ignored.
+- Cursor project role: `{"kind":"cursor","model":"composer-2.5","effort":"model","access":"write"}`. Existing provider defaults unchanged.
+- Cursor supervision: existing lifecycle monitor, no global/plugin hook edits; registered terminal/session identity + current generation proof + native idle/done required. Unknown readiness cannot settle. Reports use bounded visible output; inspect `read --full` or a reviewed `--result-file` when insufficient.
+- Cursor startup guard: native Herdr can report idle at workspace trust; visible trust or missing session identity leaves the owned tab unsubmitted. Inspect, authorize trust only if appropriate, then `run recover`; never bypass with raw prompt/keys.
+- Cursor context usage remains `contextUnknown`; no private transcript parsing or guessed percentages. Shared conservative quota detector applies; unrecognized Cursor-specific billing messages need inspection/cancellation, not automatic switching.
 
 - Model validation before allocation; known incompatible Claude choices (Haiku, older models, `opusplan`) refused; never substitute or bypass permissions.
 - Account/admin restrictions can still disable Auto; trust/explicit approval prompts remain protected. [Claude mode requirements](https://code.claude.com/docs/en/permission-modes).

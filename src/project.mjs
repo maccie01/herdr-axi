@@ -50,6 +50,7 @@ export function validateConfig(input = {}) {
     }
   }
   for (const [name, role] of Object.entries(config.roles)) {
+    if (role.kind === "cursor" && role.effort === undefined) role.effort = "model";
     if (!["read", "write"].includes(role.access)) throw runError(`Invalid role ${name}`, "CONFIG_INVALID");
     try { validateLaunch(role); } catch (e) { throw runError(`Role ${name}: ${e.message}`, "CONFIG_INVALID"); }
     if (role.contextWindowTokens !== undefined && !integer(role.contextWindowTokens, 1000, 10000000)) throw runError(`Invalid context window for ${name}`, "CONFIG_INVALID");
@@ -72,7 +73,8 @@ export function selectWorker(config, options) {
   if (options.role && (!base || options.role === "orchestrator")) throw runError("Choose a worker role from init", "CONFIG_INVALID", ["herdr-axi run config"]);
   const kind = options.kind ?? base?.kind;
   if (base && kind !== base.kind && !options.model) throw runError("Changing provider requires --model; no implicit substitution", "CONFIG_INVALID", ["herdr-axi run queue --help"]);
-  const role = { ...(base ?? { access: "write" }), kind, model: options.model ?? base?.model ?? (kind === "claude" ? "opus" : "gpt-5.6-sol"), effort: options.effort ?? base?.effort ?? "high" };
+  if (kind === "cursor" && !options.model && !base?.model) throw runError("Cursor requires --model from cursor-agent models", "LAUNCH_POLICY", ["cursor-agent models", "herdr-axi guide cursor"]);
+  const role = { ...(base ?? { access: "write" }), kind, model: options.model ?? base?.model ?? (kind === "claude" ? "opus" : "gpt-5.6-sol"), effort: options.effort ?? (kind === "cursor" ? (base?.kind === "cursor" ? base.effort ?? "model" : "model") : base?.effort ?? "high") };
   if (role.model !== base?.model || role.kind !== base?.kind) delete role.contextWindowTokens;
   try { validateLaunch(role); } catch (e) { throw runError(e.message, e.code, ["herdr-axi run queue --help", "herdr-axi run config"]); }
   return role;

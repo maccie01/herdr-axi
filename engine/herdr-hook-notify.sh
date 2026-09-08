@@ -77,9 +77,10 @@ transcript_path=""
 transcript_session=""
 transcript_resolution="none"
 live_status=""
+metadata=""
 
 resolve_native_transcript() {
-  local metadata explicit_path expected_path agent_kind
+  local explicit_path expected_path agent_kind
   metadata=$(herdr agent get "$agent_name" 2>/dev/null || true)
   transcript_session=$(printf '%s\n' "$metadata" |
     jq -r '.result.agent.agent_session.value // empty' 2>/dev/null || true)
@@ -87,6 +88,12 @@ resolve_native_transcript() {
     jq -r '.result.agent.agent // empty' 2>/dev/null || true)
   live_status=$(printf '%s\n' "$metadata" |
     jq -r '.result.agent.agent_status // empty' 2>/dev/null || true)
+  # Cursor's private transcript format is not a completion contract. Use the
+  # bounded visible report, and require registered native identity + proof below.
+  if [[ "$agent_kind" == cursor ]]; then
+    transcript_backend=cursor
+    return 0
+  fi
   explicit_path=$(payload_value '.transcriptPath // .transcript_path')
 
   if [[ -n "$explicit_path" ]]; then
@@ -278,7 +285,20 @@ if [[ "${HERDR_MONITOR_RENDER_ONLY:-}" != "1" ]]; then
   if [[ -n "$receipt_generation" ]]; then
     completion_file=$(herdr_completion_file "$receipt_file" "$receipt_generation" || true)
   fi
-  if [[ -n "$receipt_generation" && "$transcript_resolution" == "resolved" &&
+  completion_source_valid=false
+  if [[ "$transcript_resolution" == resolved && "$transcript_backend" != cursor ]]; then
+    completion_source_valid=true
+  elif [[ "$transcript_backend" == cursor && ( "$live_status" == idle || "$live_status" == done ) ]]; then
+    # No transcript fallback may authorize a replacement occupant or a new task.
+    if jq -e --argjson metadata "$metadata" --arg generation "$receipt_generation" \
+      '($metadata.result.agent) as $a | .generation == $generation and
+       .name == $a.name and .agent_pane == $a.pane_id and .tab_id == $a.tab_id and
+       .workspace_id == $a.workspace_id and .native_identity.terminal != null and
+       .native_identity.terminal == $a.terminal_id and .native_identity.session != null and
+       .native_identity.session == $a.agent_session.value' \
+      "${receipt_file%.event}.json" >/dev/null 2>&1; then completion_source_valid=true; fi
+  fi
+  if [[ -n "$receipt_generation" && "$completion_source_valid" == true &&
     -n "$transcript_session" && "$live_status" != "working" && "$live_status" != "blocked" ]] &&
     herdr_completion_proof_valid "$receipt_file" "$receipt_generation"; then
     if [[ "$transcript_backend" != "copilot" || "$copilot_complete" == "true" ]]; then
@@ -321,6 +341,9 @@ if [[ "$event_kind" == "error" && -n "$hook_message" ]]; then
   detail="${hook_message}"$'\n'"${detail}"
 fi
 detail_truncated=false
+# Cursor currently uses only a bounded terminal excerpt, never an asserted full
+# transcript. Keep that limitation with the saved report for coordinator review.
+if [[ "$transcript_backend" == cursor ]]; then detail_truncated=true; fi
 if (( $(printf '%s' "$detail" | wc -c) > 3500 )); then detail_truncated=true; fi
 detail=$(printf '%s\n' "$detail" | head -c 3500)
 

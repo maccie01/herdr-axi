@@ -1,6 +1,6 @@
 {
   "name": "herdr-axi",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Agent-ergonomic CLI for herdr fleet supervision and orchestration",
   "author": "maccie01",
   "repository": { "type": "git", "url": "git+https://github.com/maccie01/herdr-axi.git" },

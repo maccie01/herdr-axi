@@ -1,6 +1,6 @@
 const TOPICS = {
   start: "start init launch delegate queue batch starten",
-  models: "model models kind effort opus sonnet claude codex copilot budget manual autonomous modell",
+  models: "model models kind effort opus sonnet claude codex copilot cursor budget manual autonomous modell",
   quota: "quota limit limits exhausted switch wechsel wechseln",
   stop: "stop cancel unfinished abandon stoppen abbrechen",
   close: "close cleanup finish archive schliessen aufraumen",
@@ -25,10 +25,10 @@ export function guide(args = []) {
   if (matches.length > 1) return { error: "Multiple topics; choose one recipe", code: "AMBIGUOUS_GUIDE_TOPIC", matches: matches.slice(0, 3).map((topic) => ({ topic, help: `herdr-axi guide ${topic}` })), examples: matches.slice(0, 3).map((topic) => `herdr-axi guide ${topic}`), ...(matches.length > 3 ? { more: matches.length - 3 } : {}) };
   const topic = matches[0];
   if (words.includes("opus") && words.includes("sonnet")) return { error: "Choose one model: opus or sonnet", code: "AMBIGUOUS_GUIDE_TOPIC", examples: ["herdr-axi guide start opus", "herdr-axi guide start sonnet"] };
-  const choice = words.includes("sonnet") ? full.models.choice.replace("claude-opus-5", "sonnet") : full.models.choice;
+  const choice = words.includes("cursor") ? "--role implementer --kind cursor --model CURSOR_MODEL_ID --effort model" : words.includes("sonnet") ? full.models.choice.replace("claude-opus-5", "sonnet") : full.models.choice;
   const recovery = (...states) => full.recovery.filter((row) => states.includes(row.when));
   const recipes = {
-    start: { placeholders: full.placeholders, start: full.start.map((command) => words.includes("opus") || words.includes("sonnet") ? command.replace("--role implementer", choice) : command), batch: full.batch, policy: full.models.policy, mode: full.models.mode, budget: full.models.budget, rules: full.rules.slice(0, 3), next: full.waiting.work },
+    start: { placeholders: full.placeholders, start: full.start.map((command) => words.includes("cursor") || words.includes("opus") || words.includes("sonnet") ? command.replace("--role implementer", choice) : command), batch: full.batch, policy: full.models.policy, mode: full.models.mode, budget: full.models.budget, rules: full.rules.slice(0, 3), next: full.waiting.work },
     models: { ...full.models, choice },
     quota: { placeholders: full.placeholders, recovery: recovery("quota"), retry: "Interrupted switch: herdr-axi run switch TASK; same checkpoint, no new run" },
     stop: { placeholders: full.placeholders, recovery: recovery("stop unfinished"), safety: full.rules[1] },
@@ -39,7 +39,7 @@ export function guide(args = []) {
     worktree: { placeholders: full.placeholders, rule: full.rules[2], recovery: recovery("worktree busy") },
     review: { placeholders: full.placeholders, recovery: recovery("review ready"), report: "herdr-axi run inbox once if not already delivered by watch; inspect checks before acceptance", next: "Changes needed: revise BEFORE accept; after acceptance queue a new task with same role/cwd to reuse. No repeated report fetch" },
   };
-  return { topic, ...recipes[topic] };
+  return { topic, ...recipes[topic], ...(words.includes("cursor") ? { cursor: "CURSOR_MODEL_ID: exact cursor-agent models ID, including desired effort; --effort model. Smart Auto (--auto-review), no force/trust bypass. Context unknown; bounded visible reports + registered session + generation proof; no native transcript hooks." } : {}) };
 }
 
 function fullGuide() {
