@@ -37,7 +37,7 @@ herdr-axi --version
 ```
 
 - Preserve the global npm bin directory on every agent's `PATH`.
-- Herdr >= 0.9.0 is required on both client and server, verified at `run init` through `herdr status --json` (`npm engines.herdr` is documentation only). An old side fails with `HERDR_VERSION_UNSUPPORTED`; an incompatible private client/server protocol fails with `HERDR_PROTOCOL_INCOMPATIBLE`. Versions, protocols, and endpoint generations are recorded in `run.json`. Endpoint-generation drift only warns because it governs Herdr's UI/SSH transport, while herdr-axi uses the CLI/socket API.
+- Herdr >= 0.9.0 is required on both client and server, verified at `run init` through `herdr status --json` (`npm engines.herdr` is documentation only). An old side fails with `HERDR_VERSION_UNSUPPORTED`; an incompatible private client/server protocol fails with `HERDR_PROTOCOL_INCOMPATIBLE`. Versions, protocols, endpoint generations, socket path and optional endpoint capabilities are recorded in `run.json`. Endpoint-generation drift only warns because it governs Herdr's UI/SSH transport, while herdr-axi uses the CLI/socket API.
 - Managed workers also receive the package bin path and `HERDR_AXI_BIN` fallback.
 - No global Claude/Codex/Copilot/Cursor instruction files modified.
 
@@ -89,7 +89,7 @@ herdr-axi run queue parser --role implementer \
 - Background wakeup requires a verified harness callback; detached `&` and a Herdr toast are not enough.
 - Claude's native background Bash callback: [live-tested with Sonnet](https://github.com/maccie01/herdr-axi/blob/dev/LIVE-TEST.md#sonnet-orchestrators--7-september-2026); no universal wakeup claim.
 - `watch` default: 30 seconds; `run watch` alias; one active watcher; timeout ≠ completion.
-- Long wait: `watch --timeout-ms 1800000`; no model inference while blocked. File events + 2→10-second fallback checks; telemetry writes ignored.
+- Long wait: `watch --timeout-ms 1800000`; no model inference while blocked. Herdr lifecycle events and receipt-file events wake reconciliation; 2→10-second fallback checks remain. Events are hints, never completion proof.
 
 <details>
 <summary>Diagram: readiness, proof and acceptance</summary>
@@ -107,6 +107,9 @@ herdr-axi run queue parser --role implementer \
 | Capability | Contract / entry point |
 | --- | --- |
 | Owned fleet | `fleet`, `agents`; selected run excludes self and foreign workers |
+| Native diagnostics | `explain <pane>` projects Herdr's detection decision; `--verbose` adds bounded rule evidence |
+| Machine inventory | `machines` lists saved SSH profiles without pretending server-scoped pane IDs are global |
+| Hybrid wake | Herdr socket lifecycle + receipt filesystem + fallback timer; reconnect always rereads authoritative state |
 | Compact context | TOON, counts, bounded diagnostics, actionable pane-ID hints |
 | Focused reads | `read`: 60 lines / 8000 characters; `--raw`: layout; `--full`: available history ≤2000 lines |
 | Controlled dispatch | Managed tasks: `queue/next/revise`; authorized unmanaged panes: `dispatch`, `wait`; busy rejection; `--no-wait` means submission only |

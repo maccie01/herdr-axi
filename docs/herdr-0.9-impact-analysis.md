@@ -28,9 +28,11 @@ JSON-Socket `events.subscribe` und `events.wait`. Die CLI kapselt diese Methoden
 nicht (`herdr api` bietet nur `snapshot` und `schema`). Folgerungen:
 
 - Datei-basiertes Wakeup (`src/run-wake.mjs`, fs.watch auf Receipts) bleibt die
-  Orchestrator-Mechanik; Herdr-Lifecycle kennt keine herdr-axi Receipt-/Proof-Semantik.
-- Ein späterer Socket-Monitor muss zuerst subscriben und den Ack abwarten, Events
-  puffern, dann `session.snapshot` lesen und nach Reconnect erneut snapshotten.
+  Proof-Mechanik; Herdr-Lifecycle kennt keine herdr-axi Receipt-/Proof-Semantik.
+- Der Refactor ergänzt einen kleinen Socket-Subscriber als Wake-Hinweis: zuerst
+  subscriben und Ack abwarten, dann autoritativen CLI-Status lesen; Events während
+  der Abfrage bleiben pending. Nach Reconnect wird immer neu abgeglichen. Ein
+  eigener Snapshot-Cache bleibt bewusst außerhalb dieses Slices.
 - `notification show` bleibt als Operator-UX nutzbar (Toast bei Phasenwechsel,
   blocked, run finish), ist aber kein Architektur-Element.
 - Der dokumentierte Gap "Hooks wecken Orchestrator nicht" bleibt bestehen.
@@ -268,7 +270,10 @@ State: `~/.local/state/herdr-axi/` (Runs, Leases, Archive). Policy: `.herdr-axi.
 
 ### 5.4 Bekannte brittliche Annahmen
 
-1. Keine Herdr-Versionsverhandlung (Runtime-Probe fehlt komplett). 0.9 liefert Client-, Server-, private Protokoll- und Endpoint-Daten zusammen über `herdr status --json`.
+1. Runtime-Probe ist im Refactor umgesetzt: Client, Server, private Protokolle,
+   Endpoint-Generation, Socket und optionale Endpoint-Capabilities kommen aus
+   `herdr status --json`. Bestehende Runs ohne Socket-Metadaten degradieren auf
+   Datei-Events plus Timer.
 2. `agent read --source recent-unwrapped` — bereits in 0.8.2 dokumentiert; 0.9 behebt den fehlenden Viewport-Anteil. Bei idle/bottom kann ein Read die App scrollen; explizite History kann bei working/blocked/unknown mit `agent_not_idle` scheitern, daher bleibt der Visible-Fallback wichtig.
 3. Monitor-Startup-Ack — jetzt generationsgebundener `${receipt}.monitor-ready`-Marker; der Worker entfernt ihn nach Validierung. Damit hängt der kritische Pfad nicht von Render-Wrapping/Kitty Graphics ab.
 4. `tab create --env` — viele injizierte Env-Vars.

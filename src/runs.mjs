@@ -9,6 +9,7 @@ import { PHASES, runError, runDir, loadRun, changeRun, pending, limit, receipt, 
 import { projectConfig, validateConfig, selectWorker, worktree, nativeSlots, workerRoleSummary, writerLease, leasePath, leaseStatus, hash, DEFAULT_CONFIG } from "./project.mjs";
 import { KINDS, launchMode, validateLaunch } from "./launch-policy.mjs";
 import { runWake } from "./run-wake.mjs";
+import { runSubscriptions } from "./herdr-events.mjs";
 import { projectRuns, projectHistory, history, finishRun, collectArchives } from "./archive.mjs";
 import { contextStatus } from "./context.mjs";
 import { quotaError, switchHelp } from "./quota.mjs";
@@ -370,6 +371,7 @@ export async function watchRun(timeout = 30000, task) {
   const selected = loadRun();
   if (!selected?.finishedAt) ownerCheck(selected);
   if (task && !selected.tasks.some((t) => t.id === task)) throw runError(`Unknown task: ${task}`, "UNKNOWN_TASK", ["herdr-axi run status"]);
+  const subscriptions = selected?.finishedAt ? [] : runSubscriptions({ workers: ownedWorkers(selected) });
   let proofError, unproven;
   // Task-scoped waits leave other unresolved work visible, but it must not
   // repeatedly wake a coordinator waiting on an independent dependency.
@@ -409,10 +411,26 @@ export async function watchRun(timeout = 30000, task) {
       fs.renameSync(temp, file);
     } finally { fs.rmSync(temp, { force: true }); }
   }, { readOnly: true, allowFinished: true });
-  const wake = runWake(runDir());
+  const wake = runWake(runDir(), {
+    herdr: {
+      socketPath: selected.herdr?.socket,
+      subscriptions,
+    },
+  });
   try {
+    await wake.ready(500);
+    const wakeMetadata = () => {
+      const state = wake.status();
+      const transports = [state.herdr.connected ? "herdr-events" : null, state.filesystem.available ? "filesystem" : null, "timer"].filter(Boolean);
+      const degraded = [state.herdr.enabled && !state.herdr.connected ? state.herdr.lastError : null, state.filesystem.error].filter(Boolean);
+      return {
+        wakeTransport: transports.join("+"),
+        ...(degraded.length ? { wakeDegraded: degraded.join("; ").slice(0, 600) } : {}),
+        ...(state.herdr.reconnects ? { wakeReconnects: state.herdr.reconnects } : {}),
+      };
+    };
     const first = runStatus();
-    const attention = async (s, changed, reason) => ({ changed, reason, ...(task ? { watching: task } : {}), ...(focus(s).tasks?.some((t) => ["review", "idle", "done"].includes(t.state) || t.quota) && s.owner === callerPane() ? await runCommand("inbox", { _: [], task }) : s), ...(s.contextError ? { contextError: s.contextError } : {}) });
+    const attention = async (s, changed, reason) => ({ changed, reason, ...wakeMetadata(), ...(task ? { watching: task } : {}), ...(focus(s).tasks?.some((t) => ["review", "idle", "done"].includes(t.state) || t.quota) && s.owner === callerPane() ? await runCommand("inbox", { _: [], task }) : s), ...(s.contextError ? { contextError: s.contextError } : {}) });
     // Existing diagnostic failures remain visible without turning repeated waits
     // into an immediate attention loop. New failures still change watchKey.
     if (!focus(first).tasks?.length || needsAttention({ ...focus(first), contextError: undefined })) return await attention(first, false, "attention");
@@ -427,7 +445,7 @@ export async function watchRun(timeout = 30000, task) {
       latest = runStatus();
       lastProbe = Date.now();
       interval = Math.min(interval * 2, 10000);
-      if (!latest.finished && latest.owner !== first.owner) return { changed: true, reason: "owner-changed", owner: latest.owner, note: "Stop old-owner supervision; replacement owns this run." };
+      if (!latest.finished && latest.owner !== first.owner) return { changed: true, reason: "owner-changed", ...wakeMetadata(), owner: latest.owner, note: "Stop old-owner supervision; replacement owns this run." };
       if (key !== watchKey(focus(latest))) return await attention(latest, true, "state-change");
     }
     const view = focus(latest);
@@ -436,12 +454,12 @@ export async function watchRun(timeout = 30000, task) {
       let output;
       try { output = runHerdr(["agent", "read", unproven.pane, "--source", "visible", "--lines", "24"], { timeoutMs: 1000, text: true }).slice(-2400); }
       catch { /* diagnostic only; the reported native state stands */ }
-      return { changed: false, reason: "missing-proof", watching: task, pane: unproven.pane, state: unproven.state, pending: view.tasks.length, ...(latest.contextError ? { contextError: latest.contextError } : {}),
+      return { changed: false, reason: "missing-proof", ...wakeMetadata(), watching: task, pane: unproven.pane, state: unproven.state, pending: view.tasks.length, ...(latest.contextError ? { contextError: latest.contextError } : {}),
         ...(output ? { output, outputLimit: "last 24 lines / 2400 characters; expand only if insufficient" } : {}),
         note: "Native turn settled without this generation's completion receipt; no validated completion is available. Inspect the worker once and resolve what it is waiting for; never synthesize proof, accept unfinished work or resend the prompt.",
         help: [`herdr-axi read ${unproven.pane} --raw --lines 60 --chars 8000`, "herdr-axi run inbox"] };
     }
-    return { changed: false, reason: "timeout", ...(task ? { watching: task } : {}), pending: view.tasks.length, ...(latest.contextError ? { contextError: latest.contextError } : {}), ...(proofError ? { proofError } : {}), note: waitingNote, help: proofError ? [`herdr-axi read ${proofError.pane} --raw`] : task ? [`herdr-axi watch --task ${task}`] : latest.help };
+    return { changed: false, reason: "timeout", ...wakeMetadata(), ...(task ? { watching: task } : {}), pending: view.tasks.length, ...(latest.contextError ? { contextError: latest.contextError } : {}), ...(proofError ? { proofError } : {}), note: waitingNote, help: proofError ? [`herdr-axi read ${proofError.pane} --raw`] : task ? [`herdr-axi watch --task ${task}`] : latest.help };
   } finally { wake.close(); fs.rmSync(file, { force: true }); }
 }
 
@@ -481,7 +499,7 @@ async function executeRunCommand(action, o) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     dir = fs.realpathSync(dir);
     if (dir === project.project || dir.startsWith(project.project + path.sep)) throw runError("Run state resolves inside the project/worktree", "STATE_IN_PROJECT");
-    const run = { schema: 1, id: randomUUID().slice(0, 8), herdr: { clientVersion: probe.clientVersion, serverVersion: probe.serverVersion, protocol: probe.protocol, serverProtocol: probe.serverProtocol, protocolCompatible: probe.protocolCompatible, endpointProtocolGeneration: probe.protocolGeneration, serverEndpointProtocolGeneration: probe.serverProtocolGeneration, endpointCompatible: probe.endpointCompatible, restartNeeded: probe.restartNeeded, serverBinaryStale: probe.serverBinaryStale }, ...project, storage: o.dir ? "explicit" : "managed", createdAt: new Date().toISOString(), workspace: a.workspace_id, owner: { pane: ownerPane, tab: a.tab_id, terminal: a.terminal_id, session: a.agent_session?.value }, phase: "explore", limits: { ...project.config.phases }, tasks: [], workers: [] };
+    const run = { schema: 1, id: randomUUID().slice(0, 8), herdr: { clientVersion: probe.clientVersion, serverVersion: probe.serverVersion, protocol: probe.protocol, serverProtocol: probe.serverProtocol, protocolCompatible: probe.protocolCompatible, endpointProtocolGeneration: probe.protocolGeneration, serverEndpointProtocolGeneration: probe.serverProtocolGeneration, endpointCompatible: probe.endpointCompatible, restartNeeded: probe.restartNeeded, serverBinaryStale: probe.serverBinaryStale, socket: probe.socket, endpointCapabilities: probe.endpointCapabilities }, ...project, storage: o.dir ? "explicit" : "managed", createdAt: new Date().toISOString(), workspace: a.workspace_id, owner: { pane: ownerPane, tab: a.tab_id, terminal: a.terminal_id, session: a.agent_session?.value }, phase: "explore", limits: { ...project.config.phases }, tasks: [], workers: [] };
     try { fs.writeFileSync(path.join(dir, "run.json"), JSON.stringify(run) + "\n", { flag: "wx", mode: 0o600 }); }
     catch (e) { if (e.code === "EEXIST") throw runError("Run already exists; select it, do not overwrite it"); throw e; }
     const roles = workerRoleSummary(run.config);

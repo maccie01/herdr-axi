@@ -49,7 +49,8 @@ herdr-axi requires Herdr >= 0.9.0 on both client and server because prompt/wait
 behavior is server-owned. `run init` reads `herdr status --json`: an old side
 fails with `HERDR_VERSION_UNSUPPORTED`, a private-protocol mismatch fails with
 `HERDR_PROTOCOL_INCOMPATIBLE`, and no run state is created. The client/server
-versions and protocols plus both endpoint generations are stored in `run.json`.
+versions and protocols plus both endpoint generations, the socket path and
+optional endpoint capabilities are stored in `run.json`.
 Endpoint-generation drift only warns: it governs Herdr's client-rendered UI and
 saved SSH-machine transport, while herdr-axi uses the CLI/socket API. A stale but
 compatible server binary also warns; restart Herdr when new server-side behavior
@@ -112,13 +113,13 @@ inbox fetch needed. Act on returned help, then continue independent work.
 | --- | --- |
 | Run until blocked | Queue bounded independent work; `next` once to fill available slots; do own useful work |
 | Suspend, then resume | No useful work left: one long blocking/tracked watch; no model loop around status/read |
-| Durable inbox | File events wake watch; reread authoritative state; review report returned in the same response |
+| Durable inbox | Receipt-file and Herdr lifecycle events wake watch; reread authoritative state; review report returned in the same response |
 | Reconciliation | Native changes without hooks/lost filesystem events: fallback checks back off 2→4→8→10 seconds |
 | Backpressure | Caps, dependencies, worktree leases; no automatic acceptance or phase escalation |
 | Unresolved attention | Follow the specific action or escalate once; repeating the same watch/read cannot resolve a permission or ownership problem |
 | Continuous improvement | Regression budgets for frontend calls, response bytes, quiet backend probes, duplicate watchers and report delivery; no additional project logs/plans |
 
-- Events are hints, not completion evidence; receipt/generation/ownership checks remain authoritative.
+- Events are hints, not completion evidence; receipt/generation/ownership checks remain authoritative. Socket disconnects trigger a fresh state reconciliation because Herdr 0.9 exposes no public resume sequence.
 - Telemetry/lock/temp-file writes do not trigger reconciliation; event bursts coalesced; unavailable filesystem notifications fall back to timed checks.
 - Pattern references: [GitHub: events over polling](https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api), [Temporal: execute until waiting, then resume](https://github.com/temporalio/documentation/blob/main/docs/encyclopedia/architecture/how-temporal-works.mdx). Principles only; no new service/dependency.
 
@@ -279,6 +280,8 @@ Other commands: `herdr-axi <command> --help`. There is no standalone `start` com
 | --- | --- |
 | `herdr-axi` / `fleet` | Owned run status; global discovery without a selected run |
 | `agents [--state STATE] [--kind KIND]` | Pane IDs, names, kinds and states |
+| `machines` | Read-only saved SSH profile inventory; machine selection does not retarget CLI calls |
+| `explain <pane> [--verbose]` | Herdr 0.9 detection decision; optional bounded rule evidence |
 | `run inbox` | Results and attention; includes needed status, summaries ≤600 characters/worker, plus the selected review's saved result (≤3500 characters) |
 | `read <pane>` | Compact visible text; 60 lines / 8000 Unicode characters |
 | `read <pane> --raw` | Preserve layout for diagrams, tables and approval menus |

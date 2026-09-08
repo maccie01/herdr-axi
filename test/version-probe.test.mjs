@@ -36,10 +36,16 @@ if (process.argv[2] === "status" || process.argv[2] === "agent") {
         running: serverRunning,
         version: serverRunning ? process.env.AXI_FAKE_SERVER_VERSION : null,
         protocol: serverRunning ? 22 : null,
-        capabilities: serverRunning ? { endpoint_protocol_generation: serverGeneration } : null,
+        capabilities: serverRunning ? {
+          endpoint_protocol_generation: serverGeneration,
+          live_handoff: true,
+          surface_interest: true,
+          health_check: true,
+        } : null,
         compatible: serverRunning ? protocolCompatible : null,
         endpoint_compatible: serverRunning ? endpointCompatible : null,
         server_binary_stale: process.env.AXI_FAKE_SERVER_STALE === "true",
+        socket: process.env.AXI_FAKE_SOCKET ?? "/tmp/herdr-test.sock",
       },
       update: {
         restart_needed: !endpointCompatible,
@@ -85,6 +91,7 @@ const backend = (overrides = {}) => ({
   AXI_FAKE_ENDPOINT_COMPATIBLE: undefined,
   AXI_FAKE_SERVER_STALE: "false",
   AXI_FAKE_STATUS: "ok",
+  AXI_FAKE_SOCKET: "/tmp/herdr-test.sock",
   ...overrides,
 });
 
@@ -99,7 +106,8 @@ test("probe reads the real Herdr 0.9 status shape", () => {
     major: 0, minor: 10, patch: 2,
     protocol: 22, serverProtocol: 22, protocolCompatible: true,
     protocolGeneration: 1, serverProtocolGeneration: 1, endpointCompatible: true,
-    restartNeeded: false, serverBinaryStale: true,
+    restartNeeded: false, serverBinaryStale: true, socket: "/tmp/herdr-test.sock",
+    endpointCapabilities: { liveHandoff: true, surfaceInterest: true, healthCheck: true },
   });
 });
 
@@ -150,6 +158,8 @@ test("init records client/server compatibility evidence in run.json", () => {
       clientVersion: "0.9.4", serverVersion: "0.9.3", protocol: 22, serverProtocol: 22,
       protocolCompatible: true, endpointProtocolGeneration: 1, serverEndpointProtocolGeneration: 1,
       endpointCompatible: true, restartNeeded: false, serverBinaryStale: true,
+      socket: "/tmp/herdr-test.sock",
+      endpointCapabilities: { liveHandoff: true, surfaceInterest: true, healthCheck: true },
     });
     assert.match(output, /prompt behavior is server-owned/);
   } finally { cleanup(); }

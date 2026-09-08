@@ -12,7 +12,7 @@ const cli = fileURLToPath(new URL("../bin/herdr-axi.mjs", import.meta.url));
 const pane = "w1:pTEST";
 
 // This file doubles as an isolated HERDR_BIN. No call can reach real panes.
-if (process.argv[2] === "agent") {
+if (["agent", "machine"].includes(process.argv[2])) {
   const args = process.argv.slice(2);
   appendFileSync(process.env.AXI_TEST_LOG, JSON.stringify(args) + "\n");
   const scenario = process.env.AXI_TEST_SCENARIO;
@@ -22,7 +22,13 @@ if (process.argv[2] === "agent") {
     process[stream].write(JSON.stringify({ error: { code, message } }));
     process.exit(1);
   };
-  if (args[1] === "list") {
+  if (args[0] === "machine") {
+    assert.deepEqual(args, ["machine", "list", "--json"]);
+    console.log(JSON.stringify([
+      { id: "studio", label: "Studio", target: "ops@example", session: "main", enabled: true, selected: true },
+      { id: "lab", label: "Lab", target: "lab@example", session: "agents", enabled: false, selected: false },
+    ]));
+  } else if (args[1] === "list") {
     if (scenario === "ipc-denied") fail("io_error", "Operation not permitted (os error 1) while connecting to socket");
     if (scenario === "empty-json") process.exit(0);
     if (scenario === "invalid-json") { console.log("not JSON"); process.exit(0); }
@@ -31,6 +37,17 @@ if (process.argv[2] === "agent") {
     else if (scenario === "mixed") emit({ agents: ["done", "unknown", "idle", "working", "blocked"].map((state, i) => ({ ...agent, pane_id: `w1:p${i}`, agent_status: state })) });
     else if (scenario === "many") emit({ agents: Array.from({ length: 13 }, (_, i) => ({ ...agent, pane_id: `w1:p${i}` })) });
     else emit({ agents: [agent] });
+  } else if (args[1] === "explain") {
+    assert.deepEqual(args, ["agent", "explain", pane, "--json"]);
+    console.log(JSON.stringify({
+      agent: "codex", state: "blocked", manifest_source: "bundled", manifest_version: "4",
+      cached_remote_version: "5", local_override_shadowing_remote: false, remote_update_status: "current",
+      matched_rule: { id: "approval", state: "blocked", region: "tail", priority: 10 },
+      visible_idle: false, visible_blocker: true, visible_working: false, screen_detection_skipped: true,
+      screen_detection_skip_reason: "full_lifecycle_hook_authority", skip_state_update: true,
+      evaluated_rules: [{ id: "approval", state: "blocked", region: "tail", priority: 10, matched: true,
+        evidence: { contains: ["Approve?"], regex: [], line_regex: [], region_bytes: 400, region_preview: "Approve?" } }],
+    }));
   } else if (args[1] === "read") {
     if (scenario === "read-error") fail("pane_not_found", "pane disappeared");
     if (scenario === "read-active") fail("read_failed", "alternate-screen history can only be captured by scrolling while idle");
@@ -87,6 +104,30 @@ if (process.argv[2] === "agent") {
     assert.deepEqual(r.calls, [["agent", "list"], ["agent", "prompt", pane, "hello", "--wait", "--timeout", "1000"]]);
     assert.match(r.output, /state: done/);
     assert.match(r.output, /herdr-axi read w1:pTEST/);
+  });
+
+  test("machines projects Herdr profiles without implying global worker identity", () => {
+    const r = run(["machines"]);
+    assert.equal(r.status, 0, r.output);
+    assert.deepEqual(r.calls, [["machine", "list", "--json"]]);
+    assert.match(r.output, /Studio/);
+    assert.match(r.output, /server-scoped/);
+    assert.match(r.output, /studio,Studio,ops@example,main,true,true/);
+  });
+
+  test("explain returns compact detection evidence and gates detailed rules", () => {
+    const compact = run(["explain", pane]);
+    assert.equal(compact.status, 0, compact.output);
+    assert.deepEqual(compact.calls, [["agent", "list"], ["agent", "explain", pane, "--json"]]);
+    assert.match(compact.output, /matchedRule/);
+    assert.match(compact.output, /evaluatedRules: 1/);
+    assert.match(compact.output, /full_lifecycle_hook_authority/);
+    assert.match(compact.output, /skipStateUpdate: true/);
+    assert.doesNotMatch(compact.output, /regionPreview/);
+    const verbose = run(["explain", pane, "--verbose"]);
+    assert.equal(verbose.status, 0, verbose.output);
+    assert.match(verbose.output, /regionPreview/);
+    assert.match(verbose.output, /Approve/);
   });
 
   test("IPC denial diagnoses permissions without raw backend discovery or retries", () => {

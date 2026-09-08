@@ -128,6 +128,12 @@ export function herdrVersionProbe() {
     endpointCompatible: status.server.endpoint_compatible ?? null,
     restartNeeded: status.update?.restart_needed ?? status.server.restart_needed ?? null,
     serverBinaryStale: status.update?.server_binary_stale ?? status.server.server_binary_stale ?? null,
+    socket: typeof status.server.socket === "string" && status.server.socket ? status.server.socket : null,
+    endpointCapabilities: {
+      liveHandoff: status.server.capabilities?.live_handoff === true,
+      surfaceInterest: status.server.capabilities?.surface_interest === true,
+      healthCheck: status.server.capabilities?.health_check === true,
+    },
   };
 }
 
