@@ -336,16 +336,19 @@ case "$group:$action" in
     printf '%s\n' closed > "$case_dir/closed"
     ;;
   pane:run)
-    printf '%s\n' "$*" > "$case_dir/monitor-command"
+    monitor_command="$*"
+    printf '%s\n' "$monitor_command" > "$case_dir/monitor-command"
     [[ ! -e "$case_dir/monitor-no-start" ]] || exit 0
     ready_generation=""
     monitor_receipt=""
-    for monitor_arg in "$@"; do
-      case "$monitor_arg" in
-        HERDR_MONITOR_READY=*) ready_generation="${monitor_arg#*=}" ;;
-        *.event) monitor_receipt="$monitor_arg" ;;
-      esac
-    done
+    # `pane run` receives the shell-escaped monitor command as one argument.
+    # Inspect its stable env/receipt tokens without evaluating the command.
+    if [[ "$monitor_command" =~ (^|[[:space:]])HERDR_MONITOR_READY=([^[:space:]]+) ]]; then
+      ready_generation="${BASH_REMATCH[2]}"
+    fi
+    if [[ "$monitor_command" =~ ([^[:space:]]+\.event)([[:space:]]|$) ]]; then
+      monitor_receipt="${BASH_REMATCH[1]}"
+    fi
     [[ -n "$ready_generation" && -n "$monitor_receipt" ]] || exit 0
     mkdir -p "$(dirname -- "$monitor_receipt")"
     printf '%s\t%s\n' "$FAKE_MONITOR_PID" "$(/bin/ps -p "$FAKE_MONITOR_PID" -o lstart= | awk '{$1=$1; print}')" > "${monitor_receipt}.monitor-owner"
@@ -1450,21 +1453,7 @@ test_prompt_delivery_for_all_agent_kinds() (
       "$kind successful monitor"
   done
 
-  setup_case prompt-slow-start
-  printf '%s\n' slow-start > "$FAKE_HERDR_CASE/worker-prompt-mode"
-  worker_prompt="$FAKE_HERDR_CASE/worker.txt"
-  printf '%s\n' "slow start" > "$worker_prompt"
-  bash "$worker_script" \
-    --name worker \
-    --kind claude \
-    --cwd "$FAKE_HERDR_CASE" \
-    --prompt-file "$worker_prompt" \
-    --workspace ws \
-    --orchestrator-agent orch >/dev/null
-  assert_eq 0 "$(call_count 'agent send-keys worker enter')" \
-    "slow start received no blind Enter"
-
-  for failure_mode in stalled-visible stalled-hidden blocked; do
+  for failure_mode in slow-start stalled-visible stalled-hidden blocked; do
     setup_case "prompt-failure-$failure_mode"
     printf '%s\n' "$failure_mode" > "$FAKE_HERDR_CASE/worker-prompt-mode"
     worker_prompt="$FAKE_HERDR_CASE/worker.txt"
@@ -1483,6 +1472,10 @@ test_prompt_delivery_for_all_agent_kinds() (
     case "$failure_mode" in blocked) expected_stage=rejected ;; *) expected_stage=stalled ;; esac
     assert_eq "$expected_stage" "$(jq -r '.stage' "$HERDR_RECEIPT_ROOT/ws/worker.json")" \
       "$failure_mode durable delivery stage"
+    if [[ "$failure_mode" == slow-start ]]; then
+      assert_file_present "$FAKE_HERDR_CASE/start-on-read" \
+        "stalled delivery is not inferred from later screen state"
+    fi
     assert_file_present "$FAKE_HERDR_CASE/tab-alive" \
       "$failure_mode uncertain prompt preserves work"
     assert_eq 0 "$(call_count 'tab close tab-1')" \
@@ -2777,6 +2770,7 @@ test_monitor_ready_marker_handshake() (
     "worker waits for a delayed marker within the timeout"
 
   setup_case marker-stale
+  mkdir -p "$(dirname -- "$HERDR_MONITOR_RECEIPT")"
   printf '%s\n' stale-generation > "${HERDR_MONITOR_RECEIPT}.monitor-ready"
   : > "$FAKE_HERDR_CASE/monitor-no-start"
   worker_prompt="$FAKE_HERDR_CASE/worker.txt"

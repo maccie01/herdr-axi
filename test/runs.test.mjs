@@ -115,18 +115,20 @@ if (process.argv.length > 2) {
   } else if (action === "get") {
     const a = [...currentOwner(), ...all(), ...monitors()].find((a) => a.pane_id === args[0]) ?? missing("pane");
     emit({ pane: { pane_id: args[0], tab_id: a.tab_id, workspace_id: a.workspace_id } });
-  } else if (action === "wait-output" && fs.existsSync(path.join(dir, "monitor-not-ready"))) {
-    console.error(JSON.stringify({ error: { code: "timeout", message: "monitor never started" } })); process.exit(1);
-  } else if (action === "wait-output") {
-    const receipts = path.join(process.env.HERDR_AXI_RUN, "receipts", "wTEST");
-    const registry = fs.readdirSync(receipts).filter((n) => n.endsWith(".json")).map((n) => JSON.parse(fs.readFileSync(path.join(receipts, n)))).find((w) => w.monitor_pane === args[0]);
-    assert(registry, "monitor readiness requires registered topology");
-    const pid = process.env.AXI_TEST_MONITOR_PID;
-    const start = spawnSync("ps", ["-p", pid, "-o", "lstart="], { encoding: "utf8" }).stdout.trim().replace(/\s+/g, " ");
-    assert(start, "monitor fixture requires a verifiable persistent test process");
-    fs.writeFileSync(`${registry.receipt_file}.monitor-owner`, `${pid}\t${start}\n`);
+  } else if (action === "run") {
+    if (!fs.existsSync(path.join(dir, "monitor-not-ready"))) {
+      const command = args.slice(1).join(" ");
+      const generation = command.match(/(?:^|\s)HERDR_MONITOR_READY=([^\s]+)/)?.[1];
+      const receipt = command.match(/([^\s]+\.event)(?:\s|$)/)?.[1];
+      assert(generation && receipt, "monitor command must carry its generation and receipt");
+      const pid = process.env.AXI_TEST_MONITOR_PID;
+      const start = spawnSync("ps", ["-p", pid, "-o", "lstart="], { encoding: "utf8" }).stdout.trim().replace(/\s+/g, " ");
+      assert(start, "monitor fixture requires a verifiable persistent test process");
+      fs.writeFileSync(`${receipt}.monitor-owner`, `${pid}\t${start}\n`);
+      fs.writeFileSync(`${receipt}.monitor-ready`, `${generation}\n`);
+    }
     emit({ ok: true });
-  } else if (action === "run") emit({ ok: true });
+  }
   else throw Error(`unexpected pane ${action}`);
 } else {
   function fixture() {
