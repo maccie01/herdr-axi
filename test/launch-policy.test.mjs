@@ -5,7 +5,8 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { validateLaunch, checkLaunchScreen, checkCursorLaunchScreen } from "../src/launch-policy.mjs";
+import { validateLaunch, checkLaunchScreen } from "../src/launch-policy.mjs";
+import { installedIntegrationKinds, parseIntegrationStatus } from "../src/integrations.mjs";
 import { selectWorker, validateConfig } from "../src/project.mjs";
 
 test("Cursor uses explicit native model IDs and Smart Auto without inheriting another provider's effort", () => {
@@ -20,10 +21,16 @@ test("Cursor uses explicit native model IDs and Smart Auto without inheriting an
   assert.throws(() => validateConfig({ roles: { cursor: { kind: "cursor", model: "composer-2.5", access: "read", mode: "manual" } } }), /Invalid/);
 });
 
-test("Cursor startup rejects the live trust dialog and pre-session false idle", () => {
-  assert.throws(() => checkCursorLaunchScreen("│ ⚠ Workspace Trust Required │\n│ ▶ [a] Trust this workspace │", "session"), { code: "CURSOR_START_BLOCKED" });
-  assert.throws(() => checkCursorLaunchScreen("cursor-agent --model composer-2.5", ""), { code: "CURSOR_START_UNVERIFIED" });
-  assert.deepEqual(checkCursorLaunchScreen("Cursor Agent\nComposer 2.5\n> ", "session"), { mode: "auto-review", verified: false });
+test("Herdr integration status is the worker availability authority", () => {
+  const records = parseIntegrationStatus("noise\r\nclaude: current (v9) (/a)\r\ncursor: not installed (/b)\r\nopencode: outdated (v11) (/c)\r\nantigravity-cli: installed (/d)\r\nfuture-agent: current (v2) (/e)\r\nopencode: current (v12) (/f)");
+  assert.deepEqual(installedIntegrationKinds(records), ["claude", "opencode", "agy", "future-agent"]);
+  assert.deepEqual(records.find((record) => record.kind === "opencode"), { kind: "opencode", name: "opencode", status: "current", installed: true, version: "12" });
+  assert.equal(validateLaunch({ kind: "opencode" }).mode, "native");
+  for (const options of [{ kind: "opencode", model: "x" }, { kind: "opencode", effort: "high" }]) assert.throws(() => validateLaunch(options), /native configuration/);
+  const config = validateConfig({ roles: { implementer: { kind: "opencode", access: "write" } } });
+  assert.deepEqual(selectWorker(config, { role: "implementer" }, ["opencode"]), { kind: "opencode", access: "write" });
+  assert.throws(() => selectWorker(config, { role: "implementer", model: "ignored" }, ["opencode"]), /omit --model/);
+  assert.throws(() => selectWorker(config, { role: "implementer" }, ["codex"]), { code: "INTEGRATION_NOT_INSTALLED" });
 });
 
 test("worker choices preserve access and child limits; incompatible unattended models fail before launch", () => {
@@ -55,6 +62,8 @@ test("launch preflight executes via symlink and rejects unknown/native mode over
     const run = (args, input = "") => spawnSync(process.execPath, [link, ...args], { encoding: "utf8", input });
     assert.equal(JSON.parse(run(["--kind", "claude", "--model", "opus", "--effort", "high"]).stdout).mode, "auto");
     assert.equal(JSON.parse(run(["--check-screen"], "⏵⏵ auto mode on").stdout).verified, true);
+    assert.equal(JSON.parse(run(["--check-integration", "opencode"], "opencode: current (v11) (/fixture)").stdout).kind, "opencode");
+    assert.equal(run(["--check-integration", "cursor"], "cursor: not installed (/fixture)").status, 1);
     for (const args of [["--kind", "claude", "--model", "haiku"], ["--kind", "codex", "--model", "gpt-5.6-sol", "--permission-mode", "manual"], ["--check-screen"]]) assert.equal(run(args).status, 1);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

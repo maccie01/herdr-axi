@@ -27,10 +27,11 @@ export function switchHelp(run, pane, kind) {
   if (!run) return ["herdr-axi run switch --help"];
   const seen = new Set([kind]);
   const alternatives = Object.values(run.config?.roles ?? {}).filter((r) => {
+    if (run.integrations?.length && !run.integrations.includes(r.kind)) return false;
     if (seen.has(r.kind)) return false;
     seen.add(r.kind); return true;
   }).slice(0, 2);
-  return [...alternatives.map((r) => `herdr-axi run switch ${pane} --kind ${r.kind} --model ${r.model} --effort ${r.effort}`), "herdr-axi run switch --help"];
+  return [...alternatives.map((r) => `herdr-axi run switch ${pane} --kind ${r.kind}${r.model ? ` --model ${r.model} --effort ${r.effort}` : ""}`), "herdr-axi run switch --help"];
 }
 
 // The engine uses exactly the same bounded detector; no duplicated shell regex.

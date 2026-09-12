@@ -21,12 +21,19 @@ const pane = "w1:pPROBE";
 // processes in 39 s, machine dead. Unknown verb must exit non-zero, loudly.
 if (process.argv.length > 2) {
   const [action, sub, ...args] = process.argv.slice(2);
-  if (!["status", "agent"].includes(action)) {
+  if (!["status", "agent", "integration"].includes(action)) {
     console.error(JSON.stringify({ error: { code: "unsupported", message: `fake herdr (${process.argv[1].split("/").pop()}): unhandled command ${process.argv.slice(2).join(" ")}` } }));
     process.exit(2);
   }
 
-  if (action === "status") {
+  if (action === "integration") {
+    assert.equal(sub, "status");
+    if (process.env.AXI_FAKE_NO_INTEGRATIONS === "true") console.log("codex: not installed (/fixture)");
+    else {
+      const kind = process.env.AXI_FAKE_INTEGRATION_KIND ?? "codex";
+      console.log(`${kind}: current (v8) (/fixture)`);
+    }
+  } else if (action === "status") {
     assert.equal(sub, "--json");
     if (process.env.AXI_FAKE_STATUS === "exit-1") process.exit(1);
     const clientGeneration = Number(process.env.AXI_FAKE_CLIENT_GEN ?? "1");
@@ -172,6 +179,8 @@ test("init records client/server compatibility evidence in run.json", () => {
       socket: "/tmp/herdr-test.sock",
       endpointCapabilities: { liveHandoff: true, surfaceInterest: true, healthCheck: true },
     });
+    assert.deepEqual(run.integrations, ["codex"]);
+    assert.deepEqual(run.integrationStatus, [{ kind: "codex", name: "codex", status: "current", installed: true, version: "8" }]);
     assert.match(output, /prompt behavior is server-owned/);
   } finally { cleanup(); }
 });
@@ -205,5 +214,23 @@ test("init refuses an old server before creating run state", () => {
     assert.equal(r.status, 1, output);
     assert.match(output, /HERDR_VERSION_UNSUPPORTED/);
     assert.equal(fs.existsSync(path.join(state, "run.json")), false);
+  } finally { cleanup(); }
+});
+
+test("init refuses an empty Herdr integration inventory before creating run state", () => {
+  const { r, state, output, cleanup } = initRun({ AXI_FAKE_NO_INTEGRATIONS: "true" });
+  try {
+    assert.equal(r.status, 1, output);
+    assert.match(output, /INTEGRATION_NOT_INSTALLED/);
+    assert.equal(fs.existsSync(path.join(state, "run.json")), false);
+  } finally { cleanup(); }
+});
+
+test("cursor-only init does not print a queue command with an invented model", () => {
+  const { r, output, cleanup } = initRun({ AXI_FAKE_INTEGRATION_KIND: "cursor" });
+  try {
+    assert.equal(r.status, 0, output);
+    assert.match(output, /herdr-axi guide cursor/);
+    assert.doesNotMatch(output, /run queue TASK --kind cursor/);
   } finally { cleanup(); }
 });

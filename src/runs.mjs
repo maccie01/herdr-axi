@@ -4,10 +4,11 @@ import { randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
-import { runHerdr, listAgents, requireHerdrEnv, projectAgent, herdrVersionProbe } from "./herdr.mjs";
+import { runHerdr, listAgents, requireHerdrEnv, projectAgent, herdrVersionProbe, integrationInventory, integrationKinds } from "./herdr.mjs";
 import { PHASES, runError, runDir, loadRun, changeRun, pending, limit, receipt, registeredWorker, ownedWorkers, takeRunWarnings, processStart, controlActive, taskFor } from "./run-state.mjs";
-import { projectConfig, validateConfig, selectWorker, worktree, nativeSlots, workerRoleSummary, writerLease, leasePath, leaseStatus, hash, DEFAULT_CONFIG } from "./project.mjs";
-import { KINDS, launchMode, validateLaunch } from "./launch-policy.mjs";
+import { projectConfig, selectWorker, worktree, nativeSlots, workerRoleSummary, writerLease, leasePath, leaseStatus, hash, DEFAULT_CONFIG } from "./project.mjs";
+import { launchMode, validateLaunch } from "./launch-policy.mjs";
+import { isIntegrationKind } from "./integrations.mjs";
 import { runWake } from "./run-wake.mjs";
 import { runSubscriptions } from "./herdr-events.mjs";
 import { projectRuns, projectHistory, history, finishRun, collectArchives } from "./archive.mjs";
@@ -228,7 +229,7 @@ Current task, constraints and the final Completion proof command form this assig
 ${task.access === "read" ? "Read-only project/worktree: no source, documentation, Git or test-output writes; a writer may be active. Report snapshot/commit; recheck after writer acceptance for final verification." : `Write scope: ${task.area}`}
 Required external-receipt exception: after all requested work/checks finish, write ONLY the completion receipt file and its atomic .tmp named by the final Completion proof command below. Both are outside the project/worktree. This coordination output is required even for access:read; no other project or state writes are authorized by this exception. Never write proof for unfinished work.
 No commits, pushes, follow-up assignments or Herdr workers. ${delegation}
-Worker runtime: ${task.kind}/${task.model || "default"}/${task.effort || "high"}; required mode ${launchMode(task.kind)}. Do not change model or enter manual/plan mode. Application/model-call budgets are separate from this coding-worker contract; do not reinterpret either scope. Report unsupported runtime or policy as a blocker.
+Worker runtime: ${task.kind}/${task.model || "native"}/${task.effort || "native"}; required mode ${launchMode(task.kind)}. Do not change model or enter manual/plan mode. Application/model-call budgets are separate from this coding-worker contract; do not reinterpret either scope. Report unsupported runtime or policy as a blocker.
 Do not call raw herdr agent start/prompt or split worker panes; the coordinator owns startup through herdr-axi run queue/next.
 No repository state files, scratch plans, progress logs or duplicate reports. Documentation only if explicitly requested as a deliverable. Private runtime records: ${runDir()}.
 Output: concise TOON; fragments, no narrative. Fields: task, state, files, checks, decisions (why), blockers. Exact commands/results; no invented passes. Coordinator acceptance required.
@@ -487,6 +488,9 @@ async function executeRunCommand(action, o) {
   if (action === "init") {
     if (process.env.HERDR_AXI_WORKER === "1") throw runError("Managed workers cannot become nested orchestrators", "NESTED_RUN");
     const probe = herdrVersionProbe();
+    const integrationStatus = integrationInventory();
+    const integrations = integrationKinds(integrationStatus);
+    if (!integrations.length) throw runError("No installed Herdr worker integration", "INTEGRATION_NOT_INSTALLED", ["herdr integration status", "herdr integration install codex"]);
     const caller = callerPane();
     const ownerPane = o.owner ?? caller;
     if (!ownerPane) throw runError("init needs a resolvable caller pane");
@@ -499,29 +503,33 @@ async function executeRunCommand(action, o) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     dir = fs.realpathSync(dir);
     if (dir === project.project || dir.startsWith(project.project + path.sep)) throw runError("Run state resolves inside the project/worktree", "STATE_IN_PROJECT");
-    const run = { schema: 1, id: randomUUID().slice(0, 8), herdr: { clientVersion: probe.clientVersion, serverVersion: probe.serverVersion, protocol: probe.protocol, serverProtocol: probe.serverProtocol, protocolCompatible: probe.protocolCompatible, endpointProtocolGeneration: probe.protocolGeneration, serverEndpointProtocolGeneration: probe.serverProtocolGeneration, endpointCompatible: probe.endpointCompatible, restartNeeded: probe.restartNeeded, serverBinaryStale: probe.serverBinaryStale, socket: probe.socket, endpointCapabilities: probe.endpointCapabilities }, ...project, storage: o.dir ? "explicit" : "managed", createdAt: new Date().toISOString(), workspace: a.workspace_id, owner: { pane: ownerPane, tab: a.tab_id, terminal: a.terminal_id, session: a.agent_session?.value }, phase: "explore", limits: { ...project.config.phases }, tasks: [], workers: [] };
+    const run = { schema: 1, id: randomUUID().slice(0, 8), herdr: { clientVersion: probe.clientVersion, serverVersion: probe.serverVersion, protocol: probe.protocol, serverProtocol: probe.serverProtocol, protocolCompatible: probe.protocolCompatible, endpointProtocolGeneration: probe.protocolGeneration, serverEndpointProtocolGeneration: probe.serverProtocolGeneration, endpointCompatible: probe.endpointCompatible, restartNeeded: probe.restartNeeded, serverBinaryStale: probe.serverBinaryStale, socket: probe.socket, endpointCapabilities: probe.endpointCapabilities }, integrations, integrationStatus, ...project, storage: o.dir ? "explicit" : "managed", createdAt: new Date().toISOString(), workspace: a.workspace_id, owner: { pane: ownerPane, tab: a.tab_id, terminal: a.terminal_id, session: a.agent_session?.value }, phase: "explore", limits: { ...project.config.phases }, tasks: [], workers: [] };
     try { fs.writeFileSync(path.join(dir, "run.json"), JSON.stringify(run) + "\n", { flag: "wx", mode: 0o600 }); }
     catch (e) { if (e.code === "EEXIST") throw runError("Run already exists; select it, do not overwrite it"); throw e; }
-    const roles = workerRoleSummary(run.config);
+    const roles = workerRoleSummary(run.config, integrations);
+    const defaultRole = roles.roles.find((role) => role.access === "write")?.role;
+    const directKind = integrations.find((kind) => kind !== "cursor");
+    const workerChoice = defaultRole ? `--role ${defaultRole}` : directKind ? `--kind ${directKind}` : null;
     const endpointMismatch = probe.endpointCompatible === false || probe.restartNeeded === true;
     const staleServer = probe.serverBinaryStale === true;
     const warnings = [
       ...(endpointMismatch ? [`Herdr endpoint generations are client=${probe.protocolGeneration ?? "unknown"}, server=${probe.serverProtocolGeneration ?? "unknown"}. CLI automation can proceed, but saved SSH/multi-machine UI compatibility needs attention; inspect: herdr status --json`] : []),
       ...(staleServer ? [`Herdr client ${probe.clientVersion} and server ${probe.serverVersion} differ. Both satisfy herdr-axi, but prompt behavior is server-owned; restart Herdr if you expected the updated server binary.`] : []),
+      ...integrationStatus.filter((entry) => entry.status === "outdated").map((entry) => `Herdr integration ${entry.kind}${entry.version ? ` v${entry.version}` : ""} is outdated; refresh it with: herdr integration install ${entry.name}`),
     ];
-    return { run: dir, owner: ownerPane, workspace: run.workspace, project: project.project, config: project.configFile || "defaults", phase: run.phase, capacity: limit(run), ...roles, cleanup: collectArchives(project.project),
+    return { run: dir, owner: ownerPane, workspace: run.workspace, project: project.project, config: project.configFile || "defaults", integrations, phase: run.phase, capacity: limit(run), ...roles, cleanup: collectArchives(project.project),
       ...(warnings.length ? { warning: warnings.join(" ") } : {}),
-      selection: "Role supplies access/native limits. Explicit model request: add --kind claude --model claude-opus-5 --effort high. No config edit/new run needed. Worker budget != application API budget.",
-      note: "Next tool call: replace TASK/WORKTREE/task text; role selected (read-only: verifier). Export + queue together; repeat export in EVERY tool call (shells may reset). --start schedules within caps; batch: omit --start, next once. No fleet/help/config/layout/run.json preflight.",
-      help: [`export HERDR_AXI_RUN=${quote(dir)}; herdr-axi run queue TASK --role implementer --cwd WORKTREE --area . --prompt 'task; owned files; checks' --start`, ...(roles.moreRoles ? ["herdr-axi run config --full"] : [])] };
+      selection: "Kinds are installed Herdr integrations. Configured roles retain access/native limits; direct native kinds use provider-owned policy and accept no model/effort override.",
+      note: "Next tool call: replace TASK/WORKTREE/task text; use a returned write role or integration. Export + queue together; repeat export in EVERY tool call (shells may reset). --start schedules within caps; batch: omit --start, next once. No fleet/help/config/layout/run.json preflight.",
+      help: [...(workerChoice ? [`export HERDR_AXI_RUN=${quote(dir)}; herdr-axi run queue TASK ${workerChoice} --cwd WORKTREE --area . --prompt 'task; owned files; checks' --start`] : ["herdr-axi guide cursor", "herdr-axi run config"]), ...(roles.moreRoles ? ["herdr-axi run config --full"] : [])] };
   }
   const run = loadRun();
   if (!run) throw runError("Initialize/select a run first", "RUN_REQUIRED");
   if (action === "status") return runStatus();
   if (action === "config") {
     const config = run.config ?? DEFAULT_CONFIG;
-    return { project: run.project, source: run.configFile || "defaults",
-      ...(o.full ? { config } : { ...workerRoleSummary(config), phase: run.phase, capacity: limit(run), nativeSubagentLimit: config.nativeSubagentLimit, sharedReadWorktree: config.sharedReadWorktree }),
+    return { project: run.project, source: run.configFile || "defaults", integrations: run.integrations ?? [], integrationStatus: run.integrationStatus ?? [],
+      ...(o.full ? { config } : { ...workerRoleSummary(config, run.integrations), phase: run.phase, capacity: limit(run), nativeSubagentLimit: config.nativeSubagentLimit, sharedReadWorktree: config.sharedReadWorktree }),
       note: "Init snapshot; read-only/native child limits are instructions, not a sandbox. Owner model is a launch contract, never changed here.",
       help: [o.full ? "herdr-axi run queue --help" : "herdr-axi run config --full"] };
   }
@@ -553,7 +561,7 @@ async function executeRunCommand(action, o) {
       throw runError("Takeover requires --from <current-owner-pane> and --evidence (1..4000 chars): authorization and remaining work", "INVALID_TAKEOVER", ["herdr-axi run takeover --help"]);
     if ((run.ownerHandoffs?.length ?? 0) >= 8) throw runError("Eight owner transfers reached; inspect the run", "TAKEOVER_LIMIT");
     const pane = callerPane(), a = liveAgent(pane);
-    if (!a || a.pane_id !== pane || a.workspace_id !== run.workspace || !a.tab_id || !a.terminal_id || !KINDS.includes(a.agent)) throw runError("Replacement must be a live agent in the same workspace", "INVALID_TAKEOVER");
+    if (!a || a.pane_id !== pane || a.workspace_id !== run.workspace || !a.tab_id || !a.terminal_id || !isIntegrationKind(a.agent)) throw runError("Replacement must be a live agent in the same workspace", "INVALID_TAKEOVER");
     const workers = ownedWorkers(run, { issues: [] });
     const workerTabs = listAgents({ all: true }).filter((row) => run.tasks.some((t) => t.name && t.name === row.backendName)).map((row) => row.tab);
     if (pane === run.owner.pane || a.tab_id === run.owner.tab || workerTabs.includes(a.tab_id) || run.tasks.some((t) => t.pane === pane || (t.name && t.name === a.name)) || workers.some((w) => !w.closed && (w.pane === pane || w.tab === a.tab_id))) throw runError("Replacement must be a separate non-worker pane/tab", "SELF_TARGET");
@@ -638,9 +646,9 @@ async function executeRunCommand(action, o) {
   if (action === "unlock") return unlockRun();
   if (action === "queue") {
     const id = o._[0];
-    const role = selectWorker(run.config ?? DEFAULT_CONFIG, o);
+    const role = selectWorker(run.config ?? DEFAULT_CONFIG, o, integrationKinds());
     const kind = role.kind;
-    if (!idOK(id) || !KINDS.includes(kind) || !o.cwd || !o.area) throw runError("queue needs a short task ID, --role or --kind, --cwd, --area and --prompt TEXT or --prompt-file PATH");
+    if (!idOK(id) || !isIntegrationKind(kind) || !o.cwd || !o.area) throw runError("queue needs a short task ID, --role or --kind, --cwd, --area and --prompt TEXT or --prompt-file PATH");
     const location = taskLocation(o.cwd, o.area);
     const prompt = taskPrompt(o);
     const deps = o.after ? o.after.split(",") : [];
@@ -649,7 +657,7 @@ async function executeRunCommand(action, o) {
       if (deps.some((id) => !r.tasks.some((t) => t.id === id))) throw runError("Dependencies must reference existing tasks");
       r.tasks.push({ id, ...(role || {}), kind, role: o.role, policy: hash(JSON.stringify(role || { kind, access: "write" })), access: role?.access ?? "write", nativeSlots: role ? nativeSlots(role) : 0, ...location, prompt, deps, phase: r.phase, state: "queued" });
     });
-    const queued = { queued: id, cwd: location.cwd, area: location.area, worker: { kind, model: role.model, effort: role.effort, access: role.access, mode: launchMode(kind) } };
+    const queued = { queued: id, cwd: location.cwd, area: location.area, worker: { kind, ...(role.model ? { model: role.model } : {}), ...(role.effort ? { effort: role.effort } : {}), access: role.access, mode: launchMode(kind) } };
     if (!o.start) return { ...queued, help: ["herdr-axi run next"] };
     try { return { ...queued, ...await executeRunCommand("next", { _: [] }) }; }
     catch (e) { throw runError(`Task ${id} is already queued; do not queue again. ${e.message}`, e.code, e.suggestions?.length ? e.suggestions : ["herdr-axi run next"]); }
@@ -793,7 +801,10 @@ async function executeRunCommand(action, o) {
       if ((task.handoffs?.length ?? 0) >= 4) throw runError("Four provider switches reached; re-scope explicitly", "SWITCH_LIMIT");
       if (o.role && (o.kind || o.model || o.effort)) throw runError("Choose --role OR --kind/--model/--effort", "CONFIG_INVALID");
       const config = run.config ?? DEFAULT_CONFIG;
-      const target = o.role ? config.roles[o.role] : validateConfig({ roles: { replacement: { kind: o.kind, model: o.model, effort: o.effort ?? (o.kind === "cursor" ? "model" : "high"), access: task.access } } }).roles.replacement;
+      const available = integrationKinds();
+      const target = o.role
+        ? selectWorker(config, { role: o.role }, available)
+        : selectWorker(config, { kind: o.kind, model: o.model, effort: o.effort, access: task.access }, available);
       if (!target || o.role === "orchestrator" || target.kind === task.kind || target.access !== task.access) throw runError("Choose another provider with the same read/write access", "CONFIG_INVALID");
       if (pending(run).reduce((n, t) => n + (t.nativeSlots ?? 0), 0) - (task.nativeSlots ?? 0) + nativeSlots(target) > config.nativeSubagentLimit) throw runError("Replacement exceeds native subagent budget", "CAPACITY_FULL");
       if (o.summary !== undefined && (!o.summary.trim() || o.summary.length > 4000)) throw runError("--summary must contain 1..4000 characters");
@@ -911,6 +922,7 @@ async function executeRunCommand(action, o) {
     return { recovered: worker.pane, help: ["herdr-axi watch"] };
   }
   if (action === "next") {
+    const available = integrationKinds();
     const trees = new Map();
     const agentTree = (cwd) => {
       if (!trees.has(cwd)) { try { trees.set(cwd, worktree(cwd)); } catch { trees.set(cwd, cwd); } }
@@ -923,7 +935,10 @@ async function executeRunCommand(action, o) {
       const defer = (t, reason, detail = {}) => deferred.push({ task: t.id, reason, ...detail });
       const availableParked = () => r.workers.find((w) => !w.closed && !w.closing && !pending(r).some((t) => t.pane === w.pane) && [...r.tasks].reverse().find((t) => t.pane === w.pane)?.state === "accepted" && ["idle", "done"].includes(safeWorker(r, w, rows, { observe: true })?.state));
       for (const t of r.tasks.filter((t) => t.state === "queued" && t.phase === r.phase)) {
-        try { validateLaunch({ ...t, model: t.model ?? (t.kind === "cursor" ? undefined : t.kind === "claude" ? "opus" : "gpt-5.6-sol"), effort: t.effort ?? (t.kind === "cursor" ? "model" : "high") }); }
+        try {
+          if (!available.includes(t.kind)) throw runError(`Herdr integration is not installed for ${t.kind}`, "INTEGRATION_NOT_INSTALLED");
+          validateLaunch(t);
+        }
         catch (e) { defer(t, e.message, { help: `herdr-axi run cancel ${t.id}` }); continue; }
         if (pending(r).length >= limit(r)) { defer(t, "primary capacity"); continue; }
         const dependency = t.deps.map((id) => r.tasks.find((d) => d.id === id) ?? { id, state: "missing" }).find((d) => d.state !== "accepted");

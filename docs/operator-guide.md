@@ -12,8 +12,8 @@
 - Two-call onboarding: `run init`; returned export + `run queue --start` together. No help/config/fleet preflight.
 - Optional TOON recipes: `guide "start opus"`, `guide "quota switch"`, `guide "wait notification"`; no keywords = full compact workflow. Zero backend/model calls.
 
-Low-context fleet supervision for [herdr](https://herdr.dev): Claude, Codex,
-Copilot and Cursor workers, owned by one orchestrator. Compact TOON output, precomputed
+Low-context fleet supervision for [herdr](https://herdr.dev): workers backed by
+installed Herdr integrations and owned by one orchestrator. Compact TOON output, precomputed
 status, bounded task queues and pane-safe control.
 
 ## Install
@@ -76,12 +76,14 @@ herdr-axi run queue parser --role implementer --cwd /path/to/worktree \
 - Batch: omit `--start`, queue independent tasks, then `run next` once.
 - Explicit user-requested worker: `--role implementer --kind claude --model claude-opus-5 --effort high`; no config edit/re-init.
 - Override retains role access/native-child limits; changed model clears the old model's context-window estimate.
-- A `--kind` other than the role's requires an explicit `--model`; no implicit provider substitution.
+- Claude, Codex, Copilot and Cursor overrides require an explicit `--model`; other installed Herdr integrations use native configuration and reject model/effort flags instead of ignoring them.
 - Application AWS/API budgets and coding-agent subscriptions: separate scopes; no inferred budget transfer or cheaper-model fallback.
 
 `next` reserves available slots and starts eligible workers concurrently; matching
 accepted workers can be reused. Worker tabs: `<task-id> · <kind>`, 75% agent / 25%
 monitor by default. Keep `HERDR_AXI_RUN` in subsequent calls.
+Selectable kinds are refreshed from `herdr integration status` at init, queue,
+switch, next and launch time. Detected agents without a loaded integration remain discovery-only.
 Long assignments: `--prompt-file /external/task.txt` instead of `--prompt`.
 
 **While workers run, continue independent work.** Use `run inbox` for results,
@@ -379,11 +381,13 @@ orchestrator role cannot change an already-running owner's model.
 | Codex | `--approve-for-me`; workspace sandbox + automatic review | Native flag only; no claim of observed runtime mode |
 | Copilot | `--autopilot --allow-all`; existing Git deny rules | Native flag only; no claim of observed runtime mode |
 | Cursor | `--auto-review` (Smart Auto); explicit `cursor-agent models` ID | Native flag only; approval/trust may still block; no `--force`, `--yolo` or automatic trust |
+| Other loaded Herdr integration | Native CLI configuration; no model/effort override | Herdr readiness and lifecycle; herdr-axi stable terminal/session identity, generation proof and bounded visible report |
 
 - Cursor queue/switch: `--kind cursor --model composer-2.5 --effort model`; choose an available ID, not implicit `auto` routing. Effort belongs to Cursor's exact model ID (e.g. a `-high` variant); separate numeric/named effort overrides refused, not ignored.
 - Cursor project role: `{"kind":"cursor","model":"composer-2.5","effort":"model","access":"write"}`. Existing provider defaults unchanged.
-- Cursor supervision: existing lifecycle monitor, no global/plugin hook edits; registered terminal/session identity + current generation proof + native idle/done required. Unknown readiness cannot settle. Reports use bounded visible output; inspect `read --full` or a reviewed `--result-file` when insufficient.
-- Cursor startup guard: native Herdr can report idle at workspace trust; visible trust or missing session identity leaves the owned tab unsubmitted. Inspect, authorize trust only if appropriate, then `run recover`; never bypass with raw prompt/keys.
+- Cursor supervision: Herdr integration readiness plus registered terminal/session identity, current generation proof and native idle/done are required. Unknown readiness cannot settle. Reports use bounded visible output; inspect `read --full` or a reviewed `--result-file` when insufficient.
+- Generic integration supervision also requires a non-null native session identity. If an integration cannot expose one, completion remains awaiting proof/review rather than accepting a possible replacement occupant.
+- Cursor startup guard: Herdr 0.9 classifies a blocked trust dialog as `agent_not_ready` and leaves the owned tab unsubmitted. Inspect, authorize trust only if appropriate, then `run recover`; never bypass with raw prompt/keys.
 - Cursor context usage remains `contextUnknown`; no private transcript parsing or guessed percentages. Shared conservative quota detector applies; unrecognized Cursor-specific billing messages need inspection/cancellation, not automatic switching.
 
 - Model validation before allocation; known incompatible Claude choices (Haiku, older models, `opusplan`) refused; never substitute or bypass permissions.

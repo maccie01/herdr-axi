@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { PHASES, runError, runDir, canonicalDir } from "./run-state.mjs";
 import { validateLaunch, launchMode } from "./launch-policy.mjs";
+import { CORE_INTEGRATIONS, integrationName } from "./integrations.mjs";
 
 export const stateRoot = () => path.resolve(process.env.HERDR_AXI_STATE_HOME || path.join(homedir(), ".local/state/herdr-axi"));
 export const hash = (value) => createHash("sha256").update(value).digest("hex").slice(0, 24);
@@ -46,7 +47,12 @@ export function validateConfig(input = {}) {
     for (const [name, role] of Object.entries(input.roles)) {
       if (!/^[a-z][a-z0-9_-]{0,39}$/.test(name)) throw runError("Invalid role name", "CONFIG_INVALID");
       keys(role, ["kind", "model", "effort", "access", "subagents", "contextWindowTokens"], `roles.${name}`);
+      const previousKind = config.roles[name]?.kind;
       config.roles[name] = { ...config.roles[name], ...role };
+      if (role.kind && role.kind !== previousKind) {
+        if (role.model === undefined) delete config.roles[name].model;
+        if (role.effort === undefined) delete config.roles[name].effort;
+      }
     }
   }
   for (const [name, role] of Object.entries(config.roles)) {
@@ -68,20 +74,27 @@ export function validateConfig(input = {}) {
 }
 
 export const nativeSlots = (role) => (role.subagents ?? []).reduce((n, s) => n + s.max, 0);
-export function selectWorker(config, options) {
+export function selectWorker(config, options, availableKinds) {
   const base = options.role ? config.roles[options.role] : null;
   if (options.role && (!base || options.role === "orchestrator")) throw runError("Choose a worker role from init", "CONFIG_INVALID", ["herdr-axi run config"]);
   const kind = options.kind ?? base?.kind;
-  if (base && kind !== base.kind && !options.model) throw runError("Changing provider requires --model; no implicit substitution", "CONFIG_INVALID", ["herdr-axi run queue --help"]);
+  const core = CORE_INTEGRATIONS[kind];
+  if (availableKinds && !availableKinds.includes(kind)) throw runError(`Herdr integration is not installed for ${kind}`, "INTEGRATION_NOT_INSTALLED", [`herdr integration install ${integrationName(kind)}`, "herdr integration status"]);
+  if (!core && (options.model !== undefined || options.effort !== undefined)) throw runError(`${kind} uses its native configuration; omit --model and --effort`, "LAUNCH_POLICY", ["herdr-axi run queue --help"]);
+  if (base && kind !== base.kind && core && !options.model) throw runError("Changing this provider requires --model; no implicit substitution", "CONFIG_INVALID", ["herdr-axi run queue --help"]);
   if (kind === "cursor" && !options.model && !base?.model) throw runError("Cursor requires --model from cursor-agent models", "LAUNCH_POLICY", ["cursor-agent models", "herdr-axi guide cursor"]);
-  const role = { ...(base ?? { access: "write" }), kind, model: options.model ?? base?.model ?? (kind === "claude" ? "opus" : "gpt-5.6-sol"), effort: options.effort ?? (kind === "cursor" ? (base?.kind === "cursor" ? base.effort ?? "model" : "model") : base?.effort ?? "high") };
+  const role = core
+    ? { ...(base ?? { access: options.access ?? "write" }), kind, model: options.model ?? base?.model ?? (kind === "claude" ? "opus" : "gpt-5.6-sol"), effort: options.effort ?? (kind === "cursor" ? (base?.kind === "cursor" ? base.effort ?? "model" : "model") : base?.effort ?? "high") }
+    : { ...(base ?? { access: options.access ?? "write" }), kind };
+  if (!core) { delete role.model; delete role.effort; }
   if (role.model !== base?.model || role.kind !== base?.kind) delete role.contextWindowTokens;
   try { validateLaunch(role); } catch (e) { throw runError(e.message, e.code, ["herdr-axi run queue --help", "herdr-axi run config"]); }
   return role;
 }
 
-export function workerRoleSummary(config) {
+export function workerRoleSummary(config, availableKinds) {
   const roles = Object.entries(config.roles).filter(([name]) => name !== "orchestrator")
+    .filter(([, role]) => !availableKinds || availableKinds.includes(role.kind))
     .map(([role, { kind, model, effort, access, subagents }]) => ({ role, kind, model, effort, access, native: nativeSlots({ subagents }), mode: launchMode(kind) }));
   return { roles: roles.slice(0, 8), ...(roles.length > 8 ? { moreRoles: roles.length - 8 } : {}) };
 }

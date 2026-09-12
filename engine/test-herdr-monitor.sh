@@ -112,6 +112,15 @@ if [[ -e "$case_dir/check-unlocked-reads" && "$group" == "agent" &&
 fi
 
 case "$group:$action" in
+  integration:status)
+    missing_integration=$(read_value "$case_dir/missing-integration" __empty__)
+    printf '%s\n' \
+      'claude: current (v9) (/fixture)' \
+      'codex: current (v8) (/fixture)' \
+      'copilot: current (v3) (/fixture)' \
+      'cursor: current (v1) (/fixture)' \
+      "opencode: $([[ "$missing_integration" == opencode ]] && printf 'not installed' || printf 'current (v11)') (/fixture)"
+    ;;
   agent:get)
     [[ ! -e "$case_dir/agent-get-fail" ]] || exit 1
     name="${1:-worker}"
@@ -1423,24 +1432,26 @@ test_no_completion_proof_preserves_generation() (
 )
 
 test_prompt_delivery_for_all_agent_kinds() (
-  for kind in copilot claude codex cursor; do
+  for kind in copilot claude codex cursor opencode; do
     setup_case "prompt-$kind"
-    model_args=(--effort high)
-    if [[ "$kind" == cursor ]]; then model_args=(--model composer-2.5 --effort model); fi
+    model_args=()
+    if [[ "$kind" == cursor ]]; then model_args=(--model composer-2.5 --effort model)
+    elif [[ "$kind" != opencode ]]; then model_args=(--effort high)
+    fi
     printf '%s\n' success > "$FAKE_HERDR_CASE/worker-prompt-mode"
     worker_prompt="$FAKE_HERDR_CASE/worker.txt"
     printf '%s\n' "prompt for $kind" > "$worker_prompt"
     worker_output=$(bash "$worker_script" \
       --name worker \
       --kind "$kind" \
-      "${model_args[@]}" \
+      ${model_args[@]+"${model_args[@]}"} \
       --cwd "$FAKE_HERDR_CASE" \
       --prompt-file "$worker_prompt" \
       --workspace ws \
       --orchestrator-agent orch)
     expected_mode=auto
     expected_verified=false
-    case "$kind" in copilot) expected_mode=autopilot ;; codex) expected_mode=approve-for-me ;; claude) expected_verified=true ;; cursor) expected_mode=auto-review ;; esac
+    case "$kind" in copilot) expected_mode=autopilot ;; codex) expected_mode=approve-for-me ;; claude) expected_verified=true ;; cursor) expected_mode=auto-review ;; *) expected_mode=native ;; esac
     assert_eq "$expected_mode" "$(jq -r '.permission_mode' <<< "$worker_output")" "$kind reported launch mode"
     assert_eq "$expected_verified" "$(jq -r '.permission_mode_verified' <<< "$worker_output")" "$kind honest runtime verification"
     assert_eq 0 "$(call_count 'agent send-keys worker enter')" \
@@ -2787,20 +2798,21 @@ test_monitor_ready_marker_handshake() (
     "failed startup does not leave the marker behind"
 )
 
-test_cursor_false_idle_trust_does_not_submit() (
+test_herdr_blocks_cursor_trust_before_submission() (
   setup_case cursor-trust-idle
   printf '%s\n' cursor > "$FAKE_HERDR_CASE/kind"
+  : > "$FAKE_HERDR_CASE/start-blocked"
   printf '%s\n' '│ ⚠ Workspace Trust Required │' '│ ▶ [a] Trust this workspace │' > "$FAKE_HERDR_CASE/startup-screen"
   printf '%s\n' 'Tiny read-only check' > "$FAKE_HERDR_CASE/prompt"
   if output=$(bash "$worker_script" --name worker --kind cursor --model composer-2.5 \
     --cwd "$FAKE_HERDR_CASE" --prompt-file "$FAKE_HERDR_CASE/prompt" --workspace ws --orchestrator-agent orch 2>&1); then
     fail 'Cursor trust dialog treated as ready'
   fi
-  [[ "$output" == *CURSOR_START_BLOCKED* ]] || fail 'Cursor trust error missing'
+  [[ "$output" == *agent_not_ready* ]] || fail 'Herdr startup block missing'
   assert_eq 0 "$(call_count '^agent prompt')" 'Cursor trust never receives task text'
   assert_eq 0 "$(call_count '^agent send-keys')" 'Cursor trust never auto-approved'
   assert_file_present "$FAKE_HERDR_CASE/tab-alive" 'Cursor startup remains inspectable'
-  assert_file_absent "$FAKE_HERDR_CASE/monitor-command" 'Cursor guard runs before monitor allocation'
+  assert_file_absent "$FAKE_HERDR_CASE/monitor-command" 'Herdr block runs before monitor allocation'
 )
 
 test_cursor_completion_requires_registered_identity_and_proof() (
@@ -2835,9 +2847,54 @@ test_cursor_completion_requires_registered_identity_and_proof() (
   done
 )
 
+test_generic_integration_completion_requires_identity_and_proof() (
+  for scenario in complete missing-proof missing-session changed-session changed-terminal changed-generation working; do
+    setup_case "integration-$scenario"
+    printf '%s\n' opencode > "$FAKE_HERDR_CASE/kind"
+    arm_completion_generation
+    write_worker_registry
+    registry="$HERDR_RECEIPT_ROOT/ws/worker.json"
+    jq '.native_identity={terminal:"terminal-1",session:"session-1"}' "$registry" > "$TMPDIR/registry"
+    mv "$TMPDIR/registry" "$registry"
+    printf '%s\n' 'task: native-check' 'checks: passed' > "$FAKE_HERDR_CASE/visible"
+    case "$scenario" in
+      missing-proof) remove_current_completion_proof ;;
+      missing-session) jq '.native_identity.session=null' "$registry" > "$TMPDIR/registry"; mv "$TMPDIR/registry" "$registry" ;;
+      changed-session) printf '%s\n' session-2 > "$FAKE_HERDR_CASE/session" ;;
+      changed-terminal) printf '%s\n' terminal-2 > "$FAKE_HERDR_CASE/terminal" ;;
+      changed-generation) jq '.generation="other"' "$registry" > "$TMPDIR/registry"; mv "$TMPDIR/registry" "$registry" ;;
+      working) printf '%s\n' working > "$FAKE_HERDR_CASE/status" ;;
+    esac
+    HERDR_MONITOR_INBOX=1 run_hook settled '{}'
+    if [[ "$scenario" == complete ]]; then
+      assert_eq settled "$(jq -r '.event' "${HERDR_MONITOR_RECEIPT}.inbox")" "generic integration completion"
+      assert_eq true "$(jq -r '.completion.truncated' "${HERDR_MONITOR_RECEIPT}.inbox")" "generic visible report is bounded"
+      [[ "$(jq -r '.detail' "${HERDR_MONITOR_RECEIPT}.inbox")" == *'checks: passed'* ]] || fail 'generic integration visible report missing'
+    else
+      assert_file_absent "${HERDR_MONITOR_RECEIPT}.inbox" "generic integration $scenario cannot settle"
+    fi
+  done
+)
+
+test_missing_integration_fails_before_worker_allocation() (
+  setup_case missing-integration
+  printf '%s\n' opencode > "$FAKE_HERDR_CASE/missing-integration"
+  printf '%s\n' 'must not start' > "$FAKE_HERDR_CASE/prompt"
+  if bash "$worker_script" --name worker --kind opencode --cwd "$FAKE_HERDR_CASE" \
+    --prompt-file "$FAKE_HERDR_CASE/prompt" --workspace ws --orchestrator-agent orch \
+    > "$TMPDIR/output" 2>&1; then
+    fail 'missing integration started a worker'
+  fi
+  rg -q INTEGRATION_NOT_INSTALLED "$TMPDIR/output" || fail 'missing integration diagnostic absent'
+  assert_eq 0 "$(call_count '^tab create')" 'missing integration allocates no tab'
+  assert_file_absent "$FAKE_HERDR_CASE/monitor-command" 'missing integration allocates no monitor'
+)
+
 tests=(
-  test_cursor_false_idle_trust_does_not_submit
+  test_herdr_blocks_cursor_trust_before_submission
   test_cursor_completion_requires_registered_identity_and_proof
+  test_generic_integration_completion_requires_identity_and_proof
+  test_missing_integration_fails_before_worker_allocation
   test_monitor_identity_fences_new_assignments
   test_monitor_ready_requires_published_identity
   test_monitor_ready_marker_handshake

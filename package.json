@@ -8,7 +8,7 @@
   "bugs": { "url": "https://github.com/maccie01/herdr-axi/issues" },
   "type": "module",
   "bin": { "herdr-axi": "bin/herdr-axi.mjs" },
-  "files": ["bin", "src", "engine", "!engine/test-herdr-monitor.sh"],
+  "files": ["bin", "src", "engine", "docs", "!engine/test-herdr-monitor.sh"],
   "engines": { "node": ">=20", "herdr": ">=0.9.0" },
   "scripts": { "test": "node --test test/*.test.mjs" },
   "dependencies": { "axi-sdk-js": "^0.1.11" },

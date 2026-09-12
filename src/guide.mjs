@@ -39,7 +39,7 @@ export function guide(args = []) {
     worktree: { placeholders: full.placeholders, rule: full.rules[2], recovery: recovery("worktree busy") },
     review: { placeholders: full.placeholders, recovery: recovery("review ready"), report: "herdr-axi run inbox once if not already delivered by watch; inspect checks before acceptance", next: "Changes needed: revise BEFORE accept; after acceptance queue a new task with same role/cwd to reuse. No repeated report fetch" },
   };
-  return { topic, ...recipes[topic], ...(words.includes("cursor") ? { cursor: "CURSOR_MODEL_ID: exact cursor-agent models ID, including desired effort; --effort model. Smart Auto (--auto-review), no force/trust bypass. Context unknown; bounded visible reports + registered session + generation proof; no native transcript hooks." } : {}) };
+  return { topic, ...recipes[topic], ...(words.includes("cursor") ? { cursor: "Install: herdr integration install cursor. CURSOR_MODEL_ID: exact cursor-agent models ID, including desired effort; --effort model. Smart Auto (--auto-review), no force/trust bypass. Herdr owns readiness. Context unknown; bounded visible reports + registered identity + generation proof." } : {}) };
 }
 
 function fullGuide() {
@@ -54,6 +54,7 @@ function fullGuide() {
       choice: "--role implementer --kind claude --model claude-opus-5 --effort high",
       policy: "Queue override; role access/native-child policy preserved; no config edit or new run",
       mode: "Managed autonomous mode; no manual-mode or arbitrary native-flag override; trust prompts still possible",
+      integrations: "Kinds come from herdr integration status. Non-core kinds use native policy and reject --model/--effort flags",
       budget: "App/API model budget separate from coding-worker subscriptions; respect each explicit scope",
       config: "Nearest .herdr-axi.json through worktree root; snapshot at init; selected path returned",
     },

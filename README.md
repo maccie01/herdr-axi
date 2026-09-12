@@ -1,13 +1,13 @@
 # herdr-axi
 
-- Agent-facing CLI for Herdr terminal workspaces; one orchestrator; Claude, Codex, Copilot and Cursor workers.
+- Agent-facing CLI for Herdr terminal workspaces; one orchestrator; workers from installed Herdr integrations.
 - Compact TOON; bounded concurrency; pane-safe control; recoverable handoffs.
 - [Install](#setup) · [Delegate](#for-agents) · [Features](#features) · [Operator guide](docs/operator-guide.md)
 
 ![Conceptual Herdr workspace with orchestrator, implementer and verifier tabs; the selected implementer has a large agent pane above a smaller lifecycle monitor.](assets/readme-figures/08-terminal-workspace.png)
 
 - **Orchestrator tab:** delegate, review, accept; continue independent work.
-- **Worker tabs:** `<task-id> · <kind>`; default 75% agent / 25% monitor.
+- **Worker tabs:** `<task-id> · <kind>`; default 75% agent / 25% monitor. Selectable kinds come from `herdr integration status`.
 - **Monitor `task: review`:** result ready for review, not yet accepted.
 - Conceptual illustration; no live project data or terminal screenshot.
 
@@ -15,7 +15,7 @@
 
 | Who | Once |
 | --- | --- |
-| Human | Install [Herdr](https://herdr.dev) >= 0.9.0; authenticate the worker CLIs you want to use |
+| Human | Install [Herdr](https://herdr.dev) >= 0.9.0; authenticate worker CLIs and install their Herdr integrations |
 | Machine | Node ≥20; Bash, `jq`, `rg`, `uuidgen`; Herdr and worker CLIs on inherited `PATH` |
 | CLI | `npm i -g herdr-axi`, or clone and link the checkout globally |
 | Project | Optional [`.herdr-axi.json`](.herdr-axi.json); defaults work without it |
@@ -24,6 +24,7 @@
 ```sh
 npm i -g herdr-axi
 herdr-axi --version
+herdr integration status
 ```
 
 From source instead:
@@ -72,7 +73,8 @@ herdr-axi run queue parser --role implementer \
 - Batch: omit `--start`, queue tasks, then `run next` once; `--start` starts all eligible queued tasks within caps.
 - Two tool calls: `init`; then its returned export + `queue --start` together. Set `run phase build` when moving into implementation; no mandatory phase/config tour.
 - Explicit worker choice: add `--kind claude --model claude-opus-5 --effort high`; role access/native limits retained; no config edit or new run.
-- Cursor: `guide "start cursor"`; exact model ID from `cursor-agent models`, `--effort model`; Smart Auto, no force/trust bypass. Context usage unknown; bounded visible reports, registered session and generation proof required.
+- Cursor: `herdr integration install cursor`, then `guide "start cursor"`; exact model ID from `cursor-agent models`, `--effort model`; Smart Auto, no force/trust bypass. Herdr owns readiness/session detection; registered identity and generation proof remain mandatory.
+- Other installed Herdr integrations: `--kind KIND` with native CLI configuration; omit `--model` and `--effort`. Native policy may still block for provider input. Herdr owns readiness/lifecycle detection; herdr-axi retains queue, leases, generation proof and whole-tab cleanup. Automatic completion fails closed unless Herdr exposes a stable native session identity.
 
 | While workers run | Action |
 | --- | --- |

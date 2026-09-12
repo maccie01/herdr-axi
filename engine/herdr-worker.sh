@@ -18,7 +18,7 @@ herdr_bin=$(type -P "${HERDR_BIN:-herdr}")
 export HERDR_BIN="$(cd -- "$(dirname -- "$herdr_bin")" && pwd)/${herdr_bin##*/}"
 
 usage() {
-  printf '%s\n' "usage: $0 --name NAME --kind copilot|claude|codex|cursor --cwd PATH --prompt-file PATH [--label LABEL] [--model MODEL] [--effort LEVEL] [--max-autopilot-continues N] [--workspace ID] [--orchestrator-agent NAME]" >&2
+  printf '%s\n' "usage: $0 --name NAME --kind KIND --cwd PATH --prompt-file PATH [--label LABEL] [--model MODEL] [--effort LEVEL] [--max-autopilot-continues N] [--workspace ID] [--orchestrator-agent NAME]" >&2
   exit 2
 }
 
@@ -57,9 +57,10 @@ done
 [[ -n "$name" && -n "$kind" && -n "$worker_cwd" && -n "$prompt_file" ]] || usage
 [[ -n "$orchestrator_agent" ]] || usage
 [[ -d "$worker_cwd" && -r "$prompt_file" ]] || usage
-[[ "$kind" == "copilot" || "$kind" == "claude" || "$kind" == "codex" || "$kind" == "cursor" ]] || usage
 if [[ -z "$effort" ]]; then
-  if [[ "$kind" == "cursor" ]]; then effort=model; else effort=high; fi
+  if [[ "$kind" == "cursor" ]]; then effort=model
+  elif [[ "$kind" == "copilot" || "$kind" == "claude" || "$kind" == "codex" ]]; then effort=high
+  fi
 fi
 [[ "$max_autopilot_continues" =~ ^[0-9]+$ && "$max_autopilot_continues" -gt 0 ]] || usage
 [[ -n "$label" ]] || label="$name"
@@ -77,8 +78,15 @@ if [[ -z "$model" ]]; then
   esac
 fi
 
-"$HERDR_AXI_NODE" "$script_dir/../src/launch-policy.mjs" \
-  --kind "$kind" --model "$model" --effort "$effort" >/dev/null
+integration_status=$(herdr integration status) || {
+  printf '%s\n' "herdr-worker: could not read installed Herdr integrations" >&2
+  exit 1
+}
+printf '%s\n' "$integration_status" | "$HERDR_AXI_NODE" "$script_dir/../src/launch-policy.mjs" --check-integration "$kind" >/dev/null
+launch_args=(--kind "$kind")
+[[ -z "$model" ]] || launch_args+=(--model "$model")
+[[ -z "$effort" ]] || launch_args+=(--effort "$effort")
+"$HERDR_AXI_NODE" "$script_dir/../src/launch-policy.mjs" "${launch_args[@]}" >/dev/null
 
 receipt_dir="$HERDR_RECEIPT_REGISTRY_DIR"
 receipt_file="$HERDR_RECEIPT_FILE"
@@ -136,7 +144,7 @@ cleanup_on_exit() {
 trap cleanup_on_exit EXIT
 
 monitor_pane=""
-monitoring_mode="native-hooks+event-wait"
+monitoring_mode="herdr-integration+event-wait+proof"
 completion_generation=$(herdr_new_generation)
 completion_task=""
 
@@ -156,9 +164,9 @@ herdr_receipt_rearm "$receipt_file" worker-start "$completion_generation" || {
   exit 1
 }
 
+native_args=()
 case "$kind" in
   cursor)
-    monitoring_mode="event-wait+proof"
     native_args=(--model "$model" --auto-review --workspace "$worker_cwd" --add-dir "$receipt_dir")
     ;;
   copilot)
@@ -206,7 +214,7 @@ while [[ "$resume" != "true" ]]; do
     --kind "$kind" \
     --pane "$agent_pane" \
     --timeout 120000 \
-    -- "${native_args[@]}" 2>&1); then
+    -- ${native_args[@]+"${native_args[@]}"} 2>&1); then
     break
   fi
   if (( $(date +%s) >= pane_ready_deadline )) || ! jq -e '.error.code == "agent_pane_busy"' <<<"$start_json" >/dev/null; then
@@ -228,15 +236,6 @@ done
 if ! herdr_registry_capture_identity "$receipt_dir/$name.json" true; then
   cleanup_created_tab=false
   exit 1
-fi
-
-if [[ "$kind" == "cursor" ]]; then
-  cursor_session=$(jq -r '.native_identity.session // empty' "$receipt_dir/$name.json")
-  if ! mode_screen=$(herdr agent read "$agent_pane" --source visible --lines 40) ||
-    ! printf '%s\n' "$mode_screen" | "$HERDR_AXI_NODE" "$script_dir/../src/launch-policy.mjs" --check-cursor-screen --session "$cursor_session" >/dev/null; then
-    cleanup_created_tab=false
-    exit 1
-  fi
 fi
 
 if [[ "$kind" == "claude" ]]; then
@@ -362,6 +361,7 @@ case "$kind" in
   copilot) permission_mode=autopilot ;;
   codex) permission_mode=approve-for-me ;;
   claude) permission_mode=auto; permission_mode_verified=true ;;
+  *) permission_mode=native ;;
 esac
 
 jq -n \

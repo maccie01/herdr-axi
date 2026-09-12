@@ -26,8 +26,8 @@ const RUN_HELP = {
   Already loaded at init; no config preflight needed before queue.`,
   queue: `herdr-axi run queue TASK --role ROLE --cwd WORKTREE --area AREA --prompt "task; checks" [--after ID,ID] [--start]
   --prompt-file FILE instead; exactly one prompt source. 128 tasks/run.
-  Override: --kind KIND --model MODEL --effort LEVEL; role limits retained. Cursor: --effort model; guide cursor.
-  Without --role: --kind claude|codex|copilot|cursor; write access, no native children.
+  Override: --kind KIND; only installed Herdr integrations. Core providers also accept --model/--effort.
+  Without --role: --kind KIND; write access, no native children. Native-policy kinds may block for provider input.
   --area relative to --cwd; . = whole tree, not isolation. Read-only: access:read role.
   --start schedules ALL eligible tasks within caps; follow help, do not call next again.
   Batch: omit --start; queue, then run next once. No config/layout preflight.`,
@@ -70,7 +70,7 @@ const RUN_HELP = {
   close: `herdr-axi run close <pane>
   Accepted owned workers only; whole tab including monitor. Never the owner tab.
   Closing is not cancellation. User requested abort: run cancel <pane> --evidence "authorized stop; partial state/background jobs reviewed" BEFORE acceptance.`,
-  switch: `herdr-axi run switch <pane-or-task-id> --kind claude|codex|copilot|cursor --model <model> [--effort high] [--summary "partial work / pending checks"]
+  switch: `herdr-axi run switch <pane-or-task-id> --kind KIND [--model <model> --effort high] [--summary "partial work / pending checks"]
   Or --role <configured-worker-role>; same read/write access, different provider.
   Cursor: explicit cursor-agent models ID; --effort model, not high.
   Quota/session limit only; live identity + current quota error required, including native unknown. Never working.
@@ -112,7 +112,7 @@ const RUN_HELP = {
 
 const COMMAND_HELP = {
   guide: 'herdr-axi guide [keywords]  # alias: herdr-axi --skill\n  TOON: no keywords = full compact workflow; e.g. guide "start opus", guide "quota switch", guide "stop worker".\n  Local routing; precise recipes only; no backend/model call or action executed.',
-  agents: "herdr-axi agents [--state working|blocked|idle|done|unknown] [--kind claude|codex|copilot|cursor] [--all]\n  Selected run by default; --all lists globally. Fields: name, kind, state, pane.\n  No selected run: discovery only, not ownership. New agents: herdr-axi run init, then run queue/next; never raw agent start.",
+  agents: "herdr-axi agents [--state working|blocked|idle|done|unknown] [--kind KIND] [--all]\n  Selected run by default; --all lists globally. Fields: name, kind, state, pane.\n  Managed startup exposes installed Herdr integrations only. New agents: run init, then run queue/next.",
   fleet: "herdr-axi fleet [--all]\n  Selected run: owned tasks, review queue, capacity. --all: global discovery, not ownership.\n  New agents: herdr-axi run init, then run queue/next. Titles: herdr-axi agents.",
   machines: "herdr-axi machines\n  Read-only SSH connection inventory. Profiles are not globally addressable workers; pane and workspace IDs remain server-scoped.",
   explain: "herdr-axi explain <pane> [--verbose]\n  Explain Herdr 0.9 agent-state detection for an owned pane. --verbose adds bounded rule evidence.",

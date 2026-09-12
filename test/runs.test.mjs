@@ -30,6 +30,14 @@ if (process.argv.length > 2) {
     }));
     process.exit(0);
   }
+  if (group === "integration") {
+    assert.equal(action, "status");
+    const missing = process.env.AXI_TEST_MISSING_INTEGRATION;
+    const none = process.env.AXI_TEST_NO_INTEGRATIONS === "1";
+    console.log(["claude", "codex", "copilot", "cursor", "opencode"].map((kind) =>
+      `${kind}: ${none || kind === missing ? "not installed" : "current (v1)"} (/fixture)`).join("\n"));
+    process.exit(0);
+  }
   if (!["agent", "tab", "pane"].includes(group)) {
     console.error(JSON.stringify({ error: { code: "unsupported", message: `fake herdr (${process.argv[1].split("/").pop()}): unhandled command ${process.argv.slice(2).join(" ")}` } }));
     process.exit(2);
@@ -195,6 +203,38 @@ if (process.argv.length > 2) {
       assert.equal(f.state().tasks[0].state, "cancelled");
       assert.equal(f.calls().filter(c => c.group === "tab" && c.action === "close").length, 1);
       f.ok(["run", "finish"]);
+    } finally { f.clean(); }
+  });
+
+  test("installed Herdr integrations gate native workers without silently dropping flags", () => {
+    const f = fixture();
+    try {
+      assert.match(f.initialized, /integrations\[5\]:.*opencode/);
+      for (const extra of [["--model", "ignored"], ["--effort", "high"]]) {
+        const rejected = f.execute(["run", "queue", `native-${extra[0].slice(2)}`, "--kind", "opencode", ...extra, "--cwd", f.state().project, "--area", ".", "--prompt", "Inspect"]);
+        assert.equal(rejected.status, 1); assert.match(rejected.output, /native configuration/);
+      }
+      const missing = f.execute(["run", "queue", "missing", "--kind", "cursor", "--model", "composer-2.5", "--cwd", f.state().project, "--area", ".", "--prompt", "Inspect"], { AXI_TEST_MISSING_INTEGRATION: "cursor" });
+      assert.equal(missing.status, 1); assert.match(missing.output, /INTEGRATION_NOT_INSTALLED/);
+      assert.equal(f.state().tasks.length, 0);
+
+      const output = f.ok(["run", "queue", "native", "--kind", "opencode", "--cwd", f.state().project, "--area", ".", "--prompt", "Inspect", "--start"]);
+      const task = f.state().tasks[0], start = f.calls().find((call) => call.group === "agent" && call.action === "start");
+      assert.equal(task.state, "running", output); assert.equal(task.kind, "opencode");
+      assert.equal(task.model, undefined); assert.equal(task.effort, undefined);
+      assert.deepEqual(start.args.slice(start.args.indexOf("--") + 1), []);
+      assert.match(f.ok(["run", "config", "--full"]), /integrations\[5\]:.*opencode/);
+    } finally { f.clean(); }
+  });
+
+  test("an integration removed after queue defers launch without allocating resources", () => {
+    const f = fixture();
+    try {
+      f.ok(["run", "queue", "native", "--kind", "opencode", "--cwd", f.state().project, "--area", ".", "--prompt", "Inspect"]);
+      const output = f.execute(["run", "next"], { AXI_TEST_MISSING_INTEGRATION: "opencode" });
+      assert.equal(output.status, 0, output.output); assert.match(output.output, /integration is not installed/);
+      assert.equal(f.state().tasks[0].state, "queued");
+      assert(!f.calls().some((call) => call.action === "create"));
     } finally { f.clean(); }
   });
 

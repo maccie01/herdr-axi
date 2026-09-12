@@ -3,6 +3,7 @@
 import { spawnSync } from "node:child_process";
 import { AxiError } from "axi-sdk-js";
 import { ownedRows, isSelf } from "./run-state.mjs";
+import { installedIntegrationKinds, parseIntegrationStatus } from "./integrations.mjs";
 
 export const STATES = ["working", "blocked", "idle", "done", "unknown"];
 
@@ -49,6 +50,13 @@ export function runHerdr(args, { timeoutMs = 30_000, text = false } = {}) {
   if (!parsed) throw new AxiError("herdr returned invalid JSON", "HERDR_CLI_ERROR", ["Check the server: herdr status"]);
   return parsed?.result ?? parsed;
 }
+
+export function integrationInventory() {
+  requireHerdrEnv();
+  return parseIntegrationStatus(runHerdr(["integration", "status"], { text: true }));
+}
+
+export const integrationKinds = (inventory = integrationInventory()) => installedIntegrationKinds(inventory);
 
 function mapErrorCode(msg = "", wireCode = "") {
   if (["agent_not_found", "pane_not_found", "tab_not_found", "agent_not_running"].includes(wireCode)) return "UNKNOWN_AGENT";
