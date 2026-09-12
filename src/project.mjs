@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { PHASES, runError, runDir, canonicalDir } from "./run-state.mjs";
 import { validateLaunch, launchMode } from "./launch-policy.mjs";
-import { CORE_INTEGRATIONS, integrationName } from "./integrations.mjs";
+import { CORE_INTEGRATIONS, isIntegrationKind } from "./integrations.mjs";
 
 export const stateRoot = () => path.resolve(process.env.HERDR_AXI_STATE_HOME || path.join(homedir(), ".local/state/herdr-axi"));
 export const hash = (value) => createHash("sha256").update(value).digest("hex").slice(0, 24);
@@ -74,14 +74,15 @@ export function validateConfig(input = {}) {
 }
 
 export const nativeSlots = (role) => (role.subagents ?? []).reduce((n, s) => n + s.max, 0);
-export function selectWorker(config, options, availableKinds) {
+export function selectWorker(config, options, availableKinds, { requireExplicitModel = false } = {}) {
   const base = options.role ? config.roles[options.role] : null;
   if (options.role && (!base || options.role === "orchestrator")) throw runError("Choose a worker role from init", "CONFIG_INVALID", ["herdr-axi run config"]);
   const kind = options.kind ?? base?.kind;
+  if (!isIntegrationKind(kind)) throw runError("Choose a worker role or Herdr integration kind", "CONFIG_INVALID", ["herdr-axi run config", "herdr integration status"]);
   const core = CORE_INTEGRATIONS[kind];
-  if (availableKinds && !availableKinds.includes(kind)) throw runError(`Herdr integration is not installed for ${kind}`, "INTEGRATION_NOT_INSTALLED", [`herdr integration install ${integrationName(kind)}`, "herdr integration status"]);
+  if (availableKinds && !availableKinds.includes(kind)) throw runError(`Herdr integration is not installed for ${kind}`, "INTEGRATION_NOT_INSTALLED", ["herdr integration status", "herdr integration install --help"]);
   if (!core && (options.model !== undefined || options.effort !== undefined)) throw runError(`${kind} uses its native configuration; omit --model and --effort`, "LAUNCH_POLICY", ["herdr-axi run queue --help"]);
-  if (base && kind !== base.kind && core && !options.model) throw runError("Changing this provider requires --model; no implicit substitution", "CONFIG_INVALID", ["herdr-axi run queue --help"]);
+  if (core && !options.model && (requireExplicitModel || (base && kind !== base.kind))) throw runError("Changing this provider requires --model; no implicit substitution", "CONFIG_INVALID", [requireExplicitModel ? "herdr-axi run switch --help" : "herdr-axi run queue --help"]);
   if (kind === "cursor" && !options.model && !base?.model) throw runError("Cursor requires --model from cursor-agent models", "LAUNCH_POLICY", ["cursor-agent models", "herdr-axi guide cursor"]);
   const role = core
     ? { ...(base ?? { access: options.access ?? "write" }), kind, model: options.model ?? base?.model ?? (kind === "claude" ? "opus" : "gpt-5.6-sol"), effort: options.effort ?? (kind === "cursor" ? (base?.kind === "cursor" ? base.effort ?? "model" : "model") : base?.effort ?? "high") }

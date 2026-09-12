@@ -75,7 +75,7 @@ herdr-axi run queue parser --role implementer \
 - Two tool calls: `init`; then its returned export + `queue --start` together. Set `run phase build` when moving into implementation; no mandatory phase/config tour.
 - Explicit worker choice: add `--kind claude --model claude-opus-5 --effort high`; role access/native limits retained; no config edit or new run.
 - Cursor: `herdr integration install cursor`, then `guide "start cursor"`; exact model ID from `cursor-agent models`, `--effort model`; Smart Auto, no force/trust bypass. Herdr owns readiness/session detection; registered identity and generation proof remain mandatory.
-- Other installed Herdr integrations: `--kind KIND` with native CLI configuration; omit `--model` and `--effort`. Native policy may still block for provider input. Herdr owns readiness/lifecycle detection; herdr-axi retains queue, leases, generation proof and whole-tab cleanup. Automatic completion fails closed unless Herdr exposes a stable native session identity.
+- Other installed Herdr integrations: `--kind KIND` with native CLI configuration; omit `--model` and `--effort`. Native policy may still block for provider input. Herdr owns readiness/lifecycle detection; herdr-axi retains queue, leases, generation proof and whole-tab cleanup. Submission and automatic completion fail closed unless Herdr exposes a stable native session identity.
 
 | While workers run | Action |
 | --- | --- |

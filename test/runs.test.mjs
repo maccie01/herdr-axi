@@ -63,7 +63,7 @@ if (process.argv.length > 2) {
       assert(!fs.existsSync(ready), "startup fixture was not released");
       const a = find(args[args.indexOf("--pane") + 1]);
       a.name = args[0]; a.agent = args[args.indexOf("--kind") + 1]; a.agent_status = "idle";
-      if (a.agent === "cursor") a.agent_session = { value: randomUUID() };
+      a.agent_session = { value: "session-1" };
       if (fs.existsSync(path.join(dir, "startup-blocked"))) {
         a.agent_status = "blocked"; save(a);
         console.error(JSON.stringify({ error: { code: "agent_not_ready", message: "startup blocked" } })); process.exit(1);
@@ -178,8 +178,10 @@ if (process.argv.length > 2) {
   function exhaustedWorker(f) {
     f.ok(["run", "phase", "explore", "--cap", "1"]);
     f.ok(["run", "queue", "quota-task", "--role", "implementer", "--cwd", f.state().project, "--area", ".", "--prompt", "Finish the partial implementation; check its contents."]);
-    f.ok(["run", "next"]);
-    const w = f.state().workers[0], file = path.join(f.dir, `${w.pane}.agent`);
+    const started = f.ok(["run", "next"]);
+    const w = f.state().workers[0];
+    assert(w, `quota fixture did not launch a worker:\n${started}`);
+    const file = path.join(f.dir, `${w.pane}.agent`);
     const a = JSON.parse(fs.readFileSync(file)); a.agent_status = "idle"; fs.writeFileSync(file, JSON.stringify(a));
     fs.writeFileSync(path.join(f.dir, `screen-${w.pane}`), "● Partial implementation; checks pending\n✗ You have exceeded your monthly quota (Request ID: fixture)\n /commands · autopilot");
     return w;
@@ -242,6 +244,8 @@ if (process.argv.length > 2) {
     const f = fixture();
     try {
       const old = exhaustedWorker(f);
+      const implicit = f.execute(["run", "switch", old.pane, "--kind", "codex"]);
+      assert.equal(implicit.status, 1); assert.match(implicit.output, /requires --model/);
       f.ok(["run", "switch", old.pane, "--kind", "cursor", "--model", "composer-2.5"]);
       assert.equal(f.state().tasks[0].effort, "model");
       f.ok(["run", "next"]);
@@ -643,8 +647,8 @@ if (process.argv.length > 2) {
   test("resumed quota switch collects a newly arrived proof and offers cancellation, not a retry loop", () => {
     const f = fixture();
     try {
-      const w = exhaustedWorker(f), aFile = path.join(f.dir, `${w.pane}.agent`), a = JSON.parse(fs.readFileSync(aFile));
-      const session = randomUUID(); a.agent_session = { value: session }; fs.writeFileSync(aFile, JSON.stringify(a));
+      const w = exhaustedWorker(f);
+      const session = w.session;
       fs.writeFileSync(path.join(f.dir, "close-fail"), "");
       assert.match(f.execute(["run", "switch", w.pane, "--kind", "codex", "--model", "gpt-5.6-sol"]).output, /SWITCH_PENDING/);
       const closes = f.calls().filter((c) => c.action === "close").length;
@@ -668,8 +672,8 @@ if (process.argv.length > 2) {
   for (const [quota, action] of [[false, "watch"], [false, "task-watch"], [true, "watch"], [true, "switch"], [false, "accept"], [true, "accept"], [false, "revise"]]) test(`${action} collects late native proof without losing completed work${quota ? " despite quota banner" : ""}`, () => {
     const f = fixture();
     try {
-      const w = exhaustedWorker(f), aFile = path.join(f.dir, `${w.pane}.agent`), a = JSON.parse(fs.readFileSync(aFile));
-      const session = randomUUID(); a.agent_session = { value: session }; fs.writeFileSync(aFile, JSON.stringify(a));
+      const w = exhaustedWorker(f);
+      const session = w.session;
       f.env.HOME = path.join(f.dir, "home");
       const transcript = path.join(f.env.HOME, ".copilot/session-state", session, "events.jsonl");
       fs.mkdirSync(path.dirname(transcript), { recursive: true });
@@ -1251,6 +1255,8 @@ if (process.argv.length > 2) {
       const compact = f.ok(["run", "config"]), full = f.ok(["run", "config", "--full"]);
       assert.match(compact, /roles\[2\]/);
       assert.match(compact, /herdr-axi run config --full/);
+      assert.doesNotMatch(compact, /integrationStatus/);
+      assert.match(full, /integrationStatus/);
       assert.match(full, /orchestrator:/);
       assert.match(full, /retention:/);
       assert(Buffer.byteLength(compact) < Buffer.byteLength(full));
@@ -1490,11 +1496,14 @@ if (process.argv.length > 2) {
       const r = f.state();
       r.limits.explore = 2;
       r.config.roles.implementer.subagents = [{ role: "verifier", max: 1, when: "review only" }];
+      r.config.roles.unavailable = { kind: "not-installed", access: "write" };
       for (let i = 0; i < 10; i++) r.config.roles[`reviewer${i}`] = { ...r.config.roles.verifier, model: "claude-opus-5" };
       f.write(r);
       const compact = f.ok(["run", "config"]);
       assert.match(compact, /roles\[8\]/);
       assert.match(compact, /moreRoles: 4/);
+      assert.match(compact, /unavailableRoles\[1\]\{role,kind\}/);
+      assert.match(compact, /unavailable,not-installed/);
       assert.match(compact, /implementer,copilot,gpt-5.6-sol,high,write,1/);
       assert.match(compact, /capacity: 2/);
       assert.doesNotMatch(compact, /reviewer9/);
@@ -2391,6 +2400,9 @@ if (process.argv.length > 2) {
       const r = f.state(), w = r.workers[0]; w.session = "original"; f.write(r);
       const file = path.join(f.dir, `${w.pane}.agent`), a = JSON.parse(fs.readFileSync(file));
       a.agent_session = { value: "original" }; fs.writeFileSync(file, JSON.stringify(a));
+      const registryFile = path.join(path.dirname(w.receipt), `${w.name}.json`);
+      const registry = JSON.parse(fs.readFileSync(registryFile));
+      registry.native_identity.session = "original"; fs.writeFileSync(registryFile, JSON.stringify(registry));
       f.complete(w); f.ok(["run", "accept", w.pane, "--evidence", "checked"]);
       fs.writeFileSync(path.join(f.dir, "session-rotate"), ""); f.queue("b", "shared");
       assert.doesNotMatch(f.ok(["run", "next"]), /labelError|uncertain/);

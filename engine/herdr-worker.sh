@@ -238,6 +238,38 @@ if ! herdr_registry_capture_identity "$receipt_dir/$name.json" true; then
   exit 1
 fi
 
+# Herdr integrations use the native session as the replacement-stable identity.
+# A terminal alone cannot prove that startup has reached the intended agent, and
+# unrelated startup activity can otherwise satisfy a later prompt wait. Allow a
+# short reporting delay, then fail closed before creating a monitor or sending
+# task text.
+session_ready_timeout_seconds="${HERDR_SESSION_READY_TIMEOUT_SECONDS:-10}"
+if [[ ! "$session_ready_timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
+  printf '%s\n' "herdr-worker: HERDR_SESSION_READY_TIMEOUT_SECONDS must be a positive integer" >&2
+  exit 2
+fi
+session_ready_limit=$((session_ready_timeout_seconds * 4))
+session_ready=false
+for ((session_ready_tick = 0; session_ready_tick < session_ready_limit; session_ready_tick++)); do
+  if jq -e '.native_identity.session | type == "string" and length > 0' "$receipt_dir/$name.json" >/dev/null; then
+    session_ready=true
+    break
+  fi
+  sleep 0.25
+  if ! herdr_registry_capture_identity "$receipt_dir/$name.json" true; then
+    cleanup_created_tab=false
+    exit 1
+  fi
+done
+if jq -e '.native_identity.session | type == "string" and length > 0' "$receipt_dir/$name.json" >/dev/null; then
+  session_ready=true
+fi
+if [[ "$session_ready" != true ]]; then
+  cleanup_created_tab=false
+  printf '%s\n' "SESSION_START_UNVERIFIED: Herdr did not report a native session for $name; task not submitted. Inspect startup and cancel or recover after the integration reports a session." >&2
+  exit 1
+fi
+
 if [[ "$kind" == "claude" ]]; then
   # Passing --permission-mode auto is not proof that the provider enabled it.
   # Keep an unsupported or unverified session inspectable, without sending work.

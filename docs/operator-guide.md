@@ -386,7 +386,7 @@ orchestrator role cannot change an already-running owner's model.
 - Cursor queue/switch: `--kind cursor --model composer-2.5 --effort model`; choose an available ID, not implicit `auto` routing. Effort belongs to Cursor's exact model ID (e.g. a `-high` variant); separate numeric/named effort overrides refused, not ignored.
 - Cursor project role: `{"kind":"cursor","model":"composer-2.5","effort":"model","access":"write"}`. Existing provider defaults unchanged.
 - Cursor supervision: Herdr integration readiness plus registered terminal/session identity, current generation proof and native idle/done are required. Unknown readiness cannot settle. Reports use bounded visible output; inspect `read --full` or a reviewed `--result-file` when insufficient.
-- Generic integration supervision also requires a non-null native session identity. If an integration cannot expose one, completion remains awaiting proof/review rather than accepting a possible replacement occupant.
+- Every integration must expose a non-null native session identity before herdr-axi submits task text. Generic completion requires the same identity to remain stable; otherwise startup or completion stays inspectable instead of accepting a possible replacement occupant.
 - Cursor startup guard: Herdr 0.9 classifies a blocked trust dialog as `agent_not_ready` and leaves the owned tab unsubmitted. Inspect, authorize trust only if appropriate, then `run recover`; never bypass with raw prompt/keys.
 - Cursor context usage remains `contextUnknown`; no private transcript parsing or guessed percentages. Shared conservative quota detector applies; unrecognized Cursor-specific billing messages need inspection/cancellation, not automatic switching.
 

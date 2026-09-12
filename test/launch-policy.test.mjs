@@ -30,6 +30,9 @@ test("Herdr integration status is the worker availability authority", () => {
   const config = validateConfig({ roles: { implementer: { kind: "opencode", access: "write" } } });
   assert.deepEqual(selectWorker(config, { role: "implementer" }, ["opencode"]), { kind: "opencode", access: "write" });
   assert.throws(() => selectWorker(config, { role: "implementer", model: "ignored" }, ["opencode"]), /omit --model/);
+  assert.throws(() => selectWorker(config, {}, ["opencode"]), /Choose a worker role or Herdr integration kind/);
+  assert.equal(selectWorker(config, { kind: "codex" }, ["codex"]).model, "gpt-5.6-sol");
+  assert.throws(() => selectWorker(config, { kind: "codex" }, ["codex"], { requireExplicitModel: true }), /requires --model/);
   assert.throws(() => selectWorker(config, { role: "implementer" }, ["codex"]), { code: "INTEGRATION_NOT_INSTALLED" });
 });
 

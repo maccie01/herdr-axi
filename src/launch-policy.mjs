@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
-import { CORE_INTEGRATIONS, installedIntegrationKinds, integrationName, integrationPolicy, parseIntegrationStatus } from "./integrations.mjs";
+import { CORE_INTEGRATIONS, installedIntegrationKinds, integrationPolicy, parseIntegrationStatus } from "./integrations.mjs";
 
 export const launchMode = (kind) => integrationPolicy(kind)?.mode ?? "native";
 const invalid = (message, code = "LAUNCH_POLICY") => Object.assign(new Error(message), { code });
@@ -46,7 +46,7 @@ if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import
     else if (args.length === 2 && args[0] === "--check-integration") {
       const kind = args[1];
       if (!installedIntegrationKinds(parseIntegrationStatus(fs.readFileSync(0, "utf8"))).includes(kind))
-        throw invalid(`Herdr integration is not installed for ${kind}; run herdr integration install ${integrationName(kind)}`, "INTEGRATION_NOT_INSTALLED");
+        throw invalid(`Herdr integration is not installed for ${kind}; inspect herdr integration status and herdr integration install --help`, "INTEGRATION_NOT_INSTALLED");
       console.log(JSON.stringify({ kind, integration: "installed" }));
     }
     else {

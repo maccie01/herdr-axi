@@ -2890,11 +2890,28 @@ test_missing_integration_fails_before_worker_allocation() (
   assert_file_absent "$FAKE_HERDR_CASE/monitor-command" 'missing integration allocates no monitor'
 )
 
+test_missing_native_session_fails_before_submission() (
+  setup_case missing-native-session
+  printf '%s\n' opencode > "$FAKE_HERDR_CASE/kind"
+  printf '%s\n' __empty__ > "$FAKE_HERDR_CASE/session"
+  printf '%s\n' 'must not submit' > "$FAKE_HERDR_CASE/prompt"
+  if HERDR_SESSION_READY_TIMEOUT_SECONDS=1 bash "$worker_script" --name worker --kind opencode \
+    --cwd "$FAKE_HERDR_CASE" --prompt-file "$FAKE_HERDR_CASE/prompt" \
+    --workspace ws --orchestrator-agent orch > "$TMPDIR/output" 2>&1; then
+    fail 'worker without native session submitted a task'
+  fi
+  rg -q SESSION_START_UNVERIFIED "$TMPDIR/output" || fail 'missing native session diagnostic absent'
+  assert_eq 0 "$(call_count '^agent prompt')" 'missing native session sends no prompt'
+  assert_eq 0 "$(call_count '^pane split')" 'missing native session creates no monitor'
+  assert_eq created "$(jq -r '.stage' "$HERDR_RECEIPT_ROOT/ws/worker.json")" 'missing native session stays inspectable'
+)
+
 tests=(
   test_herdr_blocks_cursor_trust_before_submission
   test_cursor_completion_requires_registered_identity_and_proof
   test_generic_integration_completion_requires_identity_and_proof
   test_missing_integration_fails_before_worker_allocation
+  test_missing_native_session_fails_before_submission
   test_monitor_identity_fences_new_assignments
   test_monitor_ready_requires_published_identity
   test_monitor_ready_marker_handshake

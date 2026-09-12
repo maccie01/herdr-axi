@@ -510,12 +510,16 @@ async function executeRunCommand(action, o) {
     const defaultRole = roles.roles.find((role) => role.access === "write")?.role;
     const directKind = integrations.find((kind) => kind !== "cursor");
     const workerChoice = defaultRole ? `--role ${defaultRole}` : directKind ? `--kind ${directKind}` : null;
+    const unavailableRoles = project.configFile ? Object.entries(run.config.roles)
+      .filter(([name, role]) => name !== "orchestrator" && !integrations.includes(role.kind))
+      .map(([name, role]) => `${name}:${role.kind}`) : [];
     const endpointMismatch = probe.endpointCompatible === false || probe.restartNeeded === true;
     const staleServer = probe.serverBinaryStale === true;
     const warnings = [
       ...(endpointMismatch ? [`Herdr endpoint generations are client=${probe.protocolGeneration ?? "unknown"}, server=${probe.serverProtocolGeneration ?? "unknown"}. CLI automation can proceed, but saved SSH/multi-machine UI compatibility needs attention; inspect: herdr status --json`] : []),
       ...(staleServer ? [`Herdr client ${probe.clientVersion} and server ${probe.serverVersion} differ. Both satisfy herdr-axi, but prompt behavior is server-owned; restart Herdr if you expected the updated server binary.`] : []),
       ...integrationStatus.filter((entry) => entry.status === "outdated").map((entry) => `Herdr integration ${entry.kind}${entry.version ? ` v${entry.version}` : ""} is outdated; refresh it with: herdr integration install ${entry.name}`),
+      ...(unavailableRoles.length ? [`Configured worker roles are unavailable and were omitted: ${unavailableRoles.join(", ")}. Inspect herdr integration status and the role kind spelling.`] : []),
     ];
     return { run: dir, owner: ownerPane, workspace: run.workspace, project: project.project, config: project.configFile || "defaults", integrations, phase: run.phase, capacity: limit(run), ...roles, cleanup: collectArchives(project.project),
       ...(warnings.length ? { warning: warnings.join(" ") } : {}),
@@ -528,8 +532,12 @@ async function executeRunCommand(action, o) {
   if (action === "status") return runStatus();
   if (action === "config") {
     const config = run.config ?? DEFAULT_CONFIG;
-    return { project: run.project, source: run.configFile || "defaults", integrations: run.integrations ?? [], integrationStatus: run.integrationStatus ?? [],
-      ...(o.full ? { config } : { ...workerRoleSummary(config, run.integrations), phase: run.phase, capacity: limit(run), nativeSubagentLimit: config.nativeSubagentLimit, sharedReadWorktree: config.sharedReadWorktree }),
+    const unavailableRoles = run.integrations?.length ? Object.entries(config.roles)
+      .filter(([name, role]) => name !== "orchestrator" && !run.integrations.includes(role.kind))
+      .map(([role, value]) => ({ role, kind: value.kind })) : [];
+    return { project: run.project, source: run.configFile || "defaults", integrations: run.integrations ?? [],
+      ...(unavailableRoles.length ? { unavailableRoles } : {}),
+      ...(o.full ? { integrationStatus: run.integrationStatus ?? [], config } : { ...workerRoleSummary(config, run.integrations), phase: run.phase, capacity: limit(run), nativeSubagentLimit: config.nativeSubagentLimit, sharedReadWorktree: config.sharedReadWorktree }),
       note: "Init snapshot; read-only/native child limits are instructions, not a sandbox. Owner model is a launch contract, never changed here.",
       help: [o.full ? "herdr-axi run queue --help" : "herdr-axi run config --full"] };
   }
@@ -804,7 +812,7 @@ async function executeRunCommand(action, o) {
       const available = integrationKinds();
       const target = o.role
         ? selectWorker(config, { role: o.role }, available)
-        : selectWorker(config, { kind: o.kind, model: o.model, effort: o.effort, access: task.access }, available);
+        : selectWorker(config, { kind: o.kind, model: o.model, effort: o.effort, access: task.access }, available, { requireExplicitModel: true });
       if (!target || o.role === "orchestrator" || target.kind === task.kind || target.access !== task.access) throw runError("Choose another provider with the same read/write access", "CONFIG_INVALID");
       if (pending(run).reduce((n, t) => n + (t.nativeSlots ?? 0), 0) - (task.nativeSlots ?? 0) + nativeSlots(target) > config.nativeSubagentLimit) throw runError("Replacement exceeds native subagent budget", "CAPACITY_FULL");
       if (o.summary !== undefined && (!o.summary.trim() || o.summary.length > 4000)) throw runError("--summary must contain 1..4000 characters");

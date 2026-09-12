@@ -148,10 +148,11 @@ test("probe rejects an unavailable server and an incompatible private protocol",
     (error) => error.code === "HERDR_UNREACHABLE");
 });
 
-function initRun(overrides = {}) {
+function initRun(overrides = {}, config) {
   const root = fs.mkdtempSync(path.join(tmpdir(), "herdr-axi-probe-init-"));
   const project = path.join(root, "project");
   fs.mkdirSync(project);
+  if (config) fs.writeFileSync(path.join(project, ".herdr-axi.json"), JSON.stringify(config));
   const state = path.join(root, "run-state");
   const r = spawnSync(process.execPath, [cli, "run", "init", "--project", project, "--dir", state], {
     encoding: "utf8", timeout: 20_000, cwd: project,
@@ -232,5 +233,25 @@ test("cursor-only init does not print a queue command with an invented model", (
     assert.equal(r.status, 0, output);
     assert.match(output, /herdr-axi guide cursor/);
     assert.doesNotMatch(output, /run queue TASK --kind cursor/);
+  } finally { cleanup(); }
+});
+
+test("core-only init keeps a valid direct queue recipe", () => {
+  for (const kind of ["claude", "codex", "copilot"]) {
+    const { r, output, cleanup } = initRun({ AXI_FAKE_INTEGRATION_KIND: kind });
+    try {
+      assert.equal(r.status, 0, output);
+      assert.match(output, kind === "copilot" ? /run queue TASK --role implementer/ : new RegExp(`run queue TASK --kind ${kind}`));
+      assert.doesNotMatch(output, /herdr-axi guide cursor/);
+    } finally { cleanup(); }
+  }
+});
+
+test("custom roles with unavailable or misspelled integrations remain visible as warnings", () => {
+  const { r, output, cleanup } = initRun({}, { roles: { implementer: { kind: "opencodee", access: "write" } } });
+  try {
+    assert.equal(r.status, 0, output);
+    assert.match(output, /Configured worker roles are unavailable and were omitted: implementer:opencodee/);
+    assert.match(output, /role kind spelling/);
   } finally { cleanup(); }
 });
