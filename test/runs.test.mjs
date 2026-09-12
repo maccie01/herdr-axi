@@ -13,8 +13,27 @@ const self = fileURLToPath(import.meta.url);
 const cli = fileURLToPath(new URL("../bin/herdr-axi.mjs", import.meta.url));
 const owner = { pane_id: "wTEST:pOWNER", tab_id: "wTEST:tOWNER", workspace_id: "wTEST", terminal_id: "owner-terminal", name: "orchestrator", agent: "codex", agent_status: "working" };
 
-if (["agent", "tab", "pane"].includes(process.argv[2])) {
+// Dual role: with arguments this file is the fake herdr on the fixture PATH,
+// without them it is the test suite (node --test passes no extra argv).
+// Never fall through to the suite on an unknown verb. That is what happened on
+// 12.09.2026: `run init` probes `herdr status --json`, the fake did not know
+// `status`, re-ran the suite, and each suite opened a new run. 4148 node
+// processes in 39 s, machine dead. Unknown verb must exit non-zero, loudly.
+if (process.argv.length > 2) {
   const [group, action, ...args] = process.argv.slice(2);
+  if (group === "status") {
+    assert.equal(action, "--json");
+    console.log(JSON.stringify({
+      client: { version: "0.9.0", protocol: 22, endpoint_protocol_generation: 1 },
+      server: { status: "running", running: true, version: "0.9.0", protocol: 22, compatible: true, endpoint_compatible: true,
+        capabilities: { endpoint_protocol_generation: 1, live_handoff: true, surface_interest: true, health_check: true } },
+    }));
+    process.exit(0);
+  }
+  if (!["agent", "tab", "pane"].includes(group)) {
+    console.error(JSON.stringify({ error: { code: "unsupported", message: `fake herdr (${process.argv[1].split("/").pop()}): unhandled command ${process.argv.slice(2).join(" ")}` } }));
+    process.exit(2);
+  }
   const dir = process.env.AXI_RUN_TEST;
   fs.appendFileSync(path.join(dir, "calls"), JSON.stringify({ group, action, args, time: Date.now() }) + "\n");
   const emit = (result) => console.log(JSON.stringify({ result }));

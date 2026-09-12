@@ -12,8 +12,18 @@ const cli = fileURLToPath(new URL("../bin/herdr-axi.mjs", import.meta.url));
 const pane = "w1:pTEST";
 
 // This file doubles as an isolated HERDR_BIN. No call can reach real panes.
-if (["agent", "machine"].includes(process.argv[2])) {
+// Dual role: with arguments this file is the fake herdr on the fixture PATH,
+// without them it is the test suite (node --test passes no extra argv).
+// Never fall through to the suite on an unknown verb. That is what happened on
+// 12.09.2026: `run init` probes `herdr status --json`, the fake did not know
+// `status`, re-ran the suite, and each suite opened a new run. 4148 node
+// processes in 39 s, machine dead. Unknown verb must exit non-zero, loudly.
+if (process.argv.length > 2) {
   const args = process.argv.slice(2);
+  if (!["agent", "machine"].includes(args[0])) {
+    console.error(JSON.stringify({ error: { code: "unsupported", message: `fake herdr (${process.argv[1].split("/").pop()}): unhandled command ${process.argv.slice(2).join(" ")}` } }));
+    process.exit(2);
+  }
   appendFileSync(process.env.AXI_TEST_LOG, JSON.stringify(args) + "\n");
   const scenario = process.env.AXI_TEST_SCENARIO;
   const agent = { pane_id: pane, agent: "codex", agent_status: "idle", terminal_title_stripped: "Title with spaces" };

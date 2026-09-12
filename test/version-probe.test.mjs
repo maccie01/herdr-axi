@@ -13,8 +13,19 @@ const pane = "w1:pPROBE";
 
 // This file doubles as an isolated HERDR_BIN. Its strict routing makes the
 // test fail if the adapter invents a command such as `herdr server status`.
-if (process.argv[2] === "status" || process.argv[2] === "agent") {
+// Dual role: with arguments this file is the fake herdr on the fixture PATH,
+// without them it is the test suite (node --test passes no extra argv).
+// Never fall through to the suite on an unknown verb. That is what happened on
+// 12.09.2026: `run init` probes `herdr status --json`, the fake did not know
+// `status`, re-ran the suite, and each suite opened a new run. 4148 node
+// processes in 39 s, machine dead. Unknown verb must exit non-zero, loudly.
+if (process.argv.length > 2) {
   const [action, sub, ...args] = process.argv.slice(2);
+  if (!["status", "agent"].includes(action)) {
+    console.error(JSON.stringify({ error: { code: "unsupported", message: `fake herdr (${process.argv[1].split("/").pop()}): unhandled command ${process.argv.slice(2).join(" ")}` } }));
+    process.exit(2);
+  }
+
   if (action === "status") {
     assert.equal(sub, "--json");
     if (process.env.AXI_FAKE_STATUS === "exit-1") process.exit(1);
