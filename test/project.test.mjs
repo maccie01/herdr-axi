@@ -5,9 +5,18 @@ import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
-import { validateConfig, projectConfig, worktree, writerLease, leasePath, leaseStatus, hasRunLeases } from "../src/project.mjs";
+import { validateConfig, projectConfig, worktree, writerLease, leasePath, leaseStatus, hasRunLeases, unavailableWorkerRoles } from "../src/project.mjs";
 import { contextValue } from "../src/context.mjs";
 import { collectArchives, projectRuns } from "../src/archive.mjs";
+
+test("unavailable worker roles include defaults and exclude the orchestrator", () => {
+  assert.deepEqual(unavailableWorkerRoles(validateConfig(), ["codex"]), [
+    { role: "implementer", kind: "copilot" }, { role: "verifier", kind: "claude" },
+  ]);
+  assert.deepEqual(unavailableWorkerRoles(validateConfig(), undefined), []);
+  const config = validateConfig({ roles: { implementer: { kind: "opencode" } } });
+  assert.deepEqual(unavailableWorkerRoles(config, ["opencode", "claude"]), []);
+});
 
 test("run directory aliases preserve lease ownership, repair legacy paths and fence GC", () => {
   const dir = fs.mkdtempSync(path.join(tmpdir(), "axi-lease-alias-"));

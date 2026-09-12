@@ -319,3 +319,196 @@ or Cursor with the current `d9ee3cc` code and Herdr server. Record both the Herd
 session identity and visible task receipt. If that succeeds, the branch is a
 reasonable fail-closed Herdr 0.9 release candidate; provider-wide claims still
 require the remaining matrix.
+
+---
+
+# Round 2: re-review of the uncommitted fixes
+
+Target: `d9ee3cc fix: fence Herdr integration session identity`, 11 files, +118/-32.
+The other session wrote these after round 1 and committed them mid-pass, together with
+round 1 of this file as `f4cf92c`. Everything below was verified against a clean
+`git archive d9ee3cc` checkout, not the live tree.
+
+## Round 1 findings, re-checked
+
+**1. Cursor startup guard.** The confirmed half is fixed, and better than restoring
+the old check. `engine/herdr-worker.sh:241-270` now requires a non-empty
+`native_identity.session` for every kind before a monitor exists or task text is
+sent, with `SESSION_START_UNVERIFIED` and `cleanup_created_tab=false`.
+
+That the gate is a fix and not a self-inflicted outage: `accept` requires
+`receipt(worker).complete` (`src/runs.mjs:1008`), and the hook gate only sets that
+with a non-empty `transcript_session`. A session-less integration was therefore
+already unacceptable; failing at launch replaces burning a tab and a provider turn.
+Live `herdr agent list` shows `agent_session.value` populated for claude, codex and
+cursor. The other 13 kinds stay unverified, but their failure mode is now a named
+diagnostic instead of a worker that can never be accepted.
+
+The unverified-premise half is no longer blocking either, for a reason the commit
+does not state: a `cursor-agent` held at a trust dialog cannot have registered a
+native session, so the new gate covers the deleted guard's scenario through a
+mechanism that does not depend on how Herdr classifies the error. What remains is a
+documentation sentence asserting Herdr's classification with no source, and
+`test_herdr_blocks_cursor_trust_before_submission` still only asserting that a
+fixture obeys its own switch.
+
+**2. Unknown kind silently dropped.** Fixed as warn, not reject. `run init` emits
+`Configured worker roles are unavailable and were omitted: implementer:opencodee`,
+`run config` returns `unavailableRoles[{role,kind}]`, and `selectWorker` now rejects a
+missing or malformed kind with `CONFIG_INVALID` before the availability check.
+`validateConfig` still accepts the typo; that is a defensible call now that nothing is
+silent. Two residuals below.
+
+**3. `run switch` substituted a model silently.** Fixed. `requireExplicitModel` is
+threaded into the switch direct-kind path only, and `run switch <pane> --kind codex`
+now exits 1 with `requires --model`, asserted in `test/runs.test.mjs`.
+
+**4. Dead-end install hint.** Fixed. Both messages point at `herdr integration status`
+and `herdr integration install --help` instead of naming an uninstallable target.
+
+**5, 6, 10.** All fixed. I re-verified that deleting
+`|| "$transcript_backend" == integration` is behaviour-preserving:
+`resolve_native_transcript` returns early for the integration backend with
+`transcript_resolution` still `none`, so the `resolved && != cursor` branch is
+unreachable for it and the disjunct was dead as claimed.
+
+## New findings, none blocking
+
+1. `integrationName` is now dead. Dropping the install hint removed its last
+   consumer; `grep -rn integrationName` finds only the definition in
+   `src/integrations.mjs:8`. It was the outbound half of the `agy` to
+   `antigravity-cli` mapping. Delete it.
+
+2. `SESSION_START_UNVERIFIED` is inert as a code. `src/runs.mjs:175` maps engine
+   stderr to `GENERATION_DRIFT`, `MONITOR_START_UNVERIFIED`,
+   `MONITOR_SUPERVISION_LOST`, `PROMPT_REJECTED` or `ENGINE_ERROR`. The new code is
+   in none of those arms, so `run status` reports `code: ENGINE_ERROR` with the text
+   buried in the message. The deleted `CURSOR_START_UNVERIFIED` had the same gap, so
+   this is pre-existing parity rather than a regression; one `err.includes` arm makes
+   the new guard addressable.
+
+3. Inside a retry loop, a transient failure is fatal. Each tick calls
+   `herdr_registry_capture_identity`, which returns 1 both for "herdr agent get
+   failed" and for "identity changed", and the loop exits on either. With the 10s
+   default there are up to 40 chances for one backend blip to abort a started agent,
+   where before there was one. Either distinguish the two returns, or keep the strict
+   behaviour and bound the retries the way the claude `--check-screen` loop does: six
+   attempts with explicit backoff.
+
+4. The post-loop re-check reads as a copy-paste. The `for` loop plus the identical
+   trailing `jq -e` means `limit + 1` checks. It is correct, since the last tick's
+   capture would otherwise be discarded, but one `session_present()` helper called
+   from both places says so.
+
+5. Prototype-chain leak in `CORE_INTEGRATIONS[kind]`. `kind: "constructor"` passes
+   `isIntegrationKind`, and the lookup resolves to `Object` through the prototype
+   chain, so `core` is truthy and `integrationPolicy` returns a function instead of a
+   policy. Measured:
+
+   ```
+   integrationPolicy("constructor") -> function {}
+   launchMode("constructor")        -> "native"
+   validateLaunch({kind:"constructor"}) THREW LAUNCH_POLICY
+     constructor uses its native configuration; omit --model and --effort
+   ```
+
+   That rejection is accidental: `effort = kind === "cursor" ? "model" : CORE_INTEGRATIONS[kind] ? "high" : undefined`
+   defaults to `"high"` through the same leak, and the native branch then refuses a
+   defined effort. Change that default and `constructor` becomes a launchable phantom
+   kind with `mode: undefined`. `Object.hasOwn(CORE_INTEGRATIONS, kind)` fixes both.
+   `toString` and `valueOf` are excluded only by the regex's lowercase class.
+
+6. Two hardcoded model IDs survive the refactor. `"opus"` and `"gpt-5.6-sol"` in
+   `src/project.mjs` are the last hardcoded model-catalogue knowledge after a change
+   whose point was deleting a hardcoded kind list, and the new
+   `core-only init keeps a valid direct queue recipe` test cements
+   `run queue TASK --kind codex` as init's recommended recipe, which silently pins
+   `gpt-5.6-sol`. Related: `docs/operator-guide.md:79` still says "Claude, Codex,
+   Copilot and Cursor overrides require an explicit `--model`", which holds for an
+   override over a configured role but not for the bare `--kind` path init itself
+   recommends. Require `--model` there too, or narrow the sentence.
+
+7. `unavailableRoles` has two shapes and one blind spot. `run init` emits
+   `name:kind` inside a prose warning; `run config` emits `[{role,kind}]`. And init
+   computes it only when `project.configFile` is set, so on a machine where the
+   default roles' kinds are not installed those roles vanish from the summary with no
+   warning, which is exactly the case where the operator has no config file to fix.
+
+8. The new gate is undocumented while its sibling is not.
+   `docs/operator-guide.md:141` gives `MONITOR_START_UNVERIFIED` its 10-second budget
+   and recovery instruction. The startup contract now has two 10-second pre-delivery
+   gates and the guide describes one; `HERDR_SESSION_READY_TIMEOUT_SECONDS` appears
+   in no `.md` at all.
+
+9. `src/runs.mjs:194` still accepts terminal-or-session, looser than the engine's new
+   contract that a launched worker always has a session. Not a defect, since
+   `worker.sh` gates earlier, but the same invariant now exists at two strengths.
+
+## Test evidence
+
+Against a `git archive d9ee3cc` checkout with no other run in progress:
+
+- `node --test test/*.test.mjs`: 215 tests, 215 pass, 0 fail, exit 0.
+- `engine/test-herdr-monitor.sh`: 70 `ok`, 0 `not ok`, exit 0.
+
+One earlier full-suite run against an intermediate working-tree state failed on
+`reused tab cosmetics validate the new session, not the old generation`:
+
+```
+Engine failed (1); inspect before retrying. jq: error (at .../axi-….json:1):
+worker native identity unavailable or changed
+```
+
+That state predates three lines the commit adds to the test, which populate
+`native_identity.session` in the registry before the tab is reused. The fixture change
+is legitimate: on a real reuse, `herdr-worker.sh:109` captures the identity and
+`:151-157` republishes it, so the registry does carry a session. Worth noting anyway,
+because the one observed failure of this change was exactly the error that finding 3
+above turns from retryable into fatal.
+
+## Verdict
+
+Nothing blocking remains. Round 1's findings 2, 3, 4, 5, 6 and 10 are fixed outright;
+finding 1 is fixed in its confirmed half and mitigated in its unverified half by a
+mechanism that does not depend on the unverified premise. The nine items above are
+cleanup, hardening and documentation, none of which should hold a merge.
+
+## Pre-release disposition — 2026-09-13
+
+The sections above record the earlier reviewed snapshots; their test counts and
+open live-test gate are historical, not the current release disposition.
+
+The missing successful core-provider E2E was subsequently completed with Codex,
+model `gpt-5.6-sol`, on 2026-09-12. Saved run `f28b0409` started at
+17:23:48 UTC and finished at 17:35:51 UTC. Task `codex-bootstrap-smoke` reached
+`accepted`; its native session was `01a096ab-0111-7263-ae78-bc6c082f63ac`, its
+bootstrap state was `settled`, and its worker was recorded closed. The retained
+compressed detail contains the independently checked README result
+`HERDR_AXI_REVIEW_OK` and matching generation-bound completion evidence. Both the
+compact run record and compressed detail were inspected again during this
+pre-release review; raw runtime records remain outside Git.
+
+This closes the earlier requirement for one successful Codex/Cursor lifecycle.
+It does **not** verify every integration or replace native trust/permission
+authorization. The live run preceded the subsequent mechanical cleanup; no new
+live fleet operations were performed for the 2026-09-13 pre-commit review.
+
+The nine round-2 code/documentation findings have been addressed: own-property
+integration lookup, typed engine errors, bounded transient identity retries,
+strict submitted-worker identity, shared configurable provider defaults,
+consistent unavailable-role reporting and documented startup gates. Runtime
+responsibilities and test fixtures are now separated, with the original test
+scenarios preserved and additional startup, lock and PATH regressions.
+
+Fresh pre-commit verification on 2026-09-13: `npm run test:all` passed all 285
+Node tests and 83 shell scenarios, exit 0. The package dry-run contained 48
+entries, including the extracted runtime modules and excluding tests/review
+artifacts. Independent code, packaging and evidence review found no remaining
+code blocker.
+
+Remaining release preparation is procedural: promote supported files to `main`
+without the dev-only live-test/figure-source artifacts carried by this branch;
+repair the stale registration for the missing `main` worktree; and choose a new
+version/tag, updating both package manifests. No push, tag or package publication
+is implied by this review. The upstream non-atomic identity-check-and-tab-close
+limitation remains documented and is not claimed solved.

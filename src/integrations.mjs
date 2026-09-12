@@ -5,10 +5,10 @@ export const CORE_INTEGRATIONS = Object.freeze({
   cursor: { mode: "auto-review", model: true, effort: "model" },
 });
 
-export const integrationName = (kind) => kind === "agy" ? "antigravity-cli" : kind;
 export const integrationKind = (name) => name === "antigravity-cli" ? "agy" : name;
 export const isIntegrationKind = (kind) => typeof kind === "string" && /^[a-z][a-z0-9-]{0,39}$/.test(kind);
-export const integrationPolicy = (kind) => CORE_INTEGRATIONS[kind] ?? (isIntegrationKind(kind) ? { mode: "native", model: false, effort: false } : null);
+export const isCoreIntegration = (kind) => Object.hasOwn(CORE_INTEGRATIONS, kind);
+export const integrationPolicy = (kind) => isCoreIntegration(kind) ? CORE_INTEGRATIONS[kind] : (isIntegrationKind(kind) ? { mode: "native", model: false, effort: false } : null);
 
 export function parseIntegrationStatus(text) {
   const records = new Map();

@@ -220,8 +220,7 @@ herdr-axi run queue parser --role implementer \
 ## Verify
 
 ```sh
-npm test
-bash engine/test-herdr-monitor.sh
+npm run test:all
 ```
 
 - Isolated fake backends; never drive the live fleet; process-identity tests need `ps`.

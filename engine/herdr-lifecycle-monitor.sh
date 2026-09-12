@@ -66,7 +66,7 @@ record_monitor_owner() {
     return 0
   fi
   [[ -z "$temporary" ]] || rm -f "$temporary"
-  printf '%s\n' "MONITOR_START_UNVERIFIED: cannot publish live monitor identity for $agent_name; no ready acknowledgement. Inspect process visibility and receipt permissions; cancel the owned task before replacement, do not resend its prompt." >&2
+  herdr_engine_error MONITOR_START_UNVERIFIED "cannot publish live monitor identity for $agent_name; no ready acknowledgement. Inspect process visibility and receipt permissions; cancel the owned task before replacement, do not resend its prompt."
   return 1
 }
 
@@ -379,7 +379,7 @@ while true; do
   if [[ -n "${HERDR_MONITOR_READY:-}" ]]; then
     printf 'herdr-monitor-ready:%s\n' "$HERDR_MONITOR_READY"
     if ! herdr_monitor_ready_publish "$receipt_file" "$HERDR_MONITOR_READY"; then
-      printf '%s\n' "MONITOR_START_UNVERIFIED: cannot publish the ready marker for $agent_name; no ready acknowledgement" >&2
+      herdr_engine_error MONITOR_START_UNVERIFIED "cannot publish the ready marker for $agent_name; no ready acknowledgement"
       exit 1
     fi
     unset HERDR_MONITOR_READY

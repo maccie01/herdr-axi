@@ -14,6 +14,10 @@ for dependency in "${HERDR_BIN:-herdr}" jq uuidgen rg awk find mktemp stat ps da
 done
 
 export HERDR_AXI_NODE="$(command -v "${HERDR_AXI_NODE:-node}")"
+# Direct shell callers need the same stable home across the new worker cwd.
+if [[ -n "${CODEX_HOME:-}" && "$CODEX_HOME" != /* ]]; then
+  export CODEX_HOME="$(pwd -P)/$CODEX_HOME"
+fi
 herdr_bin=$(type -P "${HERDR_BIN:-herdr}")
 export HERDR_BIN="$(cd -- "$(dirname -- "$herdr_bin")" && pwd)/${herdr_bin##*/}"
 
@@ -36,6 +40,8 @@ resume=false
 script_dir=$(cd -- "$(dirname -- "$0")" && pwd)
 # shellcheck source=herdr-receipt.sh
 source "$script_dir/herdr-receipt.sh"
+source "$script_dir/herdr-codex-bootstrap.sh"
+source "$script_dir/herdr-engine-config.sh"
 
 while (( $# > 0 )); do
   case "$1" in
@@ -57,26 +63,15 @@ done
 [[ -n "$name" && -n "$kind" && -n "$worker_cwd" && -n "$prompt_file" ]] || usage
 [[ -n "$orchestrator_agent" ]] || usage
 [[ -d "$worker_cwd" && -r "$prompt_file" ]] || usage
-if [[ -z "$effort" ]]; then
-  if [[ "$kind" == "cursor" ]]; then effort=model
-  elif [[ "$kind" == "copilot" || "$kind" == "claude" || "$kind" == "codex" ]]; then effort=high
-  fi
-fi
 [[ "$max_autopilot_continues" =~ ^[0-9]+$ && "$max_autopilot_continues" -gt 0 ]] || usage
 [[ -n "$label" ]] || label="$name"
+herdr_startup_config || exit 2
 
 if ! herdr_receipt_resolve "$name" "$workspace_id" "$orchestrator_agent"; then
   printf '%s\n' "herdr-worker: workspace could not be resolved: $name" >&2
   exit 1
 fi
 workspace_id="$HERDR_RECEIPT_WORKSPACE_ID"
-
-if [[ -z "$model" ]]; then
-  case "$kind" in
-    copilot|codex) model="gpt-5.6-sol" ;;
-    claude) model="opus" ;;
-  esac
-fi
 
 integration_status=$(herdr integration status) || {
   printf '%s\n' "herdr-worker: could not read installed Herdr integrations" >&2
@@ -86,10 +81,13 @@ printf '%s\n' "$integration_status" | "$HERDR_AXI_NODE" "$script_dir/../src/laun
 launch_args=(--kind "$kind")
 [[ -z "$model" ]] || launch_args+=(--model "$model")
 [[ -z "$effort" ]] || launch_args+=(--effort "$effort")
-"$HERDR_AXI_NODE" "$script_dir/../src/launch-policy.mjs" "${launch_args[@]}" >/dev/null
+launch_policy=$("$HERDR_AXI_NODE" "$script_dir/../src/launch-policy.mjs" --resolve "${launch_args[@]}")
+model=$(jq -r '.model // empty' <<<"$launch_policy")
+effort=$(jq -r '.effort // empty' <<<"$launch_policy")
 
 receipt_dir="$HERDR_RECEIPT_REGISTRY_DIR"
 receipt_file="$HERDR_RECEIPT_FILE"
+bootstrap=null
 
 if [[ "$resume" == "true" ]]; then
   registered="$receipt_dir/$name.json"
@@ -98,18 +96,23 @@ if [[ "$resume" == "true" ]]; then
   tab_id=$(jq -r '.tab_id' "$registered")
   [[ "$(jq -r '.stage' "$registered")" == "created" ]] || exit 1
   if [[ "$(jq -r '.monitor_pane // empty' "$registered")" != "" ]]; then
-    printf '%s\n' 'MONITOR_START_UNVERIFIED: existing monitor startup requires explicit cancellation; refusing a duplicate monitor' >&2
+    herdr_engine_error MONITOR_START_UNVERIFIED 'existing monitor startup requires explicit cancellation; refusing a duplicate monitor' false
     exit 1
   fi
   info=$(herdr agent get "$agent_pane")
   jq -e --arg pane "$agent_pane" --arg tab "$tab_id" --arg ws "$workspace_id" \
     --arg name "$name" --arg kind "$kind" \
-    '.result.agent | .pane_id == $pane and .tab_id == $tab and .workspace_id == $ws and .name == $name and .agent == $kind and (.agent_status == "idle" or .agent_status == "done")' <<<"$info" >/dev/null || exit 1
+    --slurpfile registry "$registered" \
+    '.result.agent | .pane_id == $pane and .tab_id == $tab and .workspace_id == $ws and .name == $name and .agent == $kind and
+      (.agent_status == "idle" or .agent_status == "done" or $registry[0].bootstrap != null)' <<<"$info" >/dev/null || exit 1
   herdr_registry_capture_identity "$registered" || exit 1
   native_identity=$(jq -c '.native_identity' "$registered")
   previous_generation=$(jq -r '.generation' "$registered")
+  bootstrap=$(jq -c '.bootstrap // null' "$registered")
   cleanup_created_tab=false
 else
+  codex_home_args=()
+  [[ -z "${CODEX_HOME:-}" ]] || codex_home_args=(--env "CODEX_HOME=$CODEX_HOME")
   tab_json=$(herdr tab create \
   --workspace "$workspace_id" \
   --cwd "$worker_cwd" \
@@ -124,6 +127,8 @@ else
   --env "HERDR_MONITOR_INBOX=${HERDR_MONITOR_INBOX:-0}" \
   --env "HERDR_AXI_RUN=" \
   --env "HERDR_AXI_WORKER=1" \
+  --env "CODEX_THREAD_ID=" \
+  ${codex_home_args[@]+"${codex_home_args[@]}"} \
   --env DISABLE_AUTO_UPDATE=true \
   --env "HERDR_AXI_BIN=$script_dir/../bin/herdr-axi.mjs" \
   --env "HERDR_AXI_NODE=$HERDR_AXI_NODE" \
@@ -145,16 +150,22 @@ trap cleanup_on_exit EXIT
 
 monitor_pane=""
 monitoring_mode="herdr-integration+event-wait+proof"
-completion_generation=$(herdr_new_generation)
+if [[ "$resume" == true && "$bootstrap" != null ]]; then
+  completion_generation="$previous_generation"
+else
+  completion_generation=$(herdr_new_generation)
+fi
 completion_task=""
 
 # Record returned topology immediately, even when agent startup later fails.
+if [[ "$resume" != true || "$bootstrap" == null ]]; then
 registry_tmp=$(mktemp "$receipt_dir/$name.json.tmp.XXXXXXXX")
 jq -nc --arg name "$name" --arg workspace_id "$workspace_id" \
   --arg tab_id "$tab_id" --arg agent_pane "$agent_pane" \
   --arg receipt_file "$receipt_file" --arg generation "$completion_generation" \
-  --arg previous_generation "$previous_generation" --argjson native_identity "$native_identity" \
-  '{name:$name,workspace_id:$workspace_id,tab_id:$tab_id,agent_pane:$agent_pane,monitor_pane:null,receipt_file:$receipt_file,generation:$generation,previous_generation:$previous_generation,native_identity:$native_identity,stage:"created"}' > "$registry_tmp"
+  --arg previous_generation "$previous_generation" --argjson native_identity "$native_identity" --argjson bootstrap "$bootstrap" \
+  '{name:$name,workspace_id:$workspace_id,tab_id:$tab_id,agent_pane:$agent_pane,monitor_pane:null,receipt_file:$receipt_file,generation:$generation,previous_generation:$previous_generation,native_identity:$native_identity,stage:"created"} +
+   (if $bootstrap == null then {} else {bootstrap:$bootstrap} end)' > "$registry_tmp"
 mv -f "$registry_tmp" "$receipt_dir/$name.json"
 
 # Native startup can emit an input hook before agent start returns (trust or
@@ -163,6 +174,7 @@ herdr_receipt_rearm "$receipt_file" worker-start "$completion_generation" || {
   printf '%s\n' "herdr-worker: could not rearm lifecycle receipt: $name" >&2
   exit 1
 }
+fi
 
 native_args=()
 case "$kind" in
@@ -208,7 +220,7 @@ case "$kind" in
 esac
 
 start_json=""
-pane_ready_deadline=$(($(date +%s) + ${HERDR_START_READY_TIMEOUT_SECONDS:-12}))
+pane_ready_deadline=$(($(date +%s) + start_ready_timeout_seconds))
 while [[ "$resume" != "true" ]]; do
   if start_json=$(herdr agent start "$name" \
     --kind "$kind" \
@@ -222,6 +234,9 @@ while [[ "$resume" != "true" ]]; do
     if jq -e '.error.code == "agent_not_ready"' <<<"$start_json" >/dev/null; then
       cleanup_created_tab=false
       herdr_registry_capture_identity "$receipt_dir/$name.json" true || true
+      herdr_engine_error STARTUP_BLOCKED "Herdr rejected native startup as agent_not_ready; inspect the owned startup dialog before recovery" false
+    else
+      herdr_engine_error STARTUP_UNVERIFIED "Herdr did not acknowledge native startup; task not submitted" false
     fi
     printf '%s\n' "$start_json" >&2
     exit 1
@@ -231,42 +246,17 @@ while [[ "$resume" != "true" ]]; do
   sleep 0.25
 done
 
-# Preserve a started agent if identity capture fails; never destroy a possible
-# replacement based only on an old pane ID. Recovery stays fail-closed.
-if ! herdr_registry_capture_identity "$receipt_dir/$name.json" true; then
-  cleanup_created_tab=false
-  exit 1
-fi
-
 # Herdr integrations use the native session as the replacement-stable identity.
 # A terminal alone cannot prove that startup has reached the intended agent, and
 # unrelated startup activity can otherwise satisfy a later prompt wait. Allow a
 # short reporting delay, then fail closed before creating a monitor or sending
 # task text.
-session_ready_timeout_seconds="${HERDR_SESSION_READY_TIMEOUT_SECONDS:-10}"
-if [[ ! "$session_ready_timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
-  printf '%s\n' "herdr-worker: HERDR_SESSION_READY_TIMEOUT_SECONDS must be a positive integer" >&2
-  exit 2
+# Once started, preserve the tab even if observation fails or finds a replacement.
+cleanup_created_tab=false
+if [[ "$kind" == codex ]]; then
+  herdr_codex_bootstrap "$receipt_dir/$name.json" "$bootstrap_timeout_seconds" || exit 1
 fi
-session_ready_limit=$((session_ready_timeout_seconds * 4))
-session_ready=false
-for ((session_ready_tick = 0; session_ready_tick < session_ready_limit; session_ready_tick++)); do
-  if jq -e '.native_identity.session | type == "string" and length > 0' "$receipt_dir/$name.json" >/dev/null; then
-    session_ready=true
-    break
-  fi
-  sleep 0.25
-  if ! herdr_registry_capture_identity "$receipt_dir/$name.json" true; then
-    cleanup_created_tab=false
-    exit 1
-  fi
-done
-if jq -e '.native_identity.session | type == "string" and length > 0' "$receipt_dir/$name.json" >/dev/null; then
-  session_ready=true
-fi
-if [[ "$session_ready" != true ]]; then
-  cleanup_created_tab=false
-  printf '%s\n' "SESSION_START_UNVERIFIED: Herdr did not report a native session for $name; task not submitted. Inspect startup and cancel or recover after the integration reports a session." >&2
+if ! herdr_registry_wait_session "$receipt_dir/$name.json" "$session_ready_timeout_seconds"; then
   exit 1
 fi
 
@@ -281,12 +271,19 @@ if [[ "$kind" == "claude" ]]; then
       cleanup_created_tab=false
       exit 1
     fi
+    # A failed observation can recover. Keep its frame private so it cannot
+    # mislabel a later post-submission failure as an unsubmitted assignment.
+    mode_protocol=$(mktemp "$receipt_dir/$name.mode.XXXXXXXX")
     if mode_error=$(printf '%s\n' "$mode_screen" |
-      "$HERDR_AXI_NODE" "$script_dir/../src/launch-policy.mjs" --check-screen 2>&1); then
+      HERDR_AXI_ENGINE_PROTOCOL=1 "$HERDR_AXI_NODE" "$script_dir/../src/launch-policy.mjs" --check-screen 3> "$mode_protocol" 2>&1); then
+      rm -f "$mode_protocol"
       break
     fi
-    if [[ "$mode_error" != AUTO_MODE_UNVERIFIED:* || "$mode_attempt" == 5 ]]; then
-      printf '%s\n' "$mode_error" >&2
+    mode_code=$(jq -r 'select(.schema == 1) | .code' "$mode_protocol" 2>/dev/null || true)
+    mode_message=$(jq -r 'select(.schema == 1) | .message' "$mode_protocol" 2>/dev/null || true)
+    rm -f "$mode_protocol"
+    if [[ "$mode_code" != AUTO_MODE_UNVERIFIED || "$mode_attempt" == 5 ]]; then
+      herdr_engine_error "${mode_code:-AUTO_MODE_UNVERIFIED}" "${mode_message:-$mode_error}" false
       cleanup_created_tab=false
       exit 1
     fi
@@ -301,11 +298,6 @@ fi
 completion_task=$(herdr_append_completion_instruction \
   "$task" "$receipt_file" "$completion_generation")
 
-monitor_ready_timeout_seconds="${HERDR_MONITOR_READY_TIMEOUT_SECONDS:-10}"
-if [[ ! "$monitor_ready_timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
-  printf '%s\n' "herdr-worker: HERDR_MONITOR_READY_TIMEOUT_SECONDS must be a positive integer" >&2
-  exit 2
-fi
 monitor_ready_limit=$((monitor_ready_timeout_seconds * 10))
 
 monitor_json=$(herdr pane split \
@@ -328,11 +320,12 @@ jq --arg monitor_pane "$monitor_pane" '.monitor_pane=$monitor_pane' \
 mv -f "$registry_tmp" "$receipt_dir/$name.json"
 cleanup_created_tab=false
 # Split panes inherit the server environment, not necessarily the worker tab's
-# custom variables. Pin delivery mode and receipt routing for both live and lost
+# custom variables. Pin transcript home, delivery mode and receipt routing for both live and lost
 # workers; a lost agent cannot supply its workspace through backend metadata.
-printf -v monitor_command '%q %q %q %q %q %q %q %q %q %q %q %q %q' \
+printf -v monitor_command '%q %q %q %q %q %q %q %q %q %q %q %q %q %q' \
   env "HERDR_AXI_NODE=$HERDR_AXI_NODE" "HERDR_MONITOR_INBOX=${HERDR_MONITOR_INBOX:-0}" \
   "HERDR_BIN=$HERDR_BIN" \
+  "CODEX_HOME=${CODEX_HOME:-${HOME}/.codex}" \
   "HERDR_MONITOR_READY=$completion_generation" \
   "HERDR_RECEIPT_ROOT=$HERDR_RECEIPT_ROOT_DIR" "HERDR_WORKSPACE_ID=$workspace_id" \
   "$script_dir/herdr-lifecycle-monitor.sh" \
@@ -362,7 +355,7 @@ while (( monitor_ready_ticks < monitor_ready_limit )); do
 done
 if [[ "$monitor_ready_verified" != "true" ]]; then
   rm -f "$monitor_ready_file"
-  printf '%s\n' "MONITOR_START_UNVERIFIED: monitor $monitor_pane did not acknowledge startup; task not submitted. Inspect startup and cancel this owned task; no automatic keys or duplicate monitor." >&2
+  herdr_engine_error MONITOR_START_UNVERIFIED "monitor $monitor_pane did not acknowledge startup; task not submitted. Inspect startup and cancel this owned task; no automatic keys or duplicate monitor." false
   exit 1
 fi
 
@@ -410,4 +403,4 @@ jq -n \
   --arg generation "$completion_generation" \
   --arg monitoring_mode "$monitoring_mode" \
   --slurpfile registry "$receipt_dir/$name.json" \
-  '{name:$name,kind:$kind,model:$model,permission_mode:$permission_mode,permission_mode_verified:$permission_mode_verified,workspace_id:$workspace_id,tab_id:$tab_id,agent_pane:$agent_pane,monitor_pane:($monitor_pane | if . == "" then null else . end),receipt_file:$receipt_file,generation:$generation,monitoring:$monitoring_mode,stage:"submitted"} + ($registry[0] | {native_identity,previous_generation})'
+  '{name:$name,kind:$kind,model:$model,permission_mode:$permission_mode,permission_mode_verified:$permission_mode_verified,workspace_id:$workspace_id,tab_id:$tab_id,agent_pane:$agent_pane,monitor_pane:($monitor_pane | if . == "" then null else . end),receipt_file:$receipt_file,generation:$generation,monitoring:$monitoring_mode,stage:"submitted"} + ($registry[0] | {native_identity,previous_generation} + (if .bootstrap == null then {} else {bootstrap} end))'

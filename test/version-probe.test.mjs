@@ -7,78 +7,10 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-const self = fileURLToPath(import.meta.url);
+const self = fileURLToPath(new URL("./fixtures/version-probe-herdr.mjs", import.meta.url));
 const cli = fileURLToPath(new URL("../bin/herdr-axi.mjs", import.meta.url));
 const pane = "w1:pPROBE";
 
-// This file doubles as an isolated HERDR_BIN. Its strict routing makes the
-// test fail if the adapter invents a command such as `herdr server status`.
-// Dual role: with arguments this file is the fake herdr on the fixture PATH,
-// without them it is the test suite (node --test passes no extra argv).
-// Never fall through to the suite on an unknown verb. That is what happened on
-// 12.09.2026: `run init` probes `herdr status --json`, the fake did not know
-// `status`, re-ran the suite, and each suite opened a new run. 4148 node
-// processes in 39 s, machine dead. Unknown verb must exit non-zero, loudly.
-if (process.argv.length > 2) {
-  const [action, sub, ...args] = process.argv.slice(2);
-  if (!["status", "agent", "integration"].includes(action)) {
-    console.error(JSON.stringify({ error: { code: "unsupported", message: `fake herdr (${process.argv[1].split("/").pop()}): unhandled command ${process.argv.slice(2).join(" ")}` } }));
-    process.exit(2);
-  }
-
-  if (action === "integration") {
-    assert.equal(sub, "status");
-    if (process.env.AXI_FAKE_NO_INTEGRATIONS === "true") console.log("codex: not installed (/fixture)");
-    else {
-      const kind = process.env.AXI_FAKE_INTEGRATION_KIND ?? "codex";
-      console.log(`${kind}: current (v8) (/fixture)`);
-    }
-  } else if (action === "status") {
-    assert.equal(sub, "--json");
-    if (process.env.AXI_FAKE_STATUS === "exit-1") process.exit(1);
-    const clientGeneration = Number(process.env.AXI_FAKE_CLIENT_GEN ?? "1");
-    const serverGeneration = Number(process.env.AXI_FAKE_SERVER_GEN ?? "1");
-    const serverRunning = process.env.AXI_FAKE_SERVER_RUNNING !== "false";
-    const protocolCompatible = process.env.AXI_FAKE_PROTOCOL_COMPATIBLE !== "false";
-    const endpointCompatible = process.env.AXI_FAKE_ENDPOINT_COMPATIBLE === undefined
-      ? clientGeneration === serverGeneration
-      : process.env.AXI_FAKE_ENDPOINT_COMPATIBLE !== "false";
-    console.log(JSON.stringify({
-      client: {
-        version: process.env.AXI_FAKE_CLIENT_VERSION,
-        protocol: 22,
-        endpoint_protocol_generation: clientGeneration,
-      },
-      server: {
-        status: serverRunning ? "running" : "not_running",
-        running: serverRunning,
-        version: serverRunning ? process.env.AXI_FAKE_SERVER_VERSION : null,
-        protocol: serverRunning ? 22 : null,
-        capabilities: serverRunning ? {
-          endpoint_protocol_generation: serverGeneration,
-          live_handoff: true,
-          surface_interest: true,
-          health_check: true,
-        } : null,
-        compatible: serverRunning ? protocolCompatible : null,
-        endpoint_compatible: serverRunning ? endpointCompatible : null,
-        server_binary_stale: process.env.AXI_FAKE_SERVER_STALE === "true",
-        socket: process.env.AXI_FAKE_SOCKET ?? "/tmp/herdr-test.sock",
-      },
-      update: {
-        restart_needed: !endpointCompatible,
-        server_binary_stale: process.env.AXI_FAKE_SERVER_STALE === "true",
-      },
-    }));
-  } else {
-    assert.equal(sub, "get");
-    console.log(JSON.stringify({ id: "cli:test", result: { agent: {
-      pane_id: args[0], tab_id: "w1:tPROBE", workspace_id: "w1", terminal_id: "term-probe",
-      agent_session: { value: "sess-probe" }, agent: "codex", agent_status: "idle",
-    } } }));
-  }
-  process.exit(0);
-}
 
 process.env.HERDR_BIN = self;
 const { herdrVersionProbe } = await import("../src/herdr.mjs");
@@ -205,7 +137,8 @@ test("init accepts a matched future endpoint generation without claiming a depen
     assert.equal(herdr.endpointProtocolGeneration, 2);
     assert.equal(herdr.serverEndpointProtocolGeneration, 2);
     assert.equal(herdr.endpointCompatible, true);
-    assert.doesNotMatch(output, /warning/);
+    assert.doesNotMatch(output, /Herdr endpoint generations|UI\/SSH compatibility/);
+    assert.match(output, /unavailableRoles/);
   } finally { cleanup(); }
 });
 

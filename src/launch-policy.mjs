@@ -1,13 +1,20 @@
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
-import { CORE_INTEGRATIONS, installedIntegrationKinds, integrationPolicy, parseIntegrationStatus } from "./integrations.mjs";
+import { installedIntegrationKinds, integrationPolicy, parseIntegrationStatus } from "./integrations.mjs";
+
+export const PROVIDER_DEFAULTS = Object.freeze({
+  claude: Object.freeze({ model: "opus", effort: "high" }),
+  codex: Object.freeze({ model: "gpt-5.6-sol", effort: "high" }),
+  copilot: Object.freeze({ model: "gpt-5.6-sol", effort: "high" }),
+  cursor: Object.freeze({ effort: "model" }),
+});
 
 export const launchMode = (kind) => integrationPolicy(kind)?.mode ?? "native";
 const invalid = (message, code = "LAUNCH_POLICY") => Object.assign(new Error(message), { code });
 
 // Validate before allocating a tab; availability/account policy still belongs
 // to the native CLI. Never substitute a cheaper model or bypass permissions.
-export function validateLaunch({ kind, model, effort = kind === "cursor" ? "model" : CORE_INTEGRATIONS[kind] ? "high" : undefined }) {
+export function validateLaunch({ kind, model, effort = Object.hasOwn(PROVIDER_DEFAULTS, kind) ? PROVIDER_DEFAULTS[kind].effort : undefined }) {
   const policy = integrationPolicy(kind);
   if (!policy) throw invalid("Choose a worker kind backed by a Herdr integration");
   if (!policy.model) {
@@ -31,6 +38,11 @@ export function validateLaunch({ kind, model, effort = kind === "cursor" ? "mode
   return { kind, model, effort, mode: launchMode(kind) };
 }
 
+export function resolveLaunch(options) {
+  const defaults = Object.hasOwn(PROVIDER_DEFAULTS, options.kind) ? PROVIDER_DEFAULTS[options.kind] : {};
+  return validateLaunch({ ...options, model: options.model === undefined ? defaults.model : options.model, effort: options.effort === undefined ? defaults.effort : options.effort });
+}
+
 export function checkLaunchScreen(text) {
   const lines = text.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[()][0-2A-Z]/g, "").split("\n");
   const modes = lines.map((line) => line.match(/^[\s│┃]*(?:[⏵▶►▸»>⏸]{1,2}\s+)?(auto mode|manual mode|plan mode|accept edits|bypass permissions|don't ask) on\b/i)?.[1]?.toLowerCase()).filter(Boolean);
@@ -50,12 +62,22 @@ if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import
       console.log(JSON.stringify({ kind, integration: "installed" }));
     }
     else {
+      const resolve = args[0] === "--resolve";
+      if (resolve) args.shift();
       const options = {};
       for (let i = 0; i < args.length; i += 2) {
         if (!["--kind", "--model", "--effort"].includes(args[i]) || !args[i + 1] || Object.hasOwn(options, args[i].slice(2))) throw invalid("Expected --kind KIND [--model MODEL --effort LEVEL]");
         options[args[i].slice(2)] = args[i + 1];
       }
-      console.log(JSON.stringify(validateLaunch(options)));
+      console.log(JSON.stringify(resolve ? resolveLaunch(options) : validateLaunch(options)));
     }
-  } catch (e) { console.error(`${e.code}: ${e.message}`); process.exitCode = 1; }
+  } catch (e) {
+    if (process.env.HERDR_AXI_ENGINE_PROTOCOL === "1") {
+      const frame = { schema: 1, code: e.code ?? "LAUNCH_POLICY", message: e.message.slice(0, 4096), submitted: false };
+      try { fs.writeSync(3, JSON.stringify(frame) + "\n"); }
+      catch { /* Standalone invocations may have no engine descriptor. */ }
+    }
+    console.error(`${e.code}: ${e.message}`);
+    process.exitCode = 1;
+  }
 }

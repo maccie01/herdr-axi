@@ -8,7 +8,7 @@ if [[ "${HERDR_MONITOR_RENDER_ONLY:-}" != "1" && -z "${HERDR_MONITOR_ORCHESTRATO
   exit 0
 fi
 
-for dependency in "${HERDR_BIN:-herdr}" jq awk tail head find mktemp cksum dirname sleep ln stat ps wc; do
+for dependency in "${HERDR_BIN:-herdr}" jq awk tail head find mktemp cksum dirname sleep ln stat ps wc cut; do
   command -v "$dependency" >/dev/null || exit 0
 done
 
@@ -80,7 +80,7 @@ live_status=""
 metadata=""
 
 resolve_native_transcript() {
-  local explicit_path expected_path agent_kind
+  local explicit_path agent_kind
   metadata=$(herdr agent get "$agent_name" 2>/dev/null || true)
   transcript_session=$(printf '%s\n' "$metadata" |
     jq -r '.result.agent.agent_session.value // empty' 2>/dev/null || true)
@@ -103,31 +103,9 @@ resolve_native_transcript() {
   fi
   explicit_path=$(payload_value '.transcriptPath // .transcript_path')
 
-  if [[ -n "$explicit_path" ]]; then
-    case "$explicit_path" in
-      "${HOME}"/.copilot/session-state/*/events.jsonl) transcript_backend=copilot ;;
-      "${HOME}"/.claude/projects/*.jsonl) transcript_backend=claude ;;
-      "${HOME}"/.codex/sessions/*.jsonl) transcript_backend=codex ;;
-      *) transcript_backend="" ;;
-    esac
-    if [[ -n "$transcript_backend" ]]; then
-      if [[ "$transcript_backend" == "copilot" && -n "$transcript_session" ]]; then
-        expected_path="${HOME}/.copilot/session-state/${transcript_session}/events.jsonl"
-        if [[ "$explicit_path" != "$expected_path" ]]; then
-          transcript_path="$explicit_path"
-          transcript_resolution=stale
-          return 0
-        fi
-      fi
-      if [[ -r "$explicit_path" ]]; then
-        transcript_path="$explicit_path"
-        transcript_resolution=resolved
-        return 0
-      fi
-    fi
-  fi
-
-  [[ -n "$transcript_session" ]] || return 0
+  # Paths are derived from the observed native session. A readable provider
+  # directory is not evidence that a supplied path belongs to this assignment.
+  [[ "$transcript_session" =~ ^[a-zA-Z0-9_-]+$ ]] || return 0
   case "$agent_kind" in
     copilot)
       transcript_backend=copilot
@@ -140,11 +118,16 @@ resolve_native_transcript() {
       ;;
     codex)
       transcript_backend=codex
-      transcript_path=$(find "${HOME}/.codex/sessions" -type f \
-        -name "*${transcript_session}.jsonl" -print -quit 2>/dev/null || true)
+      transcript_path=$(find "${CODEX_HOME:-${HOME}/.codex}/sessions" -type f \
+        -name "*-${transcript_session}.jsonl" -print -quit 2>/dev/null || true)
       ;;
     *) transcript_backend="" ;;
   esac
+  if [[ -n "$explicit_path" && "$explicit_path" != "$transcript_path" ]]; then
+    transcript_path=""
+    transcript_resolution=stale
+    return 0
+  fi
   if [[ -n "$transcript_path" && -r "$transcript_path" ]]; then
     transcript_resolution=resolved
   else
@@ -194,6 +177,47 @@ native_transcript_tail() {
   esac
 }
 
+# Managed reports must come from the assignment containing this generation's
+# proof instruction. Streaming inputs retain only the current turn and bounded
+# report text, even when thousands of tool events separate prompt and result.
+native_assignment_report() {
+  local backend="$1" path="$2" generation="$3"
+  [[ -r "$path" && -n "$generation" ]] || return 1
+  jq -nc --arg backend "$backend" --arg marker ".proof.$generation" '
+    def text_content:
+      if type == "string" then .
+      elif type == "array" then [.[] | select(.type == "text" or .type == "input_text" or .type == "output_text") | .text // ""] |
+        if length > 0 then join("\n") else null end
+      else null end;
+    def user_text:
+      if $backend == "copilot" and .type == "user.message" then .data.content | text_content
+      elif $backend == "claude" and .type == "user" then .message.content | text_content
+      elif $backend == "codex" and .type == "event_msg" and .payload.type == "user_message" then .payload.message | text_content
+      elif $backend == "codex" and .type == "response_item" and .payload.type == "message" and .payload.role == "user" then .payload.content | text_content
+      else null end;
+    def assistant_text:
+      if $backend == "copilot" and .type == "assistant.message" then .data.content
+      elif $backend == "copilot" and .type == "session.task_complete" then .data.summary
+      elif $backend == "claude" and .type == "assistant" and .message.role == "assistant" then .message.content | text_content
+      elif $backend == "codex" and .type == "response_item" and .payload.type == "message" and .payload.role == "assistant" then
+        [.payload.content[]? | .text // ""] | join("\n")
+      else null end;
+    reduce inputs as $event ({bound:false,last:"",report:"",complete:false};
+      ($event | user_text) as $user |
+      if $user != null then {bound:($user | contains($marker)),last:"",report:"",complete:false}
+      elif .bound then
+        ($event | assistant_text) as $text |
+        (if ($text | type) == "string" and ($text | length) > 0 then
+          .last = $text[0:3501] |
+          if $backend == "claude" and ($text | test("(?m)^\\s*task:")) then .report = $text[0:3501] else . end
+        else . end) |
+        if $backend != "copilot" or $event.type == "session.task_complete" then .complete=true else . end
+      else . end) |
+    {valid:(.bound and .complete and (.last | length > 0)),
+     detail:(if .report != "" then .report else .last end)}
+  ' "$path"
+}
+
 copilot_task_complete() {
   local path="$1"
   local last_event
@@ -225,6 +249,20 @@ completion_ordinal() {
 }
 
 resolve_native_transcript
+receipt_file=""
+report_generation=""
+managed_report=false
+if [[ "${HERDR_MONITOR_RENDER_ONLY:-}" != 1 ]]; then
+  if ! herdr_receipt_resolve "$agent_name" "" "$agent_name"; then
+    write_result error workspace-unresolved
+    exit 0
+  fi
+  receipt_file="$HERDR_RECEIPT_FILE"
+  if [[ "${HERDR_MONITOR_INBOX:-0}" == 1 || "${HERDR_AXI_MANAGED_TASK:-0}" == 1 || -e "${receipt_file%.event}.json" ]]; then
+    managed_report=true
+    if [[ -r "$receipt_file" ]]; then report_generation=$(cut -f 10 "$receipt_file" 2>/dev/null || true); fi
+  fi
+fi
 suppression_reason=""
 quota_json=null
 if [[ "$event_kind" != "lost" && "$event_kind" != "input" && "$live_status" != "working" && "${HERDR_MONITOR_INBOX:-0}" == "1" ]]; then
@@ -241,10 +279,20 @@ fi
 # Capture the report before locking; classify quota only after validating the
 # current generation under the receipt lock. A final proof may precede the hook.
 settled_detail=""
+assignment_report_valid=false
 if [[ "$event_kind" == "settled" || "$quota_json" != "null" ]]; then
-  settled_detail=$(payload_value '.last_assistant_message // .lastAssistantMessage // .["last-assistant-message"]')
-  if [[ -z "$settled_detail" ]]; then
-    settled_detail=$(native_transcript_tail "$transcript_backend" "$transcript_path" || true)
+  if [[ "$managed_report" == true ]]; then
+    assignment_report=$(native_assignment_report "$transcript_backend" "$transcript_path" "$report_generation" || true)
+    if jq -e '.valid == true' <<<"$assignment_report" >/dev/null 2>&1; then
+      assignment_report_valid=true
+      settled_detail=$(jq -r '.detail' <<<"$assignment_report")
+    fi
+  else
+    payload_session=$(payload_value '.session_id // .sessionId // .["thread-id"] // .thread_id')
+    if [[ -n "$transcript_session" && "$payload_session" == "$transcript_session" && "$transcript_resolution" != stale ]]; then
+      settled_detail=$(payload_value '.last_assistant_message // .lastAssistantMessage // .["last-assistant-message"]')
+    fi
+    if [[ -z "$settled_detail" ]]; then settled_detail=$(native_transcript_tail "$transcript_backend" "$transcript_path" || true); fi
   fi
 fi
 completion_valid=false
@@ -262,15 +310,12 @@ if [[ "$event_kind" != "settled" && "$transcript_resolution" == "resolved" && "$
   ordinal=$(completion_ordinal "$transcript_backend" "$transcript_path" || true)
 fi
 copilot_complete=false
-if [[ "$transcript_resolution" == "resolved" && "$transcript_backend" == "copilot" ]] && copilot_task_complete "$transcript_path"; then
+if [[ "$managed_report" == true && "$assignment_report_valid" == true ]]; then
+  copilot_complete=true
+elif [[ "$managed_report" != true && "$transcript_resolution" == "resolved" && "$transcript_backend" == "copilot" ]] && copilot_task_complete "$transcript_path"; then
   copilot_complete=true
 fi
 if [[ "${HERDR_MONITOR_RENDER_ONLY:-}" != "1" ]]; then
-  if ! herdr_receipt_resolve "$agent_name" "" "$agent_name"; then
-    write_result error workspace-unresolved
-    exit 0
-  fi
-  receipt_file="$HERDR_RECEIPT_FILE"
   if ! herdr_receipt_lock_acquire "$receipt_file"; then
     write_result error lock-timeout
     exit 0
@@ -293,19 +338,26 @@ if [[ "${HERDR_MONITOR_RENDER_ONLY:-}" != "1" ]]; then
     completion_file=$(herdr_completion_file "$receipt_file" "$receipt_generation" || true)
   fi
   completion_source_valid=false
-  if [[ "$transcript_resolution" == resolved && "$transcript_backend" != cursor ]]; then
+  registry_file="${receipt_file%.event}.json"
+  registered_identity_valid=false
+  if [[ -r "$registry_file" ]]; then
+    if herdr_registry_identity_matches "$registry_file" "$metadata" "$receipt_generation"; then
+      registered_identity_valid=true
+    fi
+  elif [[ ! -e "$registry_file" && "${HERDR_MONITOR_INBOX:-0}" != 1 &&
+    "${HERDR_AXI_MANAGED_TASK:-0}" != 1 &&
+    ( "$transcript_backend" == claude || "$transcript_backend" == codex || "$transcript_backend" == copilot ) ]]; then
+    # Standalone legacy hooks have no managed registry. Managed inbox results
+    # always require the durable registered identity, including core providers.
+    registered_identity_valid=true
+  fi
+  if [[ "$registered_identity_valid" == true && "$transcript_resolution" == resolved && "$transcript_backend" != cursor &&
+    ( "$managed_report" != true || ( "$assignment_report_valid" == true && "$report_generation" == "$receipt_generation" ) ) ]]; then
     completion_source_valid=true
-  elif [[ ( "$transcript_backend" == cursor || "$transcript_backend" == integration ) &&
+  elif [[ "$registered_identity_valid" == true && ( "$transcript_backend" == cursor || "$transcript_backend" == integration ) &&
     ( "$live_status" == idle || "$live_status" == done ) ]]; then
     # No visible-output fallback may authorize a replacement occupant or a new task.
-    if jq -e --argjson metadata "$metadata" --arg generation "$receipt_generation" \
-      '($metadata.result.agent) as $a | .generation == $generation and
-       .name == $a.name and .agent_pane == $a.pane_id and .tab_id == $a.tab_id and
-       .workspace_id == $a.workspace_id and .native_identity.terminal != null and
-       .native_identity.terminal == $a.terminal_id and
-       .native_identity.session != null and
-       .native_identity.session == $a.agent_session.value' \
-      "${receipt_file%.event}.json" >/dev/null 2>&1; then completion_source_valid=true; fi
+    completion_source_valid=true
   fi
   if [[ -n "$receipt_generation" && "$completion_source_valid" == true &&
     -n "$transcript_session" &&
