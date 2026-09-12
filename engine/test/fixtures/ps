@@ -1,0 +1,23 @@
+#!/bin/bash
+set -euo pipefail
+
+case_dir="${FAKE_HERDR_CASE:-}"
+[[ ! -e "$case_dir/ps-fail-all" ]] || exit 0
+target_pid=""
+for ((index=1; index <= $#; index++)); do
+  if [[ "${!index}" == "-p" ]]; then
+    next=$((index + 1))
+    target_pid="${!next:-}"
+    break
+  fi
+done
+if [[ -n "$case_dir" && -r "$case_dir/ps-fail-pid" &&
+  -r "$case_dir/ps-fail-count" &&
+  "$target_pid" == "$(< "$case_dir/ps-fail-pid")" ]]; then
+  count=$(< "$case_dir/ps-fail-count")
+  if (( count > 0 )); then
+    printf '%s\n' "$((count - 1))" > "$case_dir/ps-fail-count"
+    exit 0
+  fi
+fi
+exec /bin/ps "$@"

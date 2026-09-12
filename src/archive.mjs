@@ -28,6 +28,35 @@ function cleanupControls(dir) {
   }
   if (directory) try { fs.rmdirSync(operations); } catch (e) { if (!["ENOTEMPTY", "ENOENT", "EEXIST"].includes(e.code)) throw e; }
 }
+
+function taskHistory(task, detailed) {
+  const summary = {
+    task: task.id,
+    phase: task.phase,
+    role: task.role || task.kind,
+    state: task.state,
+    cwd: task.cwd,
+    area: task.area,
+    ...(task.summary && !(detailed && task.result) ? { summary: task.summary } : {}),
+    ...(task.evidence ? { evidence: task.evidence } : {}),
+    ...(task.commit ? { commit: task.commit } : {}),
+  };
+  if (!detailed) return summary;
+  return {
+    ...summary,
+    prompt: task.prompt?.slice(0, 4000) || "(detail expired)",
+    ...(task.prompt?.length > 4000 ? { promptTruncated: true } : {}),
+    ...(task.result ? { result: task.result.slice(0, 3500) } : {}),
+    truncated: !!task.truncated || (task.result?.length ?? 0) > 3500,
+    revisions: (task.revisions ?? []).map((revision, index) => ({
+      revision: index + 1,
+      at: revision.at,
+      prompt: revision.prompt?.slice(0, 1000) || "(not retained)",
+      summary: revision.summary,
+    })),
+  };
+}
+
 export function history(run, taskId, revision) {
   const help = [taskId ? `herdr-axi run history --task ${taskId}` : "herdr-axi run history --help"];
   if (revision !== undefined && (!taskId || !/^[1-9][0-9]*$/.test(String(revision)) || !Number.isSafeInteger(Number(revision)))) throw runError("--revision needs --task and a positive integer (1-based)", "INVALID_VALUE", help);
@@ -43,14 +72,14 @@ export function history(run, taskId, revision) {
       ...(v.generation ? { generation: v.generation } : {}),
       prompt: v.prompt?.slice(0, 4000) || "(not retained)", ...(v.prompt?.length > 4000 ? { promptTruncated: true } : {}),
       ...(v.result ? { result: v.result.slice(0, 3500) } : { summary: v.summary || "(not retained)", note: "Detailed result not retained for this revision." }),
-      ...(v.resultSource ? { resultSource: v.resultSource } : {}), truncated: !!v.truncated || v.result?.length > 3500,
+      ...(v.resultSource ? { resultSource: v.resultSource } : {}), truncated: !!v.truncated || (v.result?.length ?? 0) > 3500,
       help };
   }
   return { run: run.id, project: run.project, ...(run.finishedAt ? { finished: run.finishedAt } : {}),
     ...(run.ownerHandoffs?.length ? { ownerHandoffs: run.ownerHandoffs.map((h) => ({ at: h.at, from: h.from.pane, to: h.to.pane, evidence: h.evidence.slice(0, 600) })) } : {}),
     ...(taskId && tasks[0]?.resultSource ? { resultSource: tasks[0].resultSource } : {}),
     ...(taskId && tasks[0]?.cancellation ? { cancellation: { at: tasks[0].cancellation.at, evidence: tasks[0].cancellation.evidence.slice(0, 1000), capture: tasks[0].cancellation.capture } } : {}),
-    tasks: tasks.slice(-8).map((t) => ({ task: t.id, phase: t.phase, role: t.role || t.kind, state: t.state, cwd: t.cwd, area: t.area, ...(t.summary && !(taskId && t.result) ? { summary: t.summary } : {}), ...(t.evidence ? { evidence: t.evidence } : {}), ...(t.commit ? { commit: t.commit } : {}), ...(taskId ? { prompt: t.prompt?.slice(0, 4000) || "(detail expired)", ...(t.prompt?.length > 4000 ? { truncated: true } : {}), ...(t.result ? { result: t.result.slice(0, 3500) } : {}), revisions: (t.revisions ?? []).map((v, i) => ({ revision: i + 1, at: v.at, prompt: v.prompt.slice(0, 1000), summary: v.summary })) } : {}) })),
+    tasks: tasks.slice(-8).map((task) => taskHistory(task, !!taskId)),
     ...(taskId && tasks[0]?.handoffs?.length ? { handoffs: tasks[0].handoffs.map((h) => ({ at: h.at, from: h.from.kind, to: h.to.kind, model: h.to.model, quota: h.quota.scope, state: h.state, summary: h.summary.slice(0, 600), capture: h.capture })) } : {}),
     ...(tasks.length > 8 ? { more: tasks.length - 8 } : {}), events: (detail.events ?? []).filter((e) => !taskId || e.task === taskId).slice(-8),
     help: [taskId && tasks[0]?.revisions?.length ? `herdr-axi run history --task ${taskId} --revision ${tasks[0].revisions.length}` : tasks.length && !taskId ? `herdr-axi run history --task ${tasks.at(-1).id}` : "herdr-axi run history --all"] };

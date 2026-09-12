@@ -4,21 +4,45 @@ import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { PHASES, runError, runDir, canonicalDir } from "./run-state.mjs";
-import { validateLaunch, launchMode } from "./launch-policy.mjs";
+import { validateLaunch, launchMode, PROVIDER_DEFAULTS } from "./launch-policy.mjs";
+import { isCoreIntegration, isIntegrationKind } from "./integrations.mjs";
 
 export const stateRoot = () => path.resolve(process.env.HERDR_AXI_STATE_HOME || path.join(homedir(), ".local/state/herdr-axi"));
 export const hash = (value) => createHash("sha256").update(value).digest("hex").slice(0, 24);
 export function worktree(cwd) {
-  const real = fs.realpathSync(cwd);
-  const r = spawnSync("git", ["-C", real, "rev-parse", "--show-toplevel"], { encoding: "utf8", timeout: 2000 });
-  return r.status === 0 ? fs.realpathSync(r.stdout.trim()) : real;
+  try {
+    const real = fs.realpathSync(cwd);
+    // Identity belongs to cwd, not to an enclosing Git command's repository,
+    // worktree or injected configuration. No Git environment override is needed
+    // by this local, read-only probe; retain the caller environment unchanged.
+    const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_")));
+    const result = spawnSync("git", ["-C", real, "rev-parse", "--show-toplevel"], {
+      encoding: "utf8", timeout: 2000, env: { ...env, LC_ALL: "C" },
+    });
+    if (!result.error && result.status === 0 && result.stdout.trim()) return fs.realpathSync(result.stdout.trim());
+    const notRepository = !result.error && result.status === 128 && /^fatal: not a git repository \(or any (?:of the parent directories|parent up to mount point [^)]+)\)/.test(result.stderr);
+    if (!notRepository) throw result.error ?? new Error(result.stderr.trim() || `git exited with status ${result.status}`);
+
+    // Git gives the same diagnostic for a broken .git directory. Only a path
+    // without any repository marker may use standalone-directory identity.
+    for (let directory = real; ; directory = path.dirname(directory)) {
+      try {
+        fs.lstatSync(path.join(directory, ".git"));
+        throw new Error(`Git could not resolve repository marker in ${directory}`);
+      } catch (error) { if (error.code !== "ENOENT") throw error; }
+      if (directory === path.dirname(directory)) return real;
+    }
+  } catch (error) {
+    throw runError(`Cannot verify worktree ${cwd}: ${error.message}`, "WORKTREE_UNVERIFIED");
+  }
 }
 
 export const DEFAULT_CONFIG = {
+  providerDefaults: PROVIDER_DEFAULTS,
   roles: {
-    orchestrator: { kind: "codex", model: "gpt-5.6-sol", effort: "high", access: "read" },
-    implementer: { kind: "copilot", model: "gpt-5.6-sol", effort: "high", access: "write" },
-    verifier: { kind: "claude", model: "opus", effort: "high", access: "read" },
+    orchestrator: { kind: "codex", ...PROVIDER_DEFAULTS.codex, access: "read" },
+    implementer: { kind: "copilot", ...PROVIDER_DEFAULTS.copilot, access: "write" },
+    verifier: { kind: "claude", ...PROVIDER_DEFAULTS.claude, access: "read" },
   },
   phases: PHASES,
   agentRatio: 0.75,
@@ -36,6 +60,20 @@ const integer = (n, min, max) => Number.isInteger(n) && n >= min && n <= max;
 export function validateConfig(input = {}) {
   keys(input, Object.keys(DEFAULT_CONFIG), "project");
   const config = structuredClone(DEFAULT_CONFIG);
+  if (input.providerDefaults !== undefined) {
+    keys(input.providerDefaults, Object.keys(PROVIDER_DEFAULTS), "providerDefaults");
+    for (const [kind, defaults] of Object.entries(input.providerDefaults)) {
+      keys(defaults, ["model", "effort"], `providerDefaults.${kind}`);
+      const merged = { ...config.providerDefaults[kind], ...defaults };
+      // Cursor's native catalogue has no universal model ID. An absent default
+      // keeps direct queues explicit without inventing a substitute model.
+      if (!(kind === "cursor" && merged.model === undefined && merged.effort === "model")) {
+        try { validateLaunch({ kind, ...merged }); }
+        catch (error) { throw runError(`Provider ${kind}: ${error.message}`, "CONFIG_INVALID"); }
+      }
+      config.providerDefaults[kind] = merged;
+    }
+  }
   for (const key of ["phases", "context", "retention"]) {
     if (input[key] !== undefined) { keys(input[key], Object.keys(config[key]), key); Object.assign(config[key], input[key]); }
   }
@@ -46,7 +84,13 @@ export function validateConfig(input = {}) {
     for (const [name, role] of Object.entries(input.roles)) {
       if (!/^[a-z][a-z0-9_-]{0,39}$/.test(name)) throw runError("Invalid role name", "CONFIG_INVALID");
       keys(role, ["kind", "model", "effort", "access", "subagents", "contextWindowTokens"], `roles.${name}`);
-      config.roles[name] = { ...config.roles[name], ...role };
+      const previousRole = Object.hasOwn(config.roles, name) ? config.roles[name] : undefined;
+      const previousKind = previousRole?.kind;
+      config.roles[name] = { ...previousRole, ...role };
+      if (role.kind && role.kind !== previousKind) {
+        if (role.model === undefined) delete config.roles[name].model;
+        if (role.effort === undefined) delete config.roles[name].effort;
+      }
     }
   }
   for (const [name, role] of Object.entries(config.roles)) {
@@ -58,7 +102,7 @@ export function validateConfig(input = {}) {
       if (!Array.isArray(role.subagents) || role.subagents.length > 4) throw runError(`Invalid subagents for ${name}`, "CONFIG_INVALID");
       for (const s of role.subagents) {
         keys(s, ["role", "max", "when"], `roles.${name}.subagents`);
-        if (!config.roles[s.role] || config.roles[s.role].access !== "read" || config.roles[s.role].subagents?.length || !integer(s.max, 1, 4) || typeof s.when !== "string" || !s.when.trim() || s.when.length > 300) throw runError("Native subagents require a read-only leaf role, max 1..4, and a bounded when condition", "CONFIG_INVALID");
+        if (!Object.hasOwn(config.roles, s.role) || config.roles[s.role].access !== "read" || config.roles[s.role].subagents?.length || !integer(s.max, 1, 4) || typeof s.when !== "string" || !s.when.trim() || s.when.length > 300) throw runError("Native subagents require a read-only leaf role, max 1..4, and a bounded when condition", "CONFIG_INVALID");
       }
     }
   }
@@ -68,22 +112,41 @@ export function validateConfig(input = {}) {
 }
 
 export const nativeSlots = (role) => (role.subagents ?? []).reduce((n, s) => n + s.max, 0);
-export function selectWorker(config, options) {
-  const base = options.role ? config.roles[options.role] : null;
+export function selectWorker(config, options, availableKinds, { requireExplicitModel = false } = {}) {
+  const base = options.role && Object.hasOwn(config.roles, options.role) ? config.roles[options.role] : null;
   if (options.role && (!base || options.role === "orchestrator")) throw runError("Choose a worker role from init", "CONFIG_INVALID", ["herdr-axi run config"]);
   const kind = options.kind ?? base?.kind;
-  if (base && kind !== base.kind && !options.model) throw runError("Changing provider requires --model; no implicit substitution", "CONFIG_INVALID", ["herdr-axi run queue --help"]);
-  if (kind === "cursor" && !options.model && !base?.model) throw runError("Cursor requires --model from cursor-agent models", "LAUNCH_POLICY", ["cursor-agent models", "herdr-axi guide cursor"]);
-  const role = { ...(base ?? { access: "write" }), kind, model: options.model ?? base?.model ?? (kind === "claude" ? "opus" : "gpt-5.6-sol"), effort: options.effort ?? (kind === "cursor" ? (base?.kind === "cursor" ? base.effort ?? "model" : "model") : base?.effort ?? "high") };
+  if (!isIntegrationKind(kind)) throw runError("Choose a worker role or Herdr integration kind", "CONFIG_INVALID", ["herdr-axi run config", "herdr integration status"]);
+  const core = isCoreIntegration(kind);
+  if (availableKinds && !availableKinds.includes(kind)) throw runError(`Herdr integration is not installed for ${kind}`, "INTEGRATION_NOT_INSTALLED", ["herdr integration status", "herdr integration install --help"]);
+  if (!core && (options.model !== undefined || options.effort !== undefined)) throw runError(`${kind} uses its native configuration; omit --model and --effort`, "LAUNCH_POLICY", ["herdr-axi run queue --help"]);
+  if (core && !options.model && (requireExplicitModel || (base && kind !== base.kind))) throw runError("Changing this provider requires --model; no implicit substitution", "CONFIG_INVALID", [requireExplicitModel ? "herdr-axi run switch --help" : "herdr-axi run queue --help"]);
+  const defaults = core ? config.providerDefaults?.[kind] ?? PROVIDER_DEFAULTS[kind] : {};
+  const sameProvider = base?.kind === kind;
+  const model = options.model ?? (sameProvider ? base.model : undefined) ?? defaults.model;
+  const effort = options.effort ?? (sameProvider ? base.effort : undefined) ?? defaults.effort;
+  if (kind === "cursor" && !model) throw runError("Cursor requires --model from cursor-agent models", "LAUNCH_POLICY", ["cursor-agent models", "herdr-axi guide cursor"]);
+  const role = { ...(base ?? { access: options.access ?? "write" }), kind };
+  if (core) Object.assign(role, { model, effort });
+  if (!core) { delete role.model; delete role.effort; }
   if (role.model !== base?.model || role.kind !== base?.kind) delete role.contextWindowTokens;
   try { validateLaunch(role); } catch (e) { throw runError(e.message, e.code, ["herdr-axi run queue --help", "herdr-axi run config"]); }
   return role;
 }
 
-export function workerRoleSummary(config) {
+export function workerRoleSummary(config, availableKinds) {
   const roles = Object.entries(config.roles).filter(([name]) => name !== "orchestrator")
+    .filter(([, role]) => !availableKinds || availableKinds.includes(role.kind))
     .map(([role, { kind, model, effort, access, subagents }]) => ({ role, kind, model, effort, access, native: nativeSlots({ subagents }), mode: launchMode(kind) }));
   return { roles: roles.slice(0, 8), ...(roles.length > 8 ? { moreRoles: roles.length - 8 } : {}) };
+}
+
+export function unavailableWorkerRoles(config, availableKinds) {
+  if (!availableKinds) return [];
+  const installed = new Set(availableKinds);
+  return Object.entries(config.roles)
+    .filter(([name, role]) => name !== "orchestrator" && !installed.has(role.kind))
+    .map(([role, { kind }]) => ({ role, kind }));
 }
 
 export function projectConfig(cwd) {

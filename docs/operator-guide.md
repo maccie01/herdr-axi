@@ -12,8 +12,8 @@
 - Two-call onboarding: `run init`; returned export + `run queue --start` together. No help/config/fleet preflight.
 - Optional TOON recipes: `guide "start opus"`, `guide "quota switch"`, `guide "wait notification"`; no keywords = full compact workflow. Zero backend/model calls.
 
-Low-context fleet supervision for [herdr](https://herdr.dev): Claude, Codex,
-Copilot and Cursor workers, owned by one orchestrator. Compact TOON output, precomputed
+Low-context fleet supervision for [herdr](https://herdr.dev): workers backed by
+installed Herdr integrations and owned by one orchestrator. Compact TOON output, precomputed
 status, bounded task queues and pane-safe control.
 
 ## Install
@@ -43,6 +43,19 @@ Managed workers also receive the package's bin directory and `HERDR_AXI_BIN` fal
 Set `HERDR_BIN` to select a specific Herdr binary. No global agent instruction
 files are changed.
 
+### Herdr compatibility
+
+herdr-axi requires Herdr >= 0.9.0 on both client and server because prompt/wait
+behavior is server-owned. `run init` reads `herdr status --json`: an old side
+fails with `HERDR_VERSION_UNSUPPORTED`, a private-protocol mismatch fails with
+`HERDR_PROTOCOL_INCOMPATIBLE`, and no run state is created. The client/server
+versions and protocols plus both endpoint generations, the socket path and
+optional endpoint capabilities are stored in `run.json`.
+Endpoint-generation drift only warns: it governs Herdr's client-rendered UI and
+saved SSH-machine transport, while herdr-axi uses the CLI/socket API. A stale but
+compatible server binary also warns; restart Herdr when new server-side behavior
+is required instead of assuming a client-only update changed it.
+
 ## Start a managed run
 
 Run from the **orchestrator's own Herdr pane**. Pass the task inline: bounded
@@ -63,12 +76,14 @@ herdr-axi run queue parser --role implementer --cwd /path/to/worktree \
 - Batch: omit `--start`, queue independent tasks, then `run next` once.
 - Explicit user-requested worker: `--role implementer --kind claude --model claude-opus-5 --effort high`; no config edit/re-init.
 - Override retains role access/native-child limits; changed model clears the old model's context-window estimate.
-- A `--kind` other than the role's requires an explicit `--model`; no implicit provider substitution.
+- Changing a configured role to another core provider requires an explicit `--model`. Direct Claude/Codex/Copilot queues use the run's `providerDefaults` unless overridden. Cursor requires an explicit model in the command, role or provider defaults. Direct core-provider switches always require `--model`; switching to a configured role uses that role's model. Other installed Herdr integrations use native configuration and reject model/effort flags instead of ignoring them.
 - Application AWS/API budgets and coding-agent subscriptions: separate scopes; no inferred budget transfer or cheaper-model fallback.
 
 `next` reserves available slots and starts eligible workers concurrently; matching
 accepted workers can be reused. Worker tabs: `<task-id> · <kind>`, 75% agent / 25%
 monitor by default. Keep `HERDR_AXI_RUN` in subsequent calls.
+Selectable kinds are refreshed from `herdr integration status` at init, queue,
+switch, next and launch time. Detected agents without a loaded integration remain discovery-only.
 Long assignments: `--prompt-file /external/task.txt` instead of `--prompt`.
 
 **While workers run, continue independent work.** Use `run inbox` for results,
@@ -100,13 +115,13 @@ inbox fetch needed. Act on returned help, then continue independent work.
 | --- | --- |
 | Run until blocked | Queue bounded independent work; `next` once to fill available slots; do own useful work |
 | Suspend, then resume | No useful work left: one long blocking/tracked watch; no model loop around status/read |
-| Durable inbox | File events wake watch; reread authoritative state; review report returned in the same response |
+| Durable inbox | Receipt-file and Herdr lifecycle events wake watch; reread authoritative state; review report returned in the same response |
 | Reconciliation | Native changes without hooks/lost filesystem events: fallback checks back off 2→4→8→10 seconds |
 | Backpressure | Caps, dependencies, worktree leases; no automatic acceptance or phase escalation |
 | Unresolved attention | Follow the specific action or escalate once; repeating the same watch/read cannot resolve a permission or ownership problem |
 | Continuous improvement | Regression budgets for frontend calls, response bytes, quiet backend probes, duplicate watchers and report delivery; no additional project logs/plans |
 
-- Events are hints, not completion evidence; receipt/generation/ownership checks remain authoritative.
+- Events are hints, not completion evidence; receipt/generation/ownership checks remain authoritative. Socket disconnects trigger a fresh state reconciliation because Herdr 0.9 exposes no public resume sequence.
 - Telemetry/lock/temp-file writes do not trigger reconciliation; event bursts coalesced; unavailable filesystem notifications fall back to timed checks.
 - Pattern references: [GitHub: events over polling](https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api), [Temporal: execute until waiting, then resume](https://github.com/temporalio/documentation/blob/main/docs/encyclopedia/architecture/how-temporal-works.mdx). Principles only; no new service/dependency.
 
@@ -123,11 +138,31 @@ limit”. Ordinary retryable rate limits are excluded.
 - Saved quota receipts: historical evidence, never current switching authority.
 - Managed workers/monitors inherit the initiating Node executable; missing Node produces an explicit diagnostic.
 - Selected backend pinned across worker/native-hook/monitor environments; fresh split shells cannot silently fall back to a different `herdr`.
-- Monitor startup: shell updates disabled; generation-bound acknowledgement required within 10 seconds before task delivery. `MONITOR_START_UNVERIFIED`: inspect, then explicit cancellation; no duplicate monitor on recovery.
+- Native session startup: a non-empty registered session is required before monitor creation or task delivery. The default budget is 10 seconds (`HERDR_SESSION_READY_TIMEOUT_SECONDS`). `SESSION_START_UNVERIFIED` leaves an unsubmitted tab for inspection; recover after a session is visible or explicitly cancel it. A changed identity never grants retry authority.
+- Codex initialization: Codex 0.153.4/0.154.0 defer `SessionStart` until the first turn, so a fresh session can require one additional model turn before registration. AXI checkpoints a unique initialization request **before** sending it. This request contains neither the assignment nor its completion proof and asks for an exact text acknowledgment, without tools or file changes. It consumes model quota; the prompt is not a sandbox or a guarantee of no side effects. Sessions already registered need no initialization turn.
+- Initialization is verified only against the registered native session's transcript: matching request, final acknowledgment and completed turn, followed by unchanged owned identity and idle/done state. Only then may the lifecycle monitor start and the actual assignment be submitted. A session appearing by itself is insufficient. Bootstrap output cannot complete the assignment.
+- `HERDR_CODEX_BOOTSTRAP_TIMEOUT_SECONDS` sets the initialization observation budget (default 60 seconds, integer 1–300). A backend input call can take up to its separate 15-second acknowledgment timeout. `CODEX_BOOTSTRAP_PENDING` / `bootstrap: pending` means the assignment is withheld but initialization input may have been sent. `run recover TASK` observes the existing attempt without resending initialization; `run cancel TASK --evidence '…'` explicitly retires it. Missing evidence, ambiguous delivery or a crash after checkpointing never grants replay authority. Trust/permission dialogs still require explicit authorization. An explicitly set `CODEX_HOME` is resolved relative to the caller's directory and forwarded as an absolute path for consistent worker/transcript lookup.
+- Monitor startup: shell updates disabled; generation-bound acknowledgement required before task delivery, with a default 10-second budget (`HERDR_MONITOR_READY_TIMEOUT_SECONDS`). `MONITOR_START_UNVERIFIED`: inspect, then explicit cancellation; no duplicate monitor on recovery.
 - Native terminal/session identity stored in the engine registry before coordinator publication. Recovery cannot adopt a replacement occupant; failed publication can recover the original without resending.
+- Managed Claude/Codex/Copilot reports come from the latest transcript assignment containing the current generation's proof instruction. Callback text alone is not report authority, even within the same native session. Missing or incomplete transcript evidence remains unaccepted for later collection; transcript scans stream records outside the receipt lock.
 - Explicit backend `agent_blocked` rejection: no input sent; inspect/authorize the dialog, then `run recover` retries once in the same pane and monitor. Timeout/unknown delivery: never automatic replay.
 - Completion reports retained separately from later input/lost notifications in the same inbox. Selected review returns the saved result once; invalid reports never offer acceptance.
 - Task-scoped watch: invalid proof waits with a diagnostic; context I/O errors remain visible. Existing errors do not create an immediate re-wake loop.
+
+Startup timing overrides are validated before workspace lookup or allocation.
+Invalid values return `INVALID_CONFIG` with `submitted:false`, without creating a
+tab, registry or receipt. Unset or empty values retain the defaults. Use decimal
+integers without signs, whitespace or leading zeros; expressions are rejected.
+
+| Environment variable | Default seconds | Accepted seconds |
+| --- | ---: | ---: |
+| `HERDR_START_READY_TIMEOUT_SECONDS` | 12 | 1–999,999,999 |
+| `HERDR_SESSION_READY_TIMEOUT_SECONDS` | 10 | 1–999,999,999 |
+| `HERDR_MONITOR_READY_TIMEOUT_SECONDS` | 10 | 1–999,999,999 |
+| `HERDR_CODEX_BOOTSTRAP_TIMEOUT_SECONDS` | 60 | 1–300 |
+
+The nine-digit upper bound protects shell arithmetic; it is not a recommended
+operational timeout. Native backend calls retain their separate timeouts.
 
 ```sh
 herdr-axi run switch w1:pP --kind codex --model gpt-5.6-sol --effort high \
@@ -192,6 +227,12 @@ herdr-axi run accept w1:pP --evidence 'review and test results'
 Acceptance is explicit—not inferred from an idle terminal. Continue with `run next`
 or change phase. At the end, `run close <pane>` for each accepted worker, then
 `run finish`. Only recorded worker tabs are closed; the owner's tab is excluded.
+Ordinary close rechecks the registered terminal and session immediately before
+closure and requires native `idle`/`done`, or verified pane absence for orphan
+cleanup. Acceptance does not authorize closing an `unknown` or replaced occupant.
+Herdr's tab-close API accepts only a tab ID, not an expected identity. The final
+check therefore narrows, but cannot atomically eliminate, a replacement race
+inside the backend between observation and closure.
 
 **Stop unfinished work:** no acceptance or completion proof needed:
 
@@ -267,6 +308,8 @@ Other commands: `herdr-axi <command> --help`. There is no standalone `start` com
 | --- | --- |
 | `herdr-axi` / `fleet` | Owned run status; global discovery without a selected run |
 | `agents [--state STATE] [--kind KIND]` | Pane IDs, names, kinds and states |
+| `machines` | Read-only saved SSH profile inventory; machine selection does not retarget CLI calls |
+| `explain <pane> [--verbose]` | Herdr 0.9 detection decision; optional bounded rule evidence |
 | `run inbox` | Results and attention; includes needed status, summaries ≤600 characters/worker, plus the selected review's saved result (≤3500 characters) |
 | `read <pane>` | Compact visible text; 60 lines / 8000 Unicode characters |
 | `read <pane> --raw` | Preserve layout for diagrams, tables and approval menus |
@@ -339,11 +382,16 @@ remains the canonical worktree root. `run init` snapshots the policy; `run confi
 with an overflow count). `run config --full` shows the complete effective policy,
 including native review contracts and owner settings. No config call is required
 before queueing. Edits apply to **new runs**.
+Git probe failures such as permission errors or timeouts are `WORKTREE_UNVERIFIED`;
+they cannot turn subdirectories into separate worktrees or bypass a root policy.
+Identity probes ignore inherited `GIT_*` overrides so an enclosing Git command
+cannot redirect this boundary; the caller's environment is unchanged.
 
 | Setting | Default / behavior |
 | --- | --- |
 | `roles.<name>` | `kind`, `model`, `effort`, `access: read\|write` |
 | Built-in roles | Codex `gpt-5.6-sol`/high orchestrator; Copilot `gpt-5.6-sol`/high implementer; Claude `opus`/high verifier |
+| `providerDefaults.<kind>` | Model/effort defaults for direct core-provider queues; explicit role and CLI choices take precedence |
 | `roles.<name>.subagents` | Optional `[{role, max, when}]`; read-only leaf reviewers; parent integrates results |
 | `nativeSubagentLimit` | 4 reserved native children across pending tasks; separate from primary slots |
 | `roles.<name>.contextWindowTokens` | Optional known input-window size; required for Claude/Copilot percentage warnings |
@@ -358,17 +406,40 @@ native verifier per implementer. Model/effort support depends on the installed
 runtime; report unavailable contracts rather than silently substituting. The
 orchestrator role cannot change an already-running owner's model.
 
+For direct queues, provider defaults centralize the choices that would otherwise
+be repeated on every command. This configuration fragment changes direct Codex
+queues; an implementer role with its own model/effort retains that contract:
+
+```json
+{
+  "providerDefaults": {
+    "codex": { "model": "gpt-5.6-sol", "effort": "medium" }
+  }
+}
+```
+
+Only Claude, Codex, Copilot and Cursor accept provider model/effort defaults.
+Other integrations use their native configuration. Built-in direct defaults are
+Claude `opus`/high and Codex/Copilot `gpt-5.6-sol`/high; Cursor has effort `model`
+and no implicit model. JavaScript queues and standalone engine launches share
+these built-in defaults. Managed launches pass their effective project policy;
+the engine does not reload configuration from the worker's directory.
+Init and config report unavailable worker roles as
+`unavailableRoles`, including missing built-in roles when no policy file exists.
+
 | Managed worker | Launch contract | Verification |
 | --- | --- | --- |
 | Claude | `--permission-mode auto`; auto-capable Opus/Sonnet/Fable | Explicit Auto footer before initial/resumed task submission; missing/manual mode preserves an unsubmitted tab for inspection/cancel |
 | Codex | `--approve-for-me`; workspace sandbox + automatic review | Native flag only; no claim of observed runtime mode |
 | Copilot | `--autopilot --allow-all`; existing Git deny rules | Native flag only; no claim of observed runtime mode |
 | Cursor | `--auto-review` (Smart Auto); explicit `cursor-agent models` ID | Native flag only; approval/trust may still block; no `--force`, `--yolo` or automatic trust |
+| Other loaded Herdr integration | Native CLI configuration; no model/effort override | Herdr readiness and lifecycle; herdr-axi stable terminal/session identity, generation proof and bounded visible report |
 
 - Cursor queue/switch: `--kind cursor --model composer-2.5 --effort model`; choose an available ID, not implicit `auto` routing. Effort belongs to Cursor's exact model ID (e.g. a `-high` variant); separate numeric/named effort overrides refused, not ignored.
 - Cursor project role: `{"kind":"cursor","model":"composer-2.5","effort":"model","access":"write"}`. Existing provider defaults unchanged.
-- Cursor supervision: existing lifecycle monitor, no global/plugin hook edits; registered terminal/session identity + current generation proof + native idle/done required. Unknown readiness cannot settle. Reports use bounded visible output; inspect `read --full` or a reviewed `--result-file` when insufficient.
-- Cursor startup guard: native Herdr can report idle at workspace trust; visible trust or missing session identity leaves the owned tab unsubmitted. Inspect, authorize trust only if appropriate, then `run recover`; never bypass with raw prompt/keys.
+- Cursor supervision: Herdr integration readiness plus registered terminal/session identity, current generation proof and native idle/done are required. Unknown readiness cannot settle. Reports use bounded visible output; inspect `read --full` or a reviewed `--result-file` when insufficient.
+- Every integration must expose a non-null native session identity before herdr-axi submits task text. Generic completion requires the same identity to remain stable; otherwise startup or completion stays inspectable instead of accepting a possible replacement occupant.
+- Cursor startup guard: task delivery requires native readiness and a registered session. Trust dialogs can prevent either; a successful fixture is not evidence of a particular Herdr error classification. Inspect the returned startup diagnostic, authorize trust only if appropriate, then `run recover`; never bypass with raw prompt/keys.
 - Cursor context usage remains `contextUnknown`; no private transcript parsing or guessed percentages. Shared conservative quota detector applies; unrecognized Cursor-specific billing messages need inspection/cancellation, not automatic switching.
 
 - Model validation before allocation; known incompatible Claude choices (Haiku, older models, `opusplan`) refused; never substitute or bypass permissions.
@@ -400,7 +471,7 @@ requested as deliverables.
 | Command | Retained evidence / cleanup |
 | --- | --- |
 | `run history` | Bounded task and decision summaries |
-| `run history --task ID` | Current result, prompt and numbered revision summaries; offline/archived access |
+| `run history --task ID` | Current result, prompt and numbered revision summaries; report `truncated` and separate `promptTruncated` flags; offline/archived access |
 | `run history --task ID --revision N` | One saved revision: generation, source, truncation, result ≤3500 chars, prompt ≤4000; 1-based index |
 | `run history --all` | Latest eight managed runs for the selected project |
 | `run finish` | Requires accepted/cancelled tasks and closed workers; compresses detail, preserves results/inboxes, removes known runtime files |
@@ -414,9 +485,18 @@ recover; increase retention for longer audits.
 ## Development
 
 ```sh
-npm test
-bash engine/test-herdr-monitor.sh
+npm run test:all
 ```
+
+Run only one layer with `npm test` or `npm run test:engine`.
+
+Node tests run at most four test files concurrently. For a serial diagnostic run,
+use `node --test --test-concurrency=1 test/*.test.mjs`. Run scenarios are grouped
+by behavior in `test/runs-*.test.mjs`, with shared setup in `test/support`.
+The shell entry remains `engine/test-herdr-monitor.sh`; its harness, executable
+fakes and scenario suites live under `engine/test` and are excluded from the
+published package. Both harnesses resolve tools from the incoming `PATH` before
+isolating the fake backend; they do not require Homebrew installation paths.
 
 Dependency-free `node:test` regressions plus Bash engine tests; both isolate their
 fake backend from the live fleet. Bash lock-identity checks need process inspection

@@ -1,0 +1,375 @@
+#!/bin/bash
+set -euo pipefail
+
+case_dir="${FAKE_HERDR_CASE:?}"
+orchestrator="${FAKE_HERDR_ORCHESTRATOR:-orch}"
+mkdir -p "$case_dir"
+
+read_value() {
+  local path="$1"
+  local fallback="$2"
+  local value=""
+  if [[ -r "$path" ]]; then
+    { IFS= read -r value < "$path"; } 2>/dev/null || value="$fallback"
+  else
+    value="$fallback"
+  fi
+  [[ "$value" != "__empty__" ]] || value=""
+  printf '%s\n' "$value"
+}
+
+acquire_case_lock() {
+  local lock_dir="$case_dir/counter.lock"
+  while ! mkdir "$lock_dir" 2>/dev/null; do
+    sleep 0.005
+  done
+}
+
+release_case_lock() {
+  rmdir "$case_dir/counter.lock"
+}
+
+record_call() {
+  acquire_case_lock
+  printf '%s\n' "$*" >> "$case_dir/calls"
+  release_case_lock
+}
+
+status_for() {
+  if [[ "$1" == "$orchestrator" ]]; then
+    read_value "$case_dir/orchestrator-status" idle
+  else
+    read_value "$case_dir/status" done
+  fi
+}
+
+matches_target() {
+  local candidate="$1"
+  shift
+  local target
+  for target in "$@"; do
+    [[ "$candidate" != "$target" ]] || return 0
+  done
+  return 1
+}
+
+group="${1:-}"
+action="${2:-}"
+shift $(( $# >= 2 ? 2 : $# ))
+record_call "$group $action $*"
+if [[ -e "$case_dir/check-unlocked-reads" && "$group" == "agent" &&
+  ( "$action" == "get" || "$action" == "read" ) && -e "${HERDR_MONITOR_RECEIPT:-/nonexistent}.lock" ]]; then
+  printf '%s\n' "$group $action" >> "$case_dir/locked-backend-reads"
+fi
+
+case "$group:$action" in
+  integration:status)
+    missing_integration=$(read_value "$case_dir/missing-integration" __empty__)
+    printf '%s\n' \
+      'claude: current (v9) (/fixture)' \
+      'codex: current (v8) (/fixture)' \
+      'copilot: current (v3) (/fixture)' \
+      'cursor: current (v1) (/fixture)' \
+      "opencode: $([[ "$missing_integration" == opencode ]] && printf 'not installed' || printf 'current (v11)') (/fixture)"
+    ;;
+  agent:get)
+    [[ ! -e "$case_dir/agent-get-fail" ]] || exit 1
+    name="${1:-worker}"
+    [[ "$name" != "pane-1" ]] || name=$(read_value "$case_dir/started-name" worker)
+    status=$(status_for "$name")
+    kind=$(read_value "$case_dir/kind" copilot)
+    workspace=$(read_value "$case_dir/workspace" ws)
+    session=$(read_value "$case_dir/session" session-1)
+    tab_id=$(read_value "$case_dir/agent-tab-id" tab-1)
+    pane_id=$(read_value "$case_dir/agent-pane-id" pane-1)
+    jq -nc \
+      --arg name "$name" \
+      --arg status "$status" \
+      --arg kind "$kind" \
+      --arg workspace "$workspace" \
+      --arg session "$session" \
+      --arg terminal "$(read_value "$case_dir/terminal" terminal-1)" \
+      --arg tab_id "$tab_id" \
+      --arg pane_id "$pane_id" \
+      '{result:{agent:{name:$name,agent_status:$status,agent:$kind,workspace_id:$workspace,agent_session:{value:$session},terminal_id:$terminal,tab_id:$tab_id,pane_id:$pane_id,cwd:"/tmp"}}}'
+    ;;
+  agent:prompt)
+    target="${1:?}"
+    message="${2:-}"
+    bootstrap_registry="$HERDR_RECEIPT_ROOT/ws/worker.json"
+    if [[ -e "$case_dir/codex-bootstrap-mode" ]] && jq -e '.stage == "created" and .bootstrap.state == "sending"' "$bootstrap_registry" >/dev/null 2>&1; then
+      attempts=$(read_value "$case_dir/bootstrap-prompts" 0)
+      printf '%s\n' "$((attempts + 1))" > "$case_dir/bootstrap-prompts"
+      printf '%s\n' "$message" > "$case_dir/bootstrap-input"
+      mode=$(read_value "$case_dir/codex-bootstrap-mode" success)
+      if [[ "$mode" == success ]]; then
+        printf '%s\n' 11111111-2222-4333-8444-555555555555 > "$case_dir/session"
+        printf '%s\n' idle > "$case_dir/status"
+        nonce=$(jq -r '.bootstrap.nonce' "$bootstrap_registry")
+        jq -nc --arg prompt "$message" --arg nonce "$nonce" \
+          '{type:"session_meta",payload:{id:"11111111-2222-4333-8444-555555555555"}},
+           {type:"event_msg",payload:{type:"task_started",turn_id:"bootstrap-turn"}},
+           {type:"response_item",payload:{type:"message",role:"user",content:[{type:"input_text",text:$prompt}]}},
+           {type:"response_item",payload:{type:"message",role:"assistant",phase:"final_answer",content:[{type:"output_text",text:("HERDR_AXI_READY_" + $nonce)}]}},
+           {type:"event_msg",payload:{type:"task_complete",turn_id:"bootstrap-turn",last_agent_message:("HERDR_AXI_READY_" + $nonce)}}' \
+          > "$HOME/.codex/sessions/rollout-11111111-2222-4333-8444-555555555555.jsonl"
+        jq -nc '{result:{prompt_delivered:true}}'
+        exit 0
+      fi
+      jq -nc '{error:{code:"agent_prompt_stalled"}}'
+      exit 1
+    fi
+    acquire_case_lock
+    if [[ "$target" == "$orchestrator" ]]; then
+      attempts=$(read_value "$case_dir/prompt-attempts" 0)
+      printf '%s\n' "$((attempts + 1))" > "$case_dir/prompt-attempts"
+      failures=$(read_value "$case_dir/prompt-failures" 0)
+      if (( failures > 0 )); then
+        printf '%s\n' "$((failures - 1))" > "$case_dir/prompt-failures"
+        release_case_lock
+        exit 1
+      fi
+      successes=$(read_value "$case_dir/prompt-successes" 0)
+      printf '%s\n' "$((successes + 1))" > "$case_dir/prompt-successes"
+      {
+        printf '%s\n' "=== PROMPT ==="
+        printf '%s\n' "$message"
+      } >> "$case_dir/messages"
+    else
+      if [[ -e "$case_dir/worker-prompt-fail" ]]; then
+        release_case_lock
+        exit 1
+      fi
+      prompt_mode=$(read_value "$case_dir/worker-prompt-mode" success)
+      if [[ "$prompt_mode" == blocked ]]; then
+        printf '%s\n' blocked > "$case_dir/status"
+        release_case_lock
+        jq -nc '{error:{code:"agent_blocked"}}'
+        exit 1
+      fi
+      worker_prompts=$(read_value "$case_dir/worker-prompts" 0)
+      printf '%s\n' "$((worker_prompts + 1))" > "$case_dir/worker-prompts"
+      printf '%s\n' "$message" > "$case_dir/visible"
+      case "$prompt_mode" in
+        success)
+          printf '%s\n' working > "$case_dir/status"
+          ;;
+        stalled-visible)
+          printf '%s\n' idle > "$case_dir/status"
+          release_case_lock
+          jq -nc '{error:{code:"agent_prompt_stalled"}}'
+          exit 1
+          ;;
+        stalled-hidden)
+          : > "$case_dir/visible"
+          printf '%s\n' idle > "$case_dir/status"
+          release_case_lock
+          jq -nc '{error:{code:"agent_prompt_stalled"}}'
+          exit 1
+          ;;
+        slow-start)
+          printf '%s\n' idle > "$case_dir/status"
+          : > "$case_dir/start-on-read"
+          release_case_lock
+          jq -nc '{error:{code:"agent_prompt_stalled"}}'
+          exit 1
+          ;;
+        *)
+          release_case_lock
+          exit 2
+          ;;
+      esac
+      if [[ "${FAKE_HERDR_APPEND_USER:-0}" == "1" ]]; then
+        jq -nc --arg message "$message" '{type:"user.message",data:{content:$message}}' \
+          >> "${HOME}/.copilot/session-state/$(read_value "$case_dir/session" session-1)/events.jsonl"
+      fi
+    fi
+    release_case_lock
+    if [[ "$target" != "$orchestrator" && -e "$case_dir/fail-identity-after-prompt" ]]; then
+      : > "$case_dir/agent-get-fail"
+    fi
+    jq -nc '{result:{prompt_delivered:true}}'
+    ;;
+  agent:wait)
+    name="${1:-worker}"
+    shift || true
+    targets=()
+    while (( $# > 0 )); do
+      case "$1" in
+        --until)
+          targets+=("${2:-}")
+          shift 2
+          ;;
+        --timeout)
+          shift 2
+          ;;
+        *) shift ;;
+      esac
+    done
+    for _ in $(seq 1 500); do
+      if [[ -e "$case_dir/tab-close-pending" ]] &&
+        matches_target unknown "${targets[@]}"; then
+        rm -f \
+          "$case_dir/tab-close-pending" \
+          "$case_dir/tab-alive" \
+          "$case_dir/pane-1-alive" \
+          "$case_dir/monitor-1-alive"
+        printf '%s\n' unknown > "$case_dir/status"
+      fi
+      current=$(status_for "$name")
+      if matches_target "$current" "${targets[@]}"; then
+        exit 0
+      fi
+      [[ ! -e "$case_dir/release-waits" ]] || exit 1
+      sleep 0.02
+    done
+    exit 1
+    ;;
+  agent:read)
+    if [[ -e "$case_dir/delayed-footer" ]]; then
+      remaining=$(read_value "$case_dir/delayed-footer" 1)
+      if (( remaining > 1 )); then
+        printf '%s\n' "$((remaining - 1))" > "$case_dir/delayed-footer"
+      else
+        rm -f "$case_dir/delayed-footer"
+      fi
+      printf '%s\n' 'Starting Claude...'
+      exit 0
+    fi
+    if [[ -e "$case_dir/start-on-read" ]]; then
+      rm -f "$case_dir/start-on-read"
+      printf '%s\n' working > "$case_dir/status"
+    fi
+    if [[ -r "$case_dir/visible" ]]; then
+      cat "$case_dir/visible"
+    elif [[ -r "$case_dir/startup-screen" ]]; then
+      cat "$case_dir/startup-screen"
+    else
+      printf '%s\n' "fake visible agent output"
+    fi
+    ;;
+  agent:start)
+    printf '%s\n' "$1" > "$case_dir/started-name"
+    start_arguments=("$@")
+    for ((index=0; index + 1 < ${#start_arguments[@]}; index++)); do
+      if [[ "${start_arguments[$index]}" == --kind ]]; then
+        printf '%s\n' "${start_arguments[$((index + 1))]}" > "$case_dir/kind"
+        break
+      fi
+    done
+    if [[ -e "$case_dir/start-blocked" ]]; then
+      printf '%s\n' blocked > "$case_dir/status"
+      if [[ -r "$case_dir/start-hook" ]]; then
+        HERDR_MONITOR_INBOX=1 bash "$(< "$case_dir/start-hook")" input '{"message":"Approve this folder?"}'
+      fi
+      jq -nc '{error:{code:"agent_not_ready"}}'
+      exit 1
+    fi
+    if [[ -e "$case_dir/pane-wait-fail" ]]; then
+      jq -nc '{error:{code:"agent_pane_busy"}}'
+      exit 1
+    fi
+    sleep "$(read_value "$case_dir/pane-ready-delay" 0)"
+    busy_count=$(read_value "$case_dir/start-busy-count" 0)
+    if (( busy_count > 0 )); then
+      printf '%s\n' "$((busy_count - 1))" > "$case_dir/start-busy-count"
+      jq -nc '{error:{code:"agent_pane_busy"}}'
+      exit 1
+    fi
+    printf '%s\n' idle > "$case_dir/status"
+    jq -nc '{result:{started:true}}'
+    ;;
+  agent:send-keys)
+    printf '%s\n' working > "$case_dir/status"
+    ;;
+  tab:create)
+    while (( $# > 0 )); do
+      if [[ "$1" == "--label" ]]; then printf '%s\n' "$2" > "$case_dir/tab-label"; break; fi
+      shift
+    done
+    : > "$case_dir/tab-alive"
+    : > "$case_dir/pane-1-alive"
+    rm -f "$case_dir/pane-ready"
+    jq -nc '{result:{root_pane:{pane_id:"pane-1",terminal_id:"terminal-1"},tab:{tab_id:"tab-1"}}}'
+    ;;
+  tab:get)
+    acquire_case_lock
+    tab_get_count=$(read_value "$case_dir/tab-get-count" 0)
+    tab_get_count=$((tab_get_count + 1))
+    printf '%s\n' "$tab_get_count" > "$case_dir/tab-get-count"
+    tab_get_fail_at=$(read_value "$case_dir/tab-get-fail-at" 0)
+    release_case_lock
+    if (( tab_get_count == tab_get_fail_at )); then
+      jq -nc '{error:{code:"transport_failed"}}'
+      exit 1
+    fi
+    [[ -e "$case_dir/tab-alive" ]] || {
+      jq -nc '{error:{code:"tab_not_found"}}'
+      exit 1
+    }
+    pane_count=0
+    for pane_file in pane-1-alive monitor-1-alive extra-pane; do
+      [[ ! -e "$case_dir/$pane_file" ]] || pane_count=$((pane_count + 1))
+    done
+    jq -nc --argjson count "$pane_count" '{result:{tab:{tab_id:"tab-1",workspace_id:"ws",pane_count:$count}}}'
+    ;;
+  tab:close)
+    [[ ! -e "$case_dir/tab-close-fail" ]] || exit 1
+    if [[ -e "$case_dir/tab-close-deferred" ]]; then
+      : > "$case_dir/tab-close-pending"
+    elif [[ ! -e "$case_dir/tab-close-sticky" ]]; then
+      rm -f \
+        "$case_dir/tab-alive" \
+        "$case_dir/pane-1-alive" \
+        "$case_dir/monitor-1-alive"
+      printf '%s\n' unknown > "$case_dir/status"
+    else
+      printf '%s\n' unknown > "$case_dir/status"
+    fi
+    printf '%s\n' closed > "$case_dir/closed"
+    ;;
+  pane:run)
+    monitor_command="$*"
+    printf '%s\n' "$monitor_command" > "$case_dir/monitor-command"
+    [[ ! -e "$case_dir/monitor-no-start" ]] || exit 0
+    ready_generation=""
+    monitor_receipt=""
+    # `pane run` receives the shell-escaped monitor command as one argument.
+    # Inspect its stable env/receipt tokens without evaluating the command.
+    if [[ "$monitor_command" =~ (^|[[:space:]])HERDR_MONITOR_READY=([^[:space:]]+) ]]; then
+      ready_generation="${BASH_REMATCH[2]}"
+    fi
+    if [[ "$monitor_command" =~ ([^[:space:]]+\.event)([[:space:]]|$) ]]; then
+      monitor_receipt="${BASH_REMATCH[1]}"
+    fi
+    [[ -n "$ready_generation" && -n "$monitor_receipt" ]] || exit 0
+    mkdir -p "$(dirname -- "$monitor_receipt")"
+    printf '%s\t%s\n' "$FAKE_MONITOR_PID" "$(/bin/ps -p "$FAKE_MONITOR_PID" -o lstart= | awk '{$1=$1; print}')" > "${monitor_receipt}.monitor-owner"
+    sleep "$(read_value "$case_dir/monitor-ready-delay" 0)"
+    temporary_ready=$(mktemp "${monitor_receipt}.ready.XXXXXXXX")
+    printf '%s\n' "$ready_generation" > "$temporary_ready"
+    mv -f "$temporary_ready" "${monitor_receipt}.monitor-ready"
+    ;;
+  pane:split)
+    : > "$case_dir/monitor-1-alive"
+    jq -nc '{result:{pane:{pane_id:"monitor-1"}}}'
+    ;;
+  pane:get)
+    pane_id="${1:?}"
+    [[ -e "$case_dir/${pane_id}-alive" ]] || {
+      jq -nc '{error:{code:"pane_not_found"}}'
+      exit 1
+    }
+    jq -nc --arg pane_id "$pane_id" \
+      '{result:{pane:{pane_id:$pane_id,tab_id:"tab-1",workspace_id:"ws"}}}'
+    ;;
+  pane:close)
+    [[ ! -e "$case_dir/pane-close-fail" ]] || exit 1
+    rm -f "$case_dir/${1:?}-alive"
+    printf '%s\n' closed > "$case_dir/closed"
+    ;;
+  *)
+    printf '%s\n' "unsupported fake herdr call: $group $action $*" >&2
+    exit 2
+    ;;
+esac

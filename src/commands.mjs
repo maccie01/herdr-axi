@@ -1,5 +1,6 @@
 import { AxiError } from "axi-sdk-js";
 import { listAgents, findAgent, fleet, runHerdr, requireHerdrEnv, projectAgent, STATES } from "./herdr.mjs";
+import { explainAgent, listMachines } from "./herdr-inspect.mjs";
 
 import { loadRun, runError } from "./run-state.mjs";
 import { runCommand, runStatus, watchRun } from "./runs.mjs";
@@ -87,6 +88,23 @@ export function fleetCmd(args = []) {
   if (loadRun() && !o.all) return runStatus();
   const f = fleet(listAgents({ all: o.all }));
   return { ...discovery, total: f.total, counts: f.counts, blocked: brief(f.blocked), working: brief(f.working), idle: brief(f.idle), done: brief(f.done), unknown: brief(f.unknown), help: loadRun() ? ["herdr-axi run status"] : setupHelp };
+}
+
+export function machines(args = []) {
+  const o = parseArgs(args, {});
+  if (o._.length) throw new AxiError("machines takes no arguments", "INVALID_VALUE", ["herdr-axi machines --help"]);
+  const rows = listMachines();
+  return {
+    scope: "SSH connection profiles; pane and workspace IDs remain server-scoped",
+    machines: rows.length ? rows : "0 saved machines",
+    note: "Machine selection in Herdr's UI does not retarget this CLI process.",
+  };
+}
+
+export function explain(args = []) {
+  const o = parseArgs(args, { verbose: "boolean" });
+  if (o._.length !== 1) throw new AxiError("explain needs one pane ID", "INVALID_VALUE", ["herdr-axi explain --help"]);
+  return explainAgent(o._[0], { verbose: !!o.verbose });
 }
 
 export function read(args) {

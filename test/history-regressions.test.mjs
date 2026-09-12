@@ -14,7 +14,7 @@ test("history exposes one bounded revision through the offline CLI before and af
   process.env.HERDR_AXI_RUN = dir; process.env.HERDR_AXI_STATE_HOME = path.join(dir, "state");
   const result = "UNIQUE_REVIEW_EVIDENCE\n" + "x".repeat(4000);
   const run = { schema: 1, id: "history-test", project: dir, owner: { pane: "w:p1", tab: "w:t1" }, workspace: "w", phase: "explore", limits: PHASES, workers: [], tasks: [{
-    id: "report", cwd: dir, state: "accepted", summary: "current summary", result: "CURRENT_REPORT", prompt: "current prompt", revisions: [
+    id: "report", cwd: dir, state: "accepted", summary: "current summary", result: "CURRENT_REPORT", truncated: true, prompt: "current prompt", revisions: [
       { at: "2026-09-07T01:00:00Z", generation: "generation1", prompt: "p".repeat(4500), summary: "old summary", result, resultSource: "coordinator-replacement", truncated: true },
       { at: "2026-09-07T02:00:00Z", prompt: "legacy prompt", summary: "legacy summary" },
     ],
@@ -32,6 +32,8 @@ test("history exposes one bounded revision through the offline CLI before and af
       const compact = cli("--task", "report");
       assert.equal(compact.status, 0, compact.output);
       assert.doesNotMatch(compact.output, /UNIQUE_REVIEW_EVIDENCE/);
+      assert.equal(history(loadRun(), "report").tasks[0].truncated, true, "current report truncation survives archival");
+      assert.match(compact.output, /truncated: true/);
       assert.match(compact.output, /--revision 2/, "index detail escape hatch remains discoverable");
       const detailed = cli("--task", "report", "--revision", "1");
       assert.equal(detailed.status, 0, detailed.output);
@@ -58,4 +60,19 @@ test("history exposes one bounded revision through the offline CLI before and af
     for (const [key, value] of Object.entries(previous)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("current history distinguishes a clipped prompt from a clipped report", () => {
+  const task = { id: "t", state: "accepted", prompt: "p".repeat(4500), result: "complete result" };
+  const run = { id: "r", tasks: [task] };
+  const shown = history(run, "t").tasks[0];
+  assert.equal(shown.prompt.length, 4000);
+  assert.equal(shown.promptTruncated, true);
+  assert.equal(shown.truncated, false);
+  task.prompt = "short prompt";
+  task.result = "r".repeat(3600);
+  const clipped = history(run, "t").tasks[0];
+  assert.equal(clipped.result.length, 3500);
+  assert.equal(clipped.truncated, true);
+  assert.equal(clipped.promptTruncated, undefined);
 });

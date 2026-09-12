@@ -3,12 +3,12 @@ import { readFileSync } from "node:fs";
 import { runAxiCli, AxiError } from "axi-sdk-js";
 
 const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-import { home, agents, fleetCmd, read, wait, dispatch, watch, run } from "../src/commands.mjs";
+import { home, agents, fleetCmd, machines, explain, read, wait, dispatch, watch, run } from "../src/commands.mjs";
 import { guide } from "../src/guide.mjs";
 
 const HELP = `Start: herdr-axi run init --project <path>; next tool call: returned export + queue --start together.
 Optional TOON help: herdr-axi guide "start opus" | "quota switch" | "stop worker"; no keywords = full compact workflow. Alias: --skill.
-Commands: guide, run, watch, agents, fleet, read, dispatch, wait. Bare herdr-axi: fleet + next action.
+Commands: guide, run, watch, agents, fleet, machines, explain, read, dispatch, wait. Bare herdr-axi: fleet + next action.
 Target owned pane IDs (w1:pP), never titles or self. Global discovery != ownership. One writer/worktree.
 Running: independent work; one notification-backed watch if supported, otherwise block only when dependent. No repeated inbox/read polls.
 Review returned reports -> accept/revise -> close accepted tabs -> finish. Unfinished stop: run cancel --help.
@@ -26,8 +26,8 @@ const RUN_HELP = {
   Already loaded at init; no config preflight needed before queue.`,
   queue: `herdr-axi run queue TASK --role ROLE --cwd WORKTREE --area AREA --prompt "task; checks" [--after ID,ID] [--start]
   --prompt-file FILE instead; exactly one prompt source. 128 tasks/run.
-  Override: --kind KIND --model MODEL --effort LEVEL; role limits retained. Cursor: --effort model; guide cursor.
-  Without --role: --kind claude|codex|copilot|cursor; write access, no native children.
+  Override: --kind KIND; only installed Herdr integrations. Core providers also accept --model/--effort.
+  Without --role: --kind KIND; write access, no native children. Native-policy kinds may block for provider input.
   --area relative to --cwd; . = whole tree, not isolation. Read-only: access:read role.
   --start schedules ALL eligible tasks within caps; follow help, do not call next again.
   Batch: omit --start; queue, then run next once. No config/layout preflight.`,
@@ -70,7 +70,7 @@ const RUN_HELP = {
   close: `herdr-axi run close <pane>
   Accepted owned workers only; whole tab including monitor. Never the owner tab.
   Closing is not cancellation. User requested abort: run cancel <pane> --evidence "authorized stop; partial state/background jobs reviewed" BEFORE acceptance.`,
-  switch: `herdr-axi run switch <pane-or-task-id> --kind claude|codex|copilot|cursor --model <model> [--effort high] [--summary "partial work / pending checks"]
+  switch: `herdr-axi run switch <pane-or-task-id> --kind KIND [--model <model> --effort high] [--summary "partial work / pending checks"]
   Or --role <configured-worker-role>; same read/write access, different provider.
   Cursor: explicit cursor-agent models ID; --effort model, not high.
   Quota/session limit only; live identity + current quota error required, including native unknown. Never working.
@@ -112,8 +112,10 @@ const RUN_HELP = {
 
 const COMMAND_HELP = {
   guide: 'herdr-axi guide [keywords]  # alias: herdr-axi --skill\n  TOON: no keywords = full compact workflow; e.g. guide "start opus", guide "quota switch", guide "stop worker".\n  Local routing; precise recipes only; no backend/model call or action executed.',
-  agents: "herdr-axi agents [--state working|blocked|idle|done|unknown] [--kind claude|codex|copilot|cursor] [--all]\n  Selected run by default; --all lists globally. Fields: name, kind, state, pane.\n  No selected run: discovery only, not ownership. New agents: herdr-axi run init, then run queue/next; never raw agent start.",
+  agents: "herdr-axi agents [--state working|blocked|idle|done|unknown] [--kind KIND] [--all]\n  Selected run by default; --all lists globally. Fields: name, kind, state, pane.\n  Managed startup exposes installed Herdr integrations only. New agents: run init, then run queue/next.",
   fleet: "herdr-axi fleet [--all]\n  Selected run: owned tasks, review queue, capacity. --all: global discovery, not ownership.\n  New agents: herdr-axi run init, then run queue/next. Titles: herdr-axi agents.",
+  machines: "herdr-axi machines\n  Read-only SSH connection inventory. Profiles are not globally addressable workers; pane and workspace IDs remain server-scoped.",
+  explain: "herdr-axi explain <pane> [--verbose]\n  Explain Herdr 0.9 agent-state detection for an owned pane. --verbose adds bounded rule evidence.",
   read: "herdr-axi read <pane> [--raw] [--full] [--lines N] [--chars N]\n  Default: compact text; 60 visible lines, 8000 characters.\n  --raw preserves layout (diagrams, tables, approval menus); limits still apply.\n  --full reads history, still compact unless --raw; 2000-line cap, no default character cap. May require a settled agent.\n  --lines and --chars override defaults; --full never exceeds 2000 lines.\n  --compact remains a compatibility alias for the default; cannot combine with --raw.",
   dispatch: 'herdr-axi dispatch <pane> "<task>" [--no-wait] [--timeout-ms N]\n  Submit and wait for a post-submission settled state. Refuses a working agent.\n  --no-wait confirms submission only; a separate wait may match pre-start idle.\nherdr-axi dispatch <pane> --keys <key> [<key>...]\n  Send explicit UI keys (e.g. down enter) and return immediately. Inspect the dialog before answering; never automatically approve it.',
   wait: "herdr-axi wait <pane> --until <state> [--timeout-ms N]\n  Wait for a state (default idle, also matches background done). Reports actual reached state. Unknown is not completion. Settled state does not prove background work has finished.",
@@ -163,6 +165,8 @@ await runAxiCli({
     },
     agents: (a) => agents(a),
     fleet: (a) => fleetCmd(a),
+    machines: (a) => machines(a),
+    explain: (a) => explain(a),
     read: (a) => read(a),
     dispatch: (a) => dispatch(a),
     wait: (a) => wait(a),
