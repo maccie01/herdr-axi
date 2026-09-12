@@ -60,6 +60,7 @@ Finish: reviewed results; owned worker tabs closed; run archived.
 - Full compact workflow: `herdr-axi guide` / `herdr-axi --skill`; not a prerequisite.
 - Start with `run init`; no fleet/config/layout preflight.
 - Existing isolated worktree for concurrent writing; `--area` relative to `--cwd`, not isolation.
+- Managed worktree automation is intentionally not active yet; its fail-closed contract is documented in [managed worktrees](docs/managed-worktrees.md).
 - Inline task + acceptance criteria + checks; no project plan/state document needed.
 
 ```sh
