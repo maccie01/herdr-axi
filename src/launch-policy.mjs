@@ -27,6 +27,11 @@ export function validateLaunch({ kind, model, effort = Object.hasOwn(PROVIDER_DE
     if (effort !== "model") throw invalid("Cursor effort is selected by its model ID; use --effort model and choose the exact ID from cursor-agent models");
     return { kind, model, effort, mode: launchMode(kind) };
   }
+  // Copilot Auto picks model and reasoning itself and rejects --effort.
+  if (kind === "copilot" && (model === "auto" || effort === "model")) {
+    if (model !== "auto" || effort !== "model") throw invalid("Copilot Auto selects its own model and reasoning; use --model auto --effort model");
+    return { kind, model, effort, mode: launchMode(kind) };
+  }
   if (!["minimal", "low", "medium", "high", "xhigh", "max"].includes(effort) || (kind === "claude" && effort === "minimal")) throw invalid(`Unsupported ${kind} effort: ${effort}`);
   if (kind === "claude") {
     const base = model.replace(/\[1m\]$/, "");

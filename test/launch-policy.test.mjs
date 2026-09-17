@@ -110,6 +110,13 @@ test("provider changes use destination effort without losing the role contract",
   assert.equal(selectWorker(archivedConfig, { kind: "codex" }).model, "gpt-5.6-sol");
 });
 
+test("Copilot Auto launches without a model-specific reasoning effort", () => {
+  assert.deepEqual(validateLaunch({ kind: "copilot", model: "auto", effort: "model" }), { kind: "copilot", model: "auto", effort: "model", mode: "autopilot" });
+  for (const options of [{ kind: "copilot", model: "auto", effort: "high" }, { kind: "copilot", model: "gpt-5.6-sol", effort: "model" }, { kind: "copilot", model: "auto" }])
+    assert.throws(() => validateLaunch(options), /--model auto --effort model/);
+  assert.equal(validateLaunch({ kind: "copilot", model: "gpt-5.6-sol", effort: "high" }).effort, "high");
+});
+
 test("Cursor uses explicit native model IDs and Smart Auto without inheriting another provider's effort", () => {
   const selected = selectWorker(validateConfig(), { role: "verifier", kind: "cursor", model: "composer-2.5" });
   assert.equal(selected.kind, "cursor"); assert.equal(selected.access, "read"); assert.equal(selected.effort, "model");

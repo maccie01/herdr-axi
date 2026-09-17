@@ -191,7 +191,6 @@ case "$kind" in
       --autopilot
       --allow-all
       --model "$model"
-      --effort "$effort"
       --name "$name"
       --session-id "$session_id"
       --max-autopilot-continues "$max_autopilot_continues"
@@ -199,6 +198,7 @@ case "$kind" in
       --deny-tool 'shell(git push)'
       --deny-tool 'shell(git reset)'
     )
+    [[ "$effort" == "model" ]] || native_args+=(--effort "$effort")
     [[ "$native_hooks" == "0" ]] || native_args+=(--plugin-dir "$script_dir/herdr-monitor-plugins/copilot")
     ;;
   claude)

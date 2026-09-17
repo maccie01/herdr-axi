@@ -318,6 +318,20 @@ test_native_hooks_switch_controls_provider_hook_flags() (
   done
 )
 
+test_copilot_auto_omits_reasoning_effort() (
+  local effort expected
+  for effort in model high; do
+    setup_case "copilot-auto-$effort"
+    printf '%s\n' success > "$FAKE_HERDR_CASE/worker-prompt-mode"
+    printf '%s\n' 'prompt' > "$FAKE_HERDR_CASE/worker.txt"
+    if [[ "$effort" == model ]]; then model=auto; expected=0; else model=gpt-5.6-sol; expected=1; fi
+    bash "$worker_script" --name worker --kind copilot --model "$model" --effort "$effort" \
+      --cwd "$FAKE_HERDR_CASE" --prompt-file "$FAKE_HERDR_CASE/worker.txt" --workspace ws --orchestrator-agent orch >/dev/null
+    assert_eq "$expected" "$(call_count '^agent start .* --effort ')" "copilot $model effort flag"
+    assert_eq 1 "$(call_count "^agent start .* --model $model ")" "copilot $model model flag"
+  done
+)
+
 test_repair_and_experimental_integrations_fail_before_allocation() (
   local kind record
   for kind in opencode letta; do
