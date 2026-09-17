@@ -62,7 +62,7 @@ Workers nur lesend, `--effort low`, Repo `herdr-axi`.
 |---|---|---|---|---|
 | Claude | Abschluss | event-wait | 0,34 s früher, verworfen (`no-completion-proof`) | event-wait |
 | Codex | Abschluss | event-wait | 0,34 s früher, verworfen (`no-completion-proof`) | event-wait |
-| Claude | Rückfrage | event-wait | 5,75 s später, verworfen (`duplicate-event`) | event-wait, 3,5 s nach Start |
+| Claude | Rückfrage | event-wait | 5,75 s später, verworfen (`duplicate-event`) | event-wait, 3,5 s nach erstem Leerlauf (Hooks 1: 2,9 s) |
 | Copilot | beide | nicht messbar | | nicht messbar |
 | alle | Fehler/Kontingent | nicht ausgelöst | | |
 
@@ -73,7 +73,7 @@ Workers nur lesend, `--effort low`, Repo `herdr-axi`.
   Der Dialogtext aus dem nativen Hook wurde nie verwendet.
 - Codex-Abschluss wurde im ersten Versuch nicht zugestellt, weil der Prompt jede
   Werkzeugnutzung verbot und damit den Abschlussnachweis verhinderte (Messfehler,
-  Abschnitt 2 in `trace-hooks1.tsv`); Wiederholung mit korrigiertem Prompt.
+  erster Abschnitt in `trace-hooks1.tsv`); Wiederholung mit korrigiertem Prompt.
 - Copilot 1.0.85: Das Konto erlaubt nur `--model auto` ohne `--effort`. Herdrs
   Copilot-Integration hängt an `SessionStart`, das Copilot erst mit dem ersten Prompt
   auslöst. herdr-axi verlangt die Session vor der Übergabe (`SESSION_START_UNVERIFIED`),
