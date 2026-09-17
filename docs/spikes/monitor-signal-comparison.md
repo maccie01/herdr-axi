@@ -52,3 +52,35 @@ etwa Abbruchgrund oder Dialogtext?
 Streichen, wenn mit Hooks 0 alle Ereignisse aus 1 und 2 ankommen, der Abschluss
 höchstens einen Event-Wait-Zyklus später gemeldet wird und Rückfragen im Inbox-Eintrag
 erkennbar bleiben. Sonst behalten und den fehlenden Signaltyp dokumentieren.
+
+## Ergebnis 17.09.2026 (Herdr 0.9.0, macOS)
+
+Rohdaten: `trace-hooks1.tsv`, `trace-hooks0.tsv` (Abschnitte durch `---` getrennt).
+Workers nur lesend, `--effort low`, Repo `herdr-axi`.
+
+| Provider | Fall | Hooks 1: zugestellt über | Eigener Hook | Hooks 0: zugestellt über |
+|---|---|---|---|---|
+| Claude | Abschluss | event-wait | 0,34 s früher, verworfen (`no-completion-proof`) | event-wait |
+| Codex | Abschluss | event-wait | 0,34 s früher, verworfen (`no-completion-proof`) | event-wait |
+| Claude | Rückfrage | event-wait | 5,75 s später, verworfen (`duplicate-event`) | event-wait, 3,5 s nach Start |
+| Copilot | beide | nicht messbar | | nicht messbar |
+| alle | Fehler/Kontingent | nicht ausgelöst | | |
+
+- In keinem Fall hat ein eigener Provider-Hook ein Signal zugestellt. Beim
+  Abschluss feuert er vor dem sichtbaren Nachweis und wird verworfen; die Zustellung
+  kommt Sekundenbruchteile später über Event-Wait. Rückfragen erkennt Event-Wait früher.
+- Der Inbox-Eintrag ist in beiden Varianten gleich, weil stets Event-Wait zustellt.
+  Der Dialogtext aus dem nativen Hook wurde nie verwendet.
+- Codex-Abschluss wurde im ersten Versuch nicht zugestellt, weil der Prompt jede
+  Werkzeugnutzung verbot und damit den Abschlussnachweis verhinderte (Messfehler,
+  Abschnitt 2 in `trace-hooks1.tsv`); Wiederholung mit korrigiertem Prompt.
+- Copilot 1.0.85: Das Konto erlaubt nur `--model auto` ohne `--effort`. Herdrs
+  Copilot-Integration hängt an `SessionStart`, das Copilot erst mit dem ersten Prompt
+  auslöst. herdr-axi verlangt die Session vor der Übergabe (`SESSION_START_UNVERIFIED`),
+  Copilot-Worker sind damit derzeit blockiert.
+
+Offen: Fehler- und Kontingentfälle (`StopFailure`, `errorOccurred`) und Gegenprobe
+auf Herdr 0.9.1.
+
+Vorläufige Einschätzung nach der Entscheidungsregel: Für Abschluss und Rückfrage
+liefern die eigenen Hooks keinen Mehrwert. Streichen erst nach Klärung des Fehlerfalls.
