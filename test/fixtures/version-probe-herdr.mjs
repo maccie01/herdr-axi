@@ -11,7 +11,8 @@ if (!["status", "agent", "integration"].includes(action)) {
 
 if (action === "integration") {
   assert.equal(sub, "status");
-  if (process.env.AXI_FAKE_NO_INTEGRATIONS === "true") console.log("codex: not installed (/fixture)");
+  if (process.env.AXI_FAKE_INTEGRATION_STATUS !== undefined) console.log(process.env.AXI_FAKE_INTEGRATION_STATUS);
+  else if (process.env.AXI_FAKE_NO_INTEGRATIONS === "true") console.log("codex: not installed (/fixture)");
   else {
     const kind = process.env.AXI_FAKE_INTEGRATION_KIND ?? "codex";
     console.log(`${kind}: current (v8) (/fixture)`);
@@ -31,6 +32,8 @@ if (action === "integration") {
       version: process.env.AXI_FAKE_CLIENT_VERSION,
       protocol: 22,
       endpoint_protocol_generation: clientGeneration,
+      remote_host_bridge: true,
+      remote_bridge_idle_timeout: true,
     },
     server: {
       status: serverRunning ? "running" : "not_running",

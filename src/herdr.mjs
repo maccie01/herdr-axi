@@ -3,7 +3,7 @@
 import { spawnSync } from "node:child_process";
 import { AxiError } from "axi-sdk-js";
 import { ownedRows, isSelf } from "./run-state.mjs";
-import { installedIntegrationKinds, parseIntegrationStatus } from "./integrations.mjs";
+import { launchableIntegrationKinds, parseIntegrationStatus } from "./integrations.mjs";
 
 export const STATES = ["working", "blocked", "idle", "done", "unknown"];
 
@@ -56,7 +56,7 @@ export function integrationInventory() {
   return parseIntegrationStatus(runHerdr(["integration", "status"], { text: true }));
 }
 
-export const integrationKinds = (inventory = integrationInventory()) => installedIntegrationKinds(inventory);
+export const integrationKinds = (inventory = integrationInventory()) => launchableIntegrationKinds(inventory);
 
 function mapErrorCode(msg = "", wireCode = "") {
   if (["agent_not_found", "pane_not_found", "tab_not_found", "agent_not_running"].includes(wireCode)) return "UNKNOWN_AGENT";
@@ -110,6 +110,10 @@ export function herdrVersionProbe() {
   }
 
   const client = parseHerdrVersion(status?.client?.version, "Herdr client");
+  if (typeof status?.server?.socket === "string" && status.server.socket.startsWith("machine:")) {
+    throw new AxiError("Remote Herdr machine endpoints are not supported for managed runs; use a local Herdr session without a --machine wrapper",
+      "HERDR_REMOTE_UNSUPPORTED", ["herdr status --json", "herdr-axi run init --help"]);
+  }
   if (status?.server?.running !== true) throw unreachable("Herdr server is not running");
   const server = parseHerdrVersion(status?.server?.version, "Herdr server");
   if (status.server.compatible === false) {

@@ -195,9 +195,28 @@ import { fixture, cli } from "./support/run-fixture.mjs";
     try {
       f.ok(["run", "queue", "native", "--kind", "opencode", "--cwd", f.state().project, "--area", ".", "--prompt", "Inspect"]);
       const output = f.execute(["run", "next"], { AXI_TEST_MISSING_INTEGRATION: "opencode" });
-      assert.equal(output.status, 0, output.output); assert.match(output.output, /integration is not installed/);
+      assert.equal(output.status, 0, output.output); assert.match(output.output, /integration.*is not installed/);
       assert.equal(f.state().tasks[0].state, "queued");
       assert(!f.calls().some((call) => call.action === "create"));
+    } finally { f.clean(); }
+  });
+
+  test("repair inventory rejects queue and defers next with actionable diagnostics before allocation", () => {
+    const f = fixture();
+    try {
+      const env = { AXI_TEST_INTEGRATION_STATUS: "codex: needs repair (v8) (/fixture)" };
+      const args = ["run", "queue", "repair", "--kind", "codex", "--cwd", f.state().project, "--area", ".", "--prompt", "Inspect"];
+      const rejected = f.execute(args, env);
+      assert.equal(rejected.status, 1);
+      assert.match(rejected.output, /needs repair/);
+      assert.equal(f.state().tasks.length, 0);
+      f.ok(args);
+      const deferred = f.execute(["run", "next"], env);
+      assert.equal(deferred.status, 0, deferred.output);
+      assert.match(deferred.output, /needs repair/);
+      assert.match(deferred.output, /herdr integration install codex/);
+      assert.equal(f.state().tasks[0].state, "queued");
+      assert(!f.calls().some((call) => ["create", "start", "prompt"].includes(call.action)));
     } finally { f.clean(); }
   });
 

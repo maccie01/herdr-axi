@@ -1,7 +1,8 @@
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { integrationKinds } from "./herdr.mjs";
+import { integrationInventory } from "./herdr.mjs";
+import { integrationProblem } from "./integrations.mjs";
 import { pending, changeRun, runError, limit } from "./run-state.mjs";
 import { worktree, writerLease } from "./project.mjs";
 import { validateLaunch } from "./launch-policy.mjs";
@@ -40,7 +41,7 @@ function activeBlockers(run, rows) {
 }
 
 export async function scheduleRun(run, rows, launch, waitingNote) {
-  const available = integrationKinds();
+  const inventory = integrationInventory();
   const blockers = activeBlockers(run, rows);
   const selection = changeRun((r, { rollback }) => {
     const selected = [], deferred = [];
@@ -54,10 +55,11 @@ export async function scheduleRun(run, rows, launch, waitingNote) {
     };
     for (const t of r.tasks.filter((t) => t.state === "queued" && t.phase === r.phase)) {
       try {
-        if (!available.includes(t.kind)) throw runError(`Herdr integration is not installed for ${t.kind}`, "INTEGRATION_NOT_INSTALLED");
+        const problem = integrationProblem(inventory, t.kind);
+        if (problem) throw runError(problem.message, problem.code, problem.help);
         validateLaunch(t);
       }
-      catch (e) { defer(t, e.message, { help: `herdr-axi run cancel ${t.id}` }); continue; }
+      catch (e) { defer(t, e.message, { help: e.suggestions?.length ? e.suggestions.join("; ") : `herdr-axi run cancel ${t.id}` }); continue; }
       const active = pending(r);
       if (active.length >= limit(r)) { defer(t, "primary capacity"); continue; }
       const dependency = t.deps.map((id) => tasksById.get(id) ?? { id, state: "missing" }).find((d) => d.state !== "accepted");

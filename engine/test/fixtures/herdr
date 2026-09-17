@@ -64,6 +64,7 @@ fi
 
 case "$group:$action" in
   integration:status)
+    if [[ -f "$case_dir/integration-status" ]]; then cat "$case_dir/integration-status"; exit 0; fi
     missing_integration=$(read_value "$case_dir/missing-integration" __empty__)
     printf '%s\n' \
       'claude: current (v9) (/fixture)' \
@@ -283,6 +284,7 @@ case "$group:$action" in
     printf '%s\n' working > "$case_dir/status"
     ;;
   tab:create)
+    [[ " $* " == *" --no-focus "* ]] || exit 2
     while (( $# > 0 )); do
       if [[ "$1" == "--label" ]]; then printf '%s\n' "$2" > "$case_dir/tab-label"; break; fi
       shift
@@ -351,6 +353,7 @@ case "$group:$action" in
     mv -f "$temporary_ready" "${monitor_receipt}.monitor-ready"
     ;;
   pane:split)
+    [[ " $* " == *" --pane "* && " $* " == *" --no-focus "* ]] || exit 2
     : > "$case_dir/monitor-1-alive"
     jq -nc '{result:{pane:{pane_id:"monitor-1"}}}'
     ;;

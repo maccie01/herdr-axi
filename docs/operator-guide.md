@@ -56,6 +56,22 @@ saved SSH-machine transport, while herdr-axi uses the CLI/socket API. A stale bu
 compatible server binary also warns; restart Herdr when new server-side behavior
 is required instead of assuming a client-only update changed it.
 
+Herdr 0.9.1 is recommended; local 0.9.0/0.9.1 client/server combinations remain
+supported when their private protocols are compatible. Managed runs are local-only:
+do not use a `--machine` wrapper. Herdr 0.9.1 rejects the full status probe through
+that wrapper, so init fails with `HERDR_UNREACHABLE` before writing state. If a
+backend does return a `machine:` socket label, a defensive guard rejects it with
+`HERDR_REMOTE_UNSUPPORTED`. Remote workers would require
+machine-scoped identity, transport, paths, receipts and cleanup; listing saved
+machines does not provide those guarantees.
+
+After a Herdr update, inspect `herdr integration status`. Refresh affected Claude
+and OpenCode assets explicitly with `herdr integration install claude` and
+`herdr integration install opencode`; restart OpenCode after refreshing its plugin.
+These operations are manual, not part of `run init`. On macOS, the affected
+0.9.1 server fixes require a full Herdr restart: schedule that after live workers
+are safely finished rather than restarting their terminal server mid-run.
+
 ## Start a managed run
 
 Run from the **orchestrator's own Herdr pane**. Pass the task inline: bounded
@@ -83,7 +99,14 @@ herdr-axi run queue parser --role implementer --cwd /path/to/worktree \
 accepted workers can be reused. Worker tabs: `<task-id> · <kind>`, 75% agent / 25%
 monitor by default. Keep `HERDR_AXI_RUN` in subsequent calls.
 Selectable kinds are refreshed from `herdr integration status` at init, queue,
-switch, next and launch time. Detected agents without a loaded integration remain discovery-only.
+switch, next and launch time. Current, legacy installed and outdated integrations
+are launchable; outdated entries include refresh guidance. `needs repair` remains
+installed but cannot launch. Experimental entries (including Letta), unknown
+status and conflicting duplicates are diagnostic-only. No provider certification
+is implied by parsing an experimental entry. Detected agents without a loaded
+integration remain discovery-only. Init and config show bounded diagnostics;
+`run config --full` shows the complete init snapshot, not a fresh inventory probe.
+Queue and next recheck live inventory after a manual repair.
 Long assignments: `--prompt-file /external/task.txt` instead of `--prompt`.
 
 **While workers run, continue independent work.** Use `run inbox` for results,

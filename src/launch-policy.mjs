@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
-import { installedIntegrationKinds, integrationPolicy, parseIntegrationStatus } from "./integrations.mjs";
+import { integrationProblem, integrationPolicy, parseIntegrationStatus } from "./integrations.mjs";
 
 export const PROVIDER_DEFAULTS = Object.freeze({
   claude: Object.freeze({ model: "opus", effort: "high" }),
@@ -57,8 +57,8 @@ if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import
     if (args.length === 1 && args[0] === "--check-screen") console.log(JSON.stringify(checkLaunchScreen(fs.readFileSync(0, "utf8"))));
     else if (args.length === 2 && args[0] === "--check-integration") {
       const kind = args[1];
-      if (!installedIntegrationKinds(parseIntegrationStatus(fs.readFileSync(0, "utf8"))).includes(kind))
-        throw invalid(`Herdr integration is not installed for ${kind}; inspect herdr integration status and herdr integration install --help`, "INTEGRATION_NOT_INSTALLED");
+      const problem = integrationProblem(parseIntegrationStatus(fs.readFileSync(0, "utf8")), kind);
+      if (problem) throw invalid(`${problem.message}; inspect ${problem.help.join("; ")}`, problem.code);
       console.log(JSON.stringify({ kind, integration: "installed" }));
     }
     else {

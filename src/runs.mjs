@@ -6,7 +6,7 @@ import { runHerdr, listAgents, requireHerdrEnv, projectAgent, herdrVersionProbe,
 import { PHASES, runError, runDir, loadRun, changeRun, pending, limit, receipt, registeredWorker, ownedWorkers, takeRunWarnings, taskFor } from "./run-state.mjs";
 import { projectConfig, selectWorker, worktree, nativeSlots, workerRoleSummary, unavailableWorkerRoles, writerLease, leasePath, leaseStatus, hash, DEFAULT_CONFIG } from "./project.mjs";
 import { launchMode } from "./launch-policy.mjs";
-import { isIntegrationKind } from "./integrations.mjs";
+import { isIntegrationKind, integrationDiagnostics } from "./integrations.mjs";
 import { projectRuns, projectHistory, history, finishRun, collectArchives } from "./archive.mjs";
 import { quotaError, switchHelp } from "./quota.mjs";
 
@@ -176,7 +176,8 @@ async function runInit(o) {
   const probe = herdrVersionProbe();
   const integrationStatus = integrationInventory();
   const integrations = integrationKinds(integrationStatus);
-  if (!integrations.length) throw runError("No installed Herdr worker integration", "INTEGRATION_NOT_INSTALLED", ["herdr integration status", "herdr integration install codex"]);
+  const diagnostics = integrationDiagnostics(integrationStatus);
+  if (!integrations.length) throw runError(`No launchable Herdr worker integration${diagnostics.length ? `: ${diagnostics.slice(0, 8).map((entry) => entry.message).join("; ")}` : ""}`, "INTEGRATION_NOT_INSTALLED", [...new Set(["herdr integration status", ...diagnostics.slice(0, 8).flatMap((entry) => entry.help), "herdr integration install --help"])]);
   const caller = callerPane();
   const ownerPane = o.owner ?? caller;
   if (!ownerPane) throw runError("init needs a resolvable caller pane");
@@ -202,13 +203,13 @@ async function runInit(o) {
   const warnings = [
     ...(endpointMismatch ? [`Herdr endpoint generations are client=${probe.protocolGeneration ?? "unknown"}, server=${probe.serverProtocolGeneration ?? "unknown"}. CLI automation can proceed, but saved SSH/multi-machine UI compatibility needs attention; inspect: herdr status --json`] : []),
     ...(staleServer ? [`Herdr client ${probe.clientVersion} and server ${probe.serverVersion} differ. Both satisfy herdr-axi, but prompt behavior is server-owned; restart Herdr if you expected the updated server binary.`] : []),
-    ...integrationStatus.filter((entry) => entry.status === "outdated").map((entry) => `Herdr integration ${entry.kind}${entry.version ? ` v${entry.version}` : ""} is outdated; refresh it with: herdr integration install ${entry.name}`),
     ...(unavailableRoles.length ? [`Configured worker roles are unavailable and were omitted: ${unavailableRoles.map(({ role, kind }) => `${role}:${kind}`).join(", ")}. Inspect herdr integration status and the role kind spelling.`] : []),
   ];
   return { run: dir, owner: ownerPane, workspace: run.workspace, project: project.project, config: project.configFile || "defaults", integrations, phase: run.phase, capacity: limit(run), ...roles, cleanup: collectArchives(project.project),
+    ...(diagnostics.length ? { integrationDiagnostics: diagnostics.slice(0, 8), ...(diagnostics.length > 8 ? { moreIntegrationDiagnostics: diagnostics.length - 8 } : {}) } : {}),
     ...(unavailableRoles.length ? { unavailableRoles } : {}),
     ...(warnings.length ? { warning: warnings.join(" ") } : {}),
-    selection: "Kinds are installed Herdr integrations. Configured roles retain access/native limits; direct native kinds use provider-owned policy and accept no model/effort override.",
+    selection: "Kinds are launchable Herdr integrations. Configured roles retain access/native limits; direct native kinds use provider-owned policy and accept no model/effort override.",
     note: "Next tool call: replace TASK/WORKTREE/task text; use a returned write role or integration. Export + queue together; repeat export in EVERY tool call (shells may reset). --start schedules within caps; batch: omit --start, next once. No fleet/help/config/layout/run.json preflight.",
     help: [...(workerChoice ? [`export HERDR_AXI_RUN=${quote(dir)}; herdr-axi run queue TASK ${workerChoice} --cwd WORKTREE --area . --prompt 'task; owned files; checks' --start`] : ["herdr-axi guide cursor", "herdr-axi run config"]), ...(roles.moreRoles ? ["herdr-axi run config --full"] : [])] };
 }
@@ -216,7 +217,9 @@ async function runInit(o) {
 async function runConfig(run, o) {
   const config = run.config ?? DEFAULT_CONFIG;
   const unavailableRoles = unavailableWorkerRoles(config, run.integrations);
+  const diagnostics = integrationDiagnostics(run.integrationStatus ?? []);
   return { project: run.project, source: run.configFile || "defaults", integrations: run.integrations ?? [],
+    ...(diagnostics.length ? { integrationDiagnostics: o.full ? diagnostics : diagnostics.slice(0, 8), ...(!o.full && diagnostics.length > 8 ? { moreIntegrationDiagnostics: diagnostics.length - 8 } : {}) } : {}),
     ...(unavailableRoles.length ? { unavailableRoles } : {}),
     ...(o.full ? { integrationStatus: run.integrationStatus ?? [], config } : { ...workerRoleSummary(config, run.integrations), phase: run.phase, capacity: limit(run), nativeSubagentLimit: config.nativeSubagentLimit, sharedReadWorktree: config.sharedReadWorktree }),
     note: "Init snapshot; read-only/native child limits are instructions, not a sandbox. Owner model is a launch contract, never changed here.",
@@ -270,7 +273,8 @@ async function runTakeover(run, o) {
 
 async function runQueue(run, o) {
   const id = o._[0];
-  const role = selectWorker(run.config ?? DEFAULT_CONFIG, o, integrationKinds());
+  const integrationStatus = integrationInventory();
+  const role = selectWorker(run.config ?? DEFAULT_CONFIG, o, integrationStatus);
   const kind = role.kind;
   if (!idOK(id) || !isIntegrationKind(kind) || !o.cwd || !o.area) throw runError("queue needs a short task ID, --role or --kind, --cwd, --area and --prompt TEXT or --prompt-file PATH");
   const location = taskLocation(o.cwd, o.area);

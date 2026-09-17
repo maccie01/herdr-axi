@@ -20,6 +20,10 @@ if (group === "status") {
 }
 if (group === "integration") {
   assert.equal(action, "status");
+  if (process.env.AXI_TEST_INTEGRATION_STATUS !== undefined) {
+    console.log(process.env.AXI_TEST_INTEGRATION_STATUS);
+    process.exit(0);
+  }
   const missing = process.env.AXI_TEST_MISSING_INTEGRATION;
   const none = process.env.AXI_TEST_NO_INTEGRATIONS === "1";
   console.log(["claude", "codex", "copilot", "cursor", "opencode"].map((kind) =>
@@ -112,6 +116,7 @@ if (group === "agent") {
   else throw Error(`unexpected agent ${action}`);
 } else if (group === "tab") {
   if (action === "create") {
+    assert(args.includes("--no-focus"), "worker tabs must not steal focus");
     if (fs.existsSync(path.join(dir, "create-fail"))) { console.error("backend unavailable before tab create"); process.exit(1); }
     const id = randomUUID().slice(0, 8);
     const a = { ...owner, pane_id: `wTEST:p${id}`, tab_id: `wTEST:t${id}`, terminal_id: id, name: "", label: args[args.indexOf("--label") + 1], agent: "", agent_status: "idle", cwd: args[args.indexOf("--cwd") + 1] };
@@ -136,6 +141,8 @@ if (group === "agent") {
 } else if (action === "current") {
   assert(args.includes("--current")); emit({ pane: owner });
 } else if (action === "split") {
+  assert(args.includes("--pane"), "monitor split needs an explicit pane");
+  assert(args.includes("--no-focus"), "monitor split must not steal focus");
   const a = find(args[args.indexOf("--pane") + 1]);
   fs.writeFileSync(path.join(dir, `${a.pane_id}MONITOR.monitor`), JSON.stringify({ pane_id: a.pane_id + "MONITOR", tab_id: a.tab_id, workspace_id: a.workspace_id }));
   emit({ pane: { pane_id: a.pane_id + "MONITOR" } });

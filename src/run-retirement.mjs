@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { captureCheckpoint } from "./run-evidence.mjs";
-import { runHerdr, listAgents, integrationKinds } from "./herdr.mjs";
+import { runHerdr, listAgents, integrationInventory } from "./herdr.mjs";
 import { runError, runDir, taskFor, changeRun, registeredWorker, ownedWorkers, receipt, pending } from "./run-state.mjs";
 import { writerLease, selectWorker, DEFAULT_CONFIG, nativeSlots, hash } from "./project.mjs";
 import { safeWorker } from "./worker-identity.mjs";
@@ -108,10 +108,10 @@ export async function runSwitch(run, o, rows) {
     if ((task.handoffs?.length ?? 0) >= 4) throw runError("Four provider switches reached; re-scope explicitly", "SWITCH_LIMIT");
     if (o.role && (o.kind || o.model || o.effort)) throw runError("Choose --role OR --kind/--model/--effort", "CONFIG_INVALID");
     const config = run.config ?? DEFAULT_CONFIG;
-    const available = integrationKinds();
+    const integrationStatus = integrationInventory();
     const target = o.role
-      ? selectWorker(config, { role: o.role }, available)
-      : selectWorker(config, { kind: o.kind, model: o.model, effort: o.effort, access: task.access }, available, { requireExplicitModel: true });
+      ? selectWorker(config, { role: o.role }, integrationStatus)
+      : selectWorker(config, { kind: o.kind, model: o.model, effort: o.effort, access: task.access }, integrationStatus, { requireExplicitModel: true });
     if (!target || o.role === "orchestrator" || target.kind === task.kind || target.access !== task.access) throw runError("Choose another provider with the same read/write access", "CONFIG_INVALID");
     if (pending(run).reduce((n, t) => n + (t.nativeSlots ?? 0), 0) - (task.nativeSlots ?? 0) + nativeSlots(target) > config.nativeSubagentLimit) throw runError("Replacement exceeds native subagent budget", "CAPACITY_FULL");
     if (o.summary !== undefined && (!o.summary.trim() || o.summary.length > 4000)) throw runError("--summary must contain 1..4000 characters");

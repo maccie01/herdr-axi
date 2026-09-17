@@ -303,6 +303,26 @@ test_missing_integration_fails_before_worker_allocation() (
   assert_file_absent "$FAKE_HERDR_CASE/monitor-command" 'missing integration allocates no monitor'
 )
 
+test_repair_and_experimental_integrations_fail_before_allocation() (
+  local kind record
+  for kind in opencode letta; do
+    setup_case "unavailable-$kind"
+    if [[ "$kind" == opencode ]]; then record='opencode: needs repair (v12) (/fixture)'
+    else record='letta (experimental): current (v1) (/fixture)'; fi
+    printf '%s\n' "$record" > "$FAKE_HERDR_CASE/integration-status"
+    printf '%s\n' 'must not start' > "$FAKE_HERDR_CASE/prompt"
+    if HERDR_AXI_ENGINE_PROTOCOL=1 bash "$worker_script" --name worker --kind "$kind" --cwd "$FAKE_HERDR_CASE" \
+      --prompt-file "$FAKE_HERDR_CASE/prompt" --workspace ws --orchestrator-agent orch \
+      3> "$TMPDIR/frame" > "$TMPDIR/output" 2>&1; then
+      fail 'unavailable integration started a worker'
+    fi
+    jq -e '.code == "INTEGRATION_NOT_INSTALLED" and .submitted == false' "$TMPDIR/frame" >/dev/null || fail 'unsubmitted failure frame absent'
+    rg -q 'needs repair|experimental' "$TMPDIR/output" || fail 'inventory reason absent'
+    assert_eq 0 "$(call_count '^tab create')" 'unavailable integration allocates no tab'
+    assert_file_absent "$FAKE_HERDR_CASE/monitor-command" 'unavailable integration allocates no monitor'
+  done
+)
+
 test_codex_initialization_turn_precedes_exactly_one_assignment() (
   setup_case codex-bootstrap-success
   printf '%s\n' codex > "$FAKE_HERDR_CASE/kind"

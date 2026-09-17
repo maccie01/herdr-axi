@@ -71,6 +71,27 @@ test("probe requires 0.9 on both the client and the behavior-owning server", () 
   }
 });
 
+test("probe defensively rejects a remote label if a backend returns one in full status", () => {
+  const overrides = { AXI_FAKE_SOCKET: "machine:build-host/session-a" };
+  assert.throws(() => withBackendEnv(backend(overrides), herdrVersionProbe), { code: "HERDR_REMOTE_UNSUPPORTED" });
+  const { r, state, output, cleanup } = initRun(overrides);
+  try {
+    assert.equal(r.status, 1, output);
+    assert.match(output, /HERDR_REMOTE_UNSUPPORTED/);
+    assert.equal(fs.existsSync(state), false);
+  } finally { cleanup(); }
+});
+
+test("local 0.9.0 and 0.9.1 clients and servers remain compatible in either direction", () => {
+  for (const [client, server] of [["0.9.0", "0.9.1"], ["0.9.1", "0.9.0"], ["0.9.1", "0.9.1"]]) {
+    const probe = withBackendEnv(backend({ AXI_FAKE_CLIENT_VERSION: client, AXI_FAKE_SERVER_VERSION: server }), herdrVersionProbe);
+    assert.equal(probe.clientVersion, client);
+    assert.equal(probe.serverVersion, server);
+    assert.equal(probe.protocolCompatible, true);
+    assert.equal(probe.socket, "/tmp/herdr-test.sock");
+  }
+});
+
 test("probe rejects an unavailable server and an incompatible private protocol", () => {
   assert.throws(() => withBackendEnv(backend({ AXI_FAKE_SERVER_RUNNING: "false" }), herdrVersionProbe),
     (error) => error.code === "HERDR_UNREACHABLE");
@@ -96,6 +117,35 @@ function initRun(overrides = {}, config) {
   });
   return { r, root, state, output: r.stdout + r.stderr, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
 }
+
+test("init refuses repair-only and experimental-only inventory before creating run state", () => {
+  for (const inventory of ["claude: needs repair (v10) (/fixture)", "letta (experimental): current (v1) (/fixture)"]) {
+    const { r, state, output, cleanup } = initRun({ AXI_FAKE_INTEGRATION_STATUS: inventory });
+    try {
+      assert.equal(r.status, 1, output);
+      assert.match(output, /needs repair|experimental/);
+      assert.equal(fs.existsSync(state), false);
+    } finally { cleanup(); }
+  }
+});
+
+test("init and config expose inventory diagnostics without offering unavailable workers", () => {
+  const { r, state, output, cleanup } = initRun({ AXI_FAKE_INTEGRATION_STATUS: "codex: current (v8) (/a)\nclaude: needs repair (v10) (/b)\nletta (experimental): current (v1) (/c)\nopencode: outdated (v11 < v12) (/d)" });
+  try {
+    assert.equal(r.status, 0, output);
+    assert.match(output, /needs repair/);
+    assert.match(output, /experimental/);
+    const run = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
+    assert.deepEqual(run.integrations, ["codex", "opencode"]);
+    for (const flags of [[], ["--full"]]) {
+      const result = spawnSync(process.execPath, [cli, "run", "config", ...flags], { encoding: "utf8", env: { ...process.env, HERDR_AXI_RUN: state } });
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /needs repair/);
+      assert.match(result.stdout, /experimental/);
+      assert.match(result.stdout, /Init snapshot/);
+    }
+  } finally { cleanup(); }
+});
 
 test("init records client/server compatibility evidence in run.json", () => {
   const { r, state, output, cleanup } = initRun({

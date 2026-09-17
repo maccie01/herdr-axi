@@ -6,6 +6,22 @@ import { gunzipSync } from "node:zlib";
 import { spawnSync } from "node:child_process";
 import { fixture, exhaustedWorker, owner } from "./support/run-fixture.mjs";
 
+test("quota switch rejects a repair destination before checkpoint or retirement", () => {
+  const f = fixture();
+  try {
+    const worker = exhaustedWorker(f);
+    const before = f.calls().length;
+    const result = f.execute(["run", "switch", worker.pane, "--kind", "codex", "--model", "gpt-5.6-sol"], {
+      AXI_TEST_INTEGRATION_STATUS: "codex: needs repair (v8) (/fixture)",
+    });
+    assert.equal(result.status, 1, result.output);
+    assert.match(result.output, /needs repair/);
+    assert.equal(f.state().tasks[0].handoffs, undefined);
+    assert.equal(f.state().workers[0].closed, undefined);
+    assert(!f.calls().slice(before).some((call) => ["read", "close", "create", "start", "prompt"].includes(call.action)));
+  } finally { f.clean(); }
+});
+
 test("quota switch reuses its visible 40-line checkpoint when history is unavailable", () => {
   const f = fixture();
   try {
