@@ -14,7 +14,7 @@ export const integrationPolicy = (kind) => isCoreIntegration(kind) ? CORE_INTEGR
 function parseState(text) {
   let m;
   if (/^not installed \(.+\)$/i.test(text)) return { status: "not installed" };
-  if ((m = text.match(/^current \((?:v(\d+)|legacy)\) \(.+\)$/i))) return { status: "current", version: m[1] };
+  if ((m = text.match(/^current \(v(\d+)\) \(.+\)$/i))) return { status: "current", version: m[1] };
   if ((m = text.match(/^needs repair \(v(\d+)\) \(.+\)$/i))) return { status: "needs repair", version: m[1] };
   if ((m = text.match(/^outdated \((?:v(\d+)|legacy) < v(\d+)\) \(.+\)$/i)) && !(m[1] && Number(m[1]) >= Number(m[2])))
     return { status: "outdated", version: m[1], expectedVersion: m[2] };

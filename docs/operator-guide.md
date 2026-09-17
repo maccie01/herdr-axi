@@ -98,7 +98,7 @@ herdr-axi run queue parser --role implementer --cwd /path/to/worktree \
 accepted workers can be reused. Worker tabs: `<task-id> · <kind>`, 75% agent / 25%
 monitor by default. Keep `HERDR_AXI_RUN` in subsequent calls.
 Selectable kinds are refreshed from `herdr integration status` at init, queue,
-switch, next and launch time. Current (including legacy hooks) and outdated integrations
+switch, next and launch time. Current and outdated (including legacy hooks) integrations
 are launchable; outdated entries include refresh guidance. `needs repair` remains
 installed but cannot launch. Experimental entries (including Letta), unknown
 status and conflicting duplicates are diagnostic-only. No provider certification

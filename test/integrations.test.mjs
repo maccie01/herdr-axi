@@ -50,12 +50,11 @@ test("malformed and conflicting inventory entries cannot become launch candidate
   }
   for (const line of ["codex: current nonsense", "codex: current (vbroken) (/a)", "codex: mystery (/a)", "codex: current",
     "codex: current (v8)", "codex: installed (/a)", "codex: current (v8 < v9) (/a)", "codex: outdated (v8) (/a)",
-    "codex: outdated (v9 < v9) (/a)", "codex: needs repair (legacy) (/a)", "codex: not installed"]) {
+    "codex: outdated (v9 < v9) (/a)", "codex: needs repair (legacy) (/a)", "codex: current (legacy) (/a)", "codex: not installed"]) {
     const [record] = parseIntegrationStatus(line);
     assert.equal(record.status, "unknown");
     assert.equal(record.installed, false);
   }
-  assert.equal(parseIntegrationStatus("codex: current (legacy) (/a)")[0].status, "current");
   const records = parseIntegrationStatus("heading\ncodex: current (v8) (/a)\ncodex: current (v8) (/a)\n");
   assert.deepEqual(installedIntegrationKinds(records), ["codex"]);
   assert.equal(records.length, 1);
