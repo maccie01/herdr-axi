@@ -79,8 +79,83 @@ Workers nur lesend, `--effort low`, Repo `herdr-axi`.
   auslöst. herdr-axi verlangt die Session vor der Übergabe (`SESSION_START_UNVERIFIED`),
   Copilot-Worker sind damit derzeit blockiert.
 
-Offen: Fehler- und Kontingentfälle (`StopFailure`, `errorOccurred`) und Gegenprobe
-auf Herdr 0.9.1.
+Damals offen, unten beantwortet: Fehler- und Kontingentfälle
+(`StopFailure`, `errorOccurred`).
 
-Vorläufige Einschätzung nach der Entscheidungsregel: Für Abschluss und Rückfrage
-liefern die eigenen Hooks keinen Mehrwert. Streichen erst nach Klärung des Fehlerfalls.
+Einschätzung nach der Entscheidungsregel: Für Abschluss und Rückfrage liefern die
+eigenen Hooks keinen Mehrwert.
+
+## Gegenprobe 17.09.2026 (Herdr 0.9.1, macOS)
+
+Client und Server 0.9.1, Protokoll 22, kompatibel, kein Neustart nötig.
+
+Testabdeckung: `npm test` 296/296, `npm run test:engine` 86/86 (Worktree auf
+`spike/monitor-signal-comparison`, `fix/herdr-091-compat` ist darin enthalten).
+Live-Inventar und `run init` melden dieselben sieben startbaren Kinds
+(pi, claude, codex, copilot, opencode, hermes, cursor) und keine Diagnose.
+
+Versionen der Integrationsskripte gegen 0.9.0:
+
+| Kind | 0.9.0 | 0.9.1 |
+|---|---|---|
+| claude | v9 | v10 |
+| opencode | v11 | v12 |
+| pi | v8 | v9 |
+| codex, copilot, cursor, hermes | v8, v3, v1, v5 | unverändert |
+
+Nur ein Provider mit geändertem Skript kann die Event-Wait-Zeiten verschoben haben,
+darum wurde von den Messfällen nur Claude wiederholt; für Codex gilt die Tabelle
+von 0.9.0 weiter. Die Unterdrückungen `no-completion-proof` und `duplicate-event`
+sind Eigenschaften des Nachweisvertrags von herdr-axi, nicht von Herdr, und hängen
+nicht an der Herdr-Version.
+
+Copilot bleibt auch auf 0.9.1 nicht messbar, aus demselben Grund wie auf 0.9.0:
+`agent_session` ist bei `agent get` nach 0, 5, 10, 15 und 30 Sekunden leer und wird
+erst durch den ersten Prompt gesetzt (belegt: Wert erscheint unmittelbar nach
+`agent prompt`, Quelle `herdr:copilot`). herdr-axi verlangt die Session vor der
+Übergabe und bricht mit `SESSION_START_UNVERIFIED` ab. Das Verhalten ist damit auf
+zwei Herdr-Versionen bestätigt und strukturell, kein Fehler von 0.9.0.
+
+### Messung Claude auf 0.9.1
+
+Rohdaten: `trace-091-hooks1.tsv`, `trace-091-hooks0.tsv`. Die Quellenzuordnung war
+zunächst falsch: `herdr-orchestrator.sh collect` rief das Hook-Skript ohne
+`HERDR_MONITOR_SIGNAL_SOURCE` auf und erschien deshalb als `native-hook`, auch mit
+`HERDR_AXI_NATIVE_HOOKS=0`. Die Quelle heißt jetzt `collect`; die Messung wurde
+danach wiederholt.
+
+| Fall | Variante | Erstes Signal | Zustellung | Eigener Hook |
+|---|---|---|---|---|
+| Abschluss | Hooks 1 | event-wait, verworfen (`no-completion-proof`) | event-wait nach 21,8 s | 0,6 s vor der Zustellung, verworfen (`no-completion-proof`) |
+| Abschluss | Hooks 0 | event-wait, verworfen (`no-completion-proof`) | event-wait nach 17,9 s | keine Zeile |
+| Rückfrage | Hooks 1 | event-wait `input` | event-wait sofort | 5,8 s später, verworfen (`duplicate-event`) |
+| Rückfrage | Hooks 0 | event-wait `input` | event-wait sofort | keine Zeile |
+
+Die Zustellung hängt in beiden Varianten am zweiten Ruhezustand des Workers, also am
+Schreiben des Abschlussnachweises, nicht am Hook. `collect` des Orchestrators läuft
+danach und wird als `duplicate-settled` verworfen.
+
+### Fehler- und Kontingentfälle: Antwort aus dem Code
+
+Ein echter Fehlschlag mitten im Zug war nicht kontrolliert auslösbar (ein
+abgelehnter Dialog endet in `settled`, `ctrl+c` beendet Claude nicht). Die Frage
+lässt sich aber am Code entscheiden, versionsunabhängig:
+
+- `herdr-hook-notify.sh:472` wendet den Nachweisvertrag nur auf `settled` an.
+  `error` und `quota` werden davon nicht verworfen und tragen den Grund des
+  Anbieters (`hook_message`, `quota_json`).
+- `herdr-lifecycle-monitor.sh` kann `quota` nur heuristisch melden (Zustand
+  `unknown`) und `lost` beim Verschwinden des Workers. Ein `error`-Ereignis
+  erzeugt der Event-Wait-Pfad nie.
+
+Damit sind die eigenen Provider-Hooks die einzige Quelle für einen Fehlerabbruch
+mit Begründung und für Kontingentdaten des Anbieters.
+
+## Entscheidung
+
+Nach der Entscheidungsregel: nicht komplett streichen. Für Abschluss und Rückfrage
+liefern die eigenen Hooks auf 0.9.0 und 0.9.1 nachweislich keine Zustellung, wohl aber
+für `error` und `quota`. Empfehlung: die Hook-Ereignisse auf `error` und `quota`
+zusammenziehen und die `settled`- und `input`-Pfade der eigenen Plugins entfernen;
+das streicht Code ohne Signalverlust. Der Schalter `HERDR_AXI_NATIVE_HOOKS` und die
+Trace-Instrumentierung bleiben, bis diese Verengung umgesetzt ist.

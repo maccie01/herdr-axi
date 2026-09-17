@@ -239,6 +239,7 @@ case "$command_name" in
     (( $# == 1 )) || usage
     resolve_agent_paths "$1"
     env HERDR_MONITOR_ENABLED=1 HERDR_MONITOR_INBOX=1 \
+      HERDR_MONITOR_SIGNAL_SOURCE=collect \
       HERDR_MONITOR_ORCHESTRATOR="${HERDR_AXI_OWNER_PANE:-orchestrator}" \
       HERDR_MONITOR_AGENT="$1" HERDR_MONITOR_RECEIPT="$HERDR_RECEIPT_FILE" \
       "$script_dir/herdr-hook-notify.sh" settled </dev/null

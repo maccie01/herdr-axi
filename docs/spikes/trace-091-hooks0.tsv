@@ -1,0 +1,15 @@
+1789680879.636	render	axi-b267e066-6518cdca	settled	received	
+1789680928.634	event-wait	axi-b267e066-d205eff9	settled	received	
+1789680928.787	event-wait	axi-b267e066-d205eff9	settled	suppressed	no-completion-proof
+1789680946.355	event-wait	axi-b267e066-d205eff9	settled	received	
+1789680946.382	collect	axi-b267e066-d205eff9	settled	received	
+1789680946.529	event-wait	axi-b267e066-d205eff9	settled	delivered	delivered
+1789680946.596	collect	axi-b267e066-d205eff9	settled	suppressed	duplicate-settled
+1789680964.706	render	axi-b267e066-d205eff9	settled	received	
+1789680970.629	event-wait	axi-b267e066-eff70e60	settled	received	
+1789680970.870	event-wait	axi-b267e066-eff70e60	settled	suppressed	no-completion-proof
+1789680977.868	event-wait	axi-b267e066-eff70e60	input	received	
+1789680977.991	event-wait	axi-b267e066-eff70e60	input	delivered	delivered
+1789681009.310	event-wait	axi-b267e066-eff70e60	settled	received	
+1789681009.460	event-wait	axi-b267e066-eff70e60	settled	suppressed	no-completion-proof
+1789681075.002	event-wait	axi-b267e066-eff70e60	settled	received	
