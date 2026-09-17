@@ -239,6 +239,7 @@ notify() {
       HERDR_MONITOR_LABEL="$agent_label" \
       HERDR_MONITOR_RECEIPT="$receipt_file" \
       HERDR_MONITOR_RESULT_FILE="$result_file" \
+      HERDR_MONITOR_SIGNAL_SOURCE=event-wait \
       bash "$hook_script" "$event_kind" </dev/null
 
     outcome=""

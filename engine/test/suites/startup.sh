@@ -303,6 +303,21 @@ test_missing_integration_fails_before_worker_allocation() (
   assert_file_absent "$FAKE_HERDR_CASE/monitor-command" 'missing integration allocates no monitor'
 )
 
+test_native_hooks_switch_controls_provider_hook_flags() (
+  local kind setting expected
+  for kind in claude copilot codex; do
+    for setting in 1 0; do
+      setup_case "native-hooks-$kind-$setting"
+      printf '%s\n' success > "$FAKE_HERDR_CASE/worker-prompt-mode"
+      printf '%s\n' "prompt for $kind" > "$FAKE_HERDR_CASE/worker.txt"
+      HERDR_AXI_NATIVE_HOOKS=$setting bash "$worker_script" --name worker --kind "$kind" --effort high \
+        --cwd "$FAKE_HERDR_CASE" --prompt-file "$FAKE_HERDR_CASE/worker.txt" --workspace ws --orchestrator-agent orch >/dev/null
+      expected=$(( setting == 1 ? 1 : 0 ))
+      assert_eq "$expected" "$(call_count '^agent start .*\(--plugin-dir\|notify=\)')" "$kind native hooks=$setting"
+    done
+  done
+)
+
 test_repair_and_experimental_integrations_fail_before_allocation() (
   local kind record
   for kind in opencode letta; do

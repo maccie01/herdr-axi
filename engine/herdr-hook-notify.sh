@@ -2,7 +2,18 @@
 set -euo pipefail
 
 event_kind="${1:-}"
+# Spike instrumentation, off unless HERDR_AXI_SIGNAL_TRACE names a file:
+# records which path (native provider hook, event-wait monitor, render) raised
+# each signal and its outcome, for comparing monitor signal sources.
+signal_trace() {
+  [[ -n "${HERDR_AXI_SIGNAL_TRACE:-}" ]] || return 0
+  local source="${HERDR_MONITOR_SIGNAL_SOURCE:-native-hook}"
+  [[ "${HERDR_MONITOR_RENDER_ONLY:-}" != "1" ]] || source=render
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(perl -MTime::HiRes=time -e 'printf "%.3f", time')" \
+    "$source" "${HERDR_MONITOR_AGENT:-${HERDR_PANE_ID:-}}" "$event_kind" "$1" "${2:-}" >> "$HERDR_AXI_SIGNAL_TRACE" 2>/dev/null || true
+}
 [[ "$event_kind" == "settled" || "$event_kind" == "input" || "$event_kind" == "error" || "$event_kind" == "lost" || "$event_kind" == "quota" ]] || exit 0
+signal_trace received
 [[ "${HERDR_ENV:-}" == "1" && "${HERDR_MONITOR_ENABLED:-}" == "1" ]] || exit 0
 if [[ "${HERDR_MONITOR_RENDER_ONLY:-}" != "1" && -z "${HERDR_MONITOR_ORCHESTRATOR:-}" ]]; then
   exit 0
@@ -33,6 +44,7 @@ write_result() {
   local reason="$2"
   local result_file="${HERDR_MONITOR_RESULT_FILE:-}"
   local result_tmp
+  signal_trace "$outcome" "$reason"
   [[ -n "$result_file" ]] || return 0
   mkdir -p "$(dirname -- "$result_file")"
   result_tmp=$(mktemp "${result_file}.tmp.XXXXXX") || return 0

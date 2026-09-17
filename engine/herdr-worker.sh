@@ -125,6 +125,7 @@ else
   --env "HERDR_MONITOR_LABEL=$name" \
   --env "HERDR_MONITOR_HOOK_SCRIPT=$script_dir/herdr-hook-notify.sh" \
   --env "HERDR_MONITOR_INBOX=${HERDR_MONITOR_INBOX:-0}" \
+  --env "HERDR_AXI_SIGNAL_TRACE=${HERDR_AXI_SIGNAL_TRACE:-}" \
   --env "HERDR_AXI_RUN=" \
   --env "HERDR_AXI_WORKER=1" \
   --env "CODEX_THREAD_ID=" \
@@ -150,6 +151,9 @@ trap cleanup_on_exit EXIT
 
 monitor_pane=""
 monitoring_mode="herdr-integration+event-wait+proof"
+# Spike switch: HERDR_AXI_NATIVE_HOOKS=0 omits herdr-axi's own provider hooks
+# (Claude/Copilot plugins, Codex notify) to measure Herdr-only signalling.
+native_hooks="${HERDR_AXI_NATIVE_HOOKS:-1}"
 if [[ "$resume" == true && "$bootstrap" != null ]]; then
   completion_generation="$previous_generation"
 else
@@ -191,11 +195,11 @@ case "$kind" in
       --name "$name"
       --session-id "$session_id"
       --max-autopilot-continues "$max_autopilot_continues"
-      --plugin-dir "$script_dir/herdr-monitor-plugins/copilot"
       --deny-tool 'shell(git commit)'
       --deny-tool 'shell(git push)'
       --deny-tool 'shell(git reset)'
     )
+    [[ "$native_hooks" == "0" ]] || native_args+=(--plugin-dir "$script_dir/herdr-monitor-plugins/copilot")
     ;;
   claude)
     native_args=(
@@ -203,19 +207,19 @@ case "$kind" in
       --effort "$effort"
       --permission-mode auto
       --name "$name"
-      --plugin-dir "$script_dir/herdr-monitor-plugins/claude"
     )
+    [[ "$native_hooks" == "0" ]] || native_args+=(--plugin-dir "$script_dir/herdr-monitor-plugins/claude")
     ;;
   codex)
-    monitoring_mode="native-notify"
+    [[ "$native_hooks" == "0" ]] || monitoring_mode="native-notify"
     native_args=(
       --model "$model"
       --approve-for-me
       --add-dir "$receipt_dir"
       --cd "$worker_cwd"
       --config "model_reasoning_effort=$effort"
-      --config "notify=['bash','$script_dir/herdr-hook-notify.sh','settled']"
     )
+    [[ "$native_hooks" == "0" ]] || native_args+=(--config "notify=['bash','$script_dir/herdr-hook-notify.sh','settled']")
     ;;
 esac
 
@@ -322,8 +326,8 @@ cleanup_created_tab=false
 # Split panes inherit the server environment, not necessarily the worker tab's
 # custom variables. Pin transcript home, delivery mode and receipt routing for both live and lost
 # workers; a lost agent cannot supply its workspace through backend metadata.
-printf -v monitor_command '%q %q %q %q %q %q %q %q %q %q %q %q %q %q' \
-  env "HERDR_AXI_NODE=$HERDR_AXI_NODE" "HERDR_MONITOR_INBOX=${HERDR_MONITOR_INBOX:-0}" \
+printf -v monitor_command '%q %q %q %q %q %q %q %q %q %q %q %q %q %q %q' \
+  env "HERDR_AXI_NODE=$HERDR_AXI_NODE" "HERDR_AXI_SIGNAL_TRACE=${HERDR_AXI_SIGNAL_TRACE:-}" "HERDR_MONITOR_INBOX=${HERDR_MONITOR_INBOX:-0}" \
   "HERDR_BIN=$HERDR_BIN" \
   "CODEX_HOME=${CODEX_HOME:-${HOME}/.codex}" \
   "HERDR_MONITOR_READY=$completion_generation" \
