@@ -215,6 +215,7 @@ import { fixture, cli } from "./support/run-fixture.mjs";
       assert.equal(deferred.status, 0, deferred.output);
       assert.match(deferred.output, /needs repair/);
       assert.match(deferred.output, /herdr integration install codex/);
+      assert.match(deferred.output, /herdr-axi run cancel repair/);
       assert.equal(f.state().tasks[0].state, "queued");
       assert(!f.calls().some((call) => ["create", "start", "prompt"].includes(call.action)));
     } finally { f.clean(); }

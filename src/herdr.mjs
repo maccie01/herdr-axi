@@ -110,10 +110,6 @@ export function herdrVersionProbe() {
   }
 
   const client = parseHerdrVersion(status?.client?.version, "Herdr client");
-  if (typeof status?.server?.socket === "string" && status.server.socket.startsWith("machine:")) {
-    throw new AxiError("Remote Herdr machine endpoints are not supported for managed runs; use a local Herdr session without a --machine wrapper",
-      "HERDR_REMOTE_UNSUPPORTED", ["herdr status --json", "herdr-axi run init --help"]);
-  }
   if (status?.server?.running !== true) throw unreachable("Herdr server is not running");
   const server = parseHerdrVersion(status?.server?.version, "Herdr server");
   if (status.server.compatible === false) {

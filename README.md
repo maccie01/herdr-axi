@@ -77,7 +77,7 @@ herdr-axi run queue parser --role implementer \
 - Cursor: `herdr integration install cursor`, then `guide "start cursor"`; exact model ID from `cursor-agent models`, `--effort model`; Smart Auto, no force/trust bypass. Herdr owns readiness/session detection; registered identity and generation proof remain mandatory.
 - Other launchable Herdr integrations: `--kind KIND` with native CLI configuration; omit `--model` and `--effort`. Native policy may still block for provider input. Herdr owns readiness/lifecycle detection; herdr-axi retains queue, leases, generation proof and whole-tab cleanup. Submission and automatic completion fail closed unless Herdr exposes a stable native session identity.
 - Herdr 0.9.1 is recommended; the local minimum remains 0.9.0. Repair-needed, experimental (including Letta), malformed and conflicting integration records are diagnostic-only, not launchable. Outdated integrations remain usable with a refresh diagnostic. See the [compatibility and refresh guidance](docs/operator-guide.md#herdr-compatibility).
-- Managed runs are local-only. A `--machine` wrapper fails init's status probe in Herdr 0.9.1. If a backend does return a `machine:` endpoint label, a defensive guard rejects it with `HERDR_REMOTE_UNSUPPORTED` before creating state. Saved-machine inventory does not enable remote worker supervision.
+- Managed runs are local-only. A `--machine` wrapper fails init's status probe in Herdr 0.9.1. Saved-machine inventory does not enable remote worker supervision.
 
 | While workers run | Action |
 | --- | --- |

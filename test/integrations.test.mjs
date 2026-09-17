@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import * as integrations from "../src/integrations.mjs";
-const { parseIntegrationStatus, installedIntegrationKinds } = integrations;
+const { parseIntegrationStatus } = integrations;
+const installedIntegrationKinds = (records) => records.filter((record) => record.installed).map((record) => record.kind);
 
 test("inventory preserves repair and experimental records with precise version metadata", () => {
   assert.deepEqual(parseIntegrationStatus([
@@ -47,12 +48,23 @@ test("malformed and conflicting inventory entries cannot become launch candidate
     assert.equal(forward[0].status, "conflicting");
     assert.equal(forward[0].installed, false);
   }
-  for (const line of ["codex: current nonsense", "codex: current (vbroken) (/a)", "codex: mystery (/a)"]) {
+  for (const line of ["codex: current nonsense", "codex: current (vbroken) (/a)", "codex: mystery (/a)", "codex: current",
+    "codex: current (v8)", "codex: installed (/a)", "codex: current (v8 < v9) (/a)", "codex: outdated (v8) (/a)",
+    "codex: outdated (v9 < v9) (/a)", "codex: needs repair (legacy) (/a)", "codex: not installed"]) {
     const [record] = parseIntegrationStatus(line);
     assert.equal(record.status, "unknown");
     assert.equal(record.installed, false);
   }
+  assert.equal(parseIntegrationStatus("codex: current (legacy) (/a)")[0].status, "current");
   const records = parseIntegrationStatus("heading\ncodex: current (v8) (/a)\ncodex: current (v8) (/a)\n");
   assert.deepEqual(installedIntegrationKinds(records), ["codex"]);
   assert.equal(records.length, 1);
+});
+
+test("experimental repair points at no install command that cannot make it launchable", () => {
+  const records = parseIntegrationStatus("letta (experimental): needs repair (v2) (/a)");
+  const problem = integrations.integrationProblem(records, "letta");
+  assert.match(problem.message, /experimental/);
+  assert.deepEqual(problem.help, ["herdr integration status", "herdr integration install --help"]);
+  assert.equal(integrations.installedIntegrationKinds, undefined);
 });

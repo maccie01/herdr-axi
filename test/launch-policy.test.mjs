@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { validateLaunch, resolveLaunch, checkLaunchScreen } from "../src/launch-policy.mjs";
-import { installedIntegrationKinds, parseIntegrationStatus, integrationPolicy } from "../src/integrations.mjs";
+import { launchableIntegrationKinds, parseIntegrationStatus, integrationPolicy } from "../src/integrations.mjs";
 import { selectWorker, validateConfig } from "../src/project.mjs";
 
 test("launch resolver opts into built-in defaults while strict validation still requires a model", () => {
@@ -57,8 +57,8 @@ test("launch resolver executes through a symlink", () => {
 test("prototype names follow native integration policy and cannot impersonate configured roles", () => {
   assert.deepEqual(integrationPolicy("constructor"), { mode: "native", model: false, effort: false });
   assert.deepEqual(validateLaunch({ kind: "constructor" }), { kind: "constructor", mode: "native" });
-  assert.deepEqual(selectWorker(validateConfig(), { kind: "constructor" }, parseIntegrationStatus("constructor: current")), { kind: "constructor", access: "write" });
-  assert.throws(() => selectWorker(validateConfig(), { kind: "constructor", model: "x" }, parseIntegrationStatus("constructor: current")), /native configuration/);
+  assert.deepEqual(selectWorker(validateConfig(), { kind: "constructor" }, parseIntegrationStatus("constructor: current (v1) (/a)")), { kind: "constructor", access: "write" });
+  assert.throws(() => selectWorker(validateConfig(), { kind: "constructor", model: "x" }, parseIntegrationStatus("constructor: current (v1) (/a)")), /native configuration/);
   assert.throws(() => selectWorker(validateConfig(), { role: "constructor", kind: "codex" }), { code: "CONFIG_INVALID" });
   assert.equal(integrationPolicy("__proto__"), null);
 });
@@ -123,13 +123,13 @@ test("Cursor uses explicit native model IDs and Smart Auto without inheriting an
 });
 
 test("Herdr integration status is the worker availability authority", () => {
-  const records = parseIntegrationStatus("noise\r\nclaude: current (v9) (/a)\r\ncursor: not installed (/b)\r\nopencode: current (v12) (/f)\r\nantigravity-cli: installed (/d)\r\nfuture-agent: current (v2) (/e)");
-  assert.deepEqual(installedIntegrationKinds(records), ["claude", "opencode", "agy", "future-agent"]);
+  const records = parseIntegrationStatus("noise\r\nclaude: current (v9) (/a)\r\ncursor: not installed (/b)\r\nopencode: current (v12) (/f)\r\nantigravity-cli: outdated (legacy < v2) (/d)\r\nfuture-agent: current (v2) (/e)");
+  assert.deepEqual(launchableIntegrationKinds(records), ["claude", "opencode", "agy", "future-agent"]);
   assert.deepEqual(records.find((record) => record.kind === "opencode"), { kind: "opencode", name: "opencode", status: "current", installed: true, version: "12" });
   assert.equal(validateLaunch({ kind: "opencode" }).mode, "native");
   for (const options of [{ kind: "opencode", model: "x" }, { kind: "opencode", effort: "high" }]) assert.throws(() => validateLaunch(options), /native configuration/);
   const config = validateConfig({ roles: { implementer: { kind: "opencode", access: "write" } } });
-  const opencode = parseIntegrationStatus("opencode: current"), codex = parseIntegrationStatus("codex: current");
+  const opencode = parseIntegrationStatus("opencode: current (v12) (/a)"), codex = parseIntegrationStatus("codex: current (v8) (/a)");
   assert.deepEqual(selectWorker(config, { role: "implementer" }, opencode), { kind: "opencode", access: "write" });
   assert.throws(() => selectWorker(config, { role: "implementer", model: "ignored" }, opencode), /omit --model/);
   assert.throws(() => selectWorker(config, {}, opencode), /Choose a worker role or Herdr integration kind/);
@@ -178,7 +178,7 @@ test("launch preflight emits named failures on the dedicated engine descriptor",
   for (const [args, input, code] of [
     [["--kind", "claude", "--model", "haiku"], "", "AUTO_MODE_UNSUPPORTED"],
     [["--check-screen"], "", "AUTO_MODE_UNVERIFIED"],
-    [["--check-integration", "cursor"], "cursor: not installed\n", "INTEGRATION_NOT_INSTALLED"],
+    [["--check-integration", "cursor"], "cursor: not installed (/a)\n", "INTEGRATION_NOT_INSTALLED"],
     [["--check-integration", "claude"], "claude: needs repair (v10) (/fixture)\n", "INTEGRATION_NOT_INSTALLED"],
     [["--check-integration", "letta"], "letta (experimental): current (v1) (/fixture)\n", "INTEGRATION_NOT_INSTALLED"],
   ]) {

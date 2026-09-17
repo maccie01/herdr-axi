@@ -71,17 +71,6 @@ test("probe requires 0.9 on both the client and the behavior-owning server", () 
   }
 });
 
-test("probe defensively rejects a remote label if a backend returns one in full status", () => {
-  const overrides = { AXI_FAKE_SOCKET: "machine:build-host/session-a" };
-  assert.throws(() => withBackendEnv(backend(overrides), herdrVersionProbe), { code: "HERDR_REMOTE_UNSUPPORTED" });
-  const { r, state, output, cleanup } = initRun(overrides);
-  try {
-    assert.equal(r.status, 1, output);
-    assert.match(output, /HERDR_REMOTE_UNSUPPORTED/);
-    assert.equal(fs.existsSync(state), false);
-  } finally { cleanup(); }
-});
-
 test("local 0.9.0 and 0.9.1 clients and servers remain compatible in either direction", () => {
   for (const [client, server] of [["0.9.0", "0.9.1"], ["0.9.1", "0.9.0"], ["0.9.1", "0.9.1"]]) {
     const probe = withBackendEnv(backend({ AXI_FAKE_CLIENT_VERSION: client, AXI_FAKE_SERVER_VERSION: server }), herdrVersionProbe);

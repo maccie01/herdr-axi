@@ -59,9 +59,8 @@ is required instead of assuming a client-only update changed it.
 Herdr 0.9.1 is recommended; local 0.9.0/0.9.1 client/server combinations remain
 supported when their private protocols are compatible. Managed runs are local-only:
 do not use a `--machine` wrapper. Herdr 0.9.1 rejects the full status probe through
-that wrapper, so init fails with `HERDR_UNREACHABLE` before writing state. If a
-backend does return a `machine:` socket label, a defensive guard rejects it with
-`HERDR_REMOTE_UNSUPPORTED`. Remote workers would require
+that wrapper, so init fails with `HERDR_UNREACHABLE` before writing state. Remote
+workers would require
 machine-scoped identity, transport, paths, receipts and cleanup; listing saved
 machines does not provide those guarantees.
 
@@ -99,7 +98,7 @@ herdr-axi run queue parser --role implementer --cwd /path/to/worktree \
 accepted workers can be reused. Worker tabs: `<task-id> · <kind>`, 75% agent / 25%
 monitor by default. Keep `HERDR_AXI_RUN` in subsequent calls.
 Selectable kinds are refreshed from `herdr integration status` at init, queue,
-switch, next and launch time. Current, legacy installed and outdated integrations
+switch, next and launch time. Current (including legacy hooks) and outdated integrations
 are launchable; outdated entries include refresh guidance. `needs repair` remains
 installed but cannot launch. Experimental entries (including Letta), unknown
 status and conflicting duplicates are diagnostic-only. No provider certification

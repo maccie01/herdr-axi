@@ -59,7 +59,7 @@ export async function scheduleRun(run, rows, launch, waitingNote) {
         if (problem) throw runError(problem.message, problem.code, problem.help);
         validateLaunch(t);
       }
-      catch (e) { defer(t, e.message, { help: e.suggestions?.length ? e.suggestions.join("; ") : `herdr-axi run cancel ${t.id}` }); continue; }
+      catch (e) { defer(t, e.message, { help: [...(e.suggestions ?? []), `herdr-axi run cancel ${t.id}`].join("; ") }); continue; }
       const active = pending(r);
       if (active.length >= limit(r)) { defer(t, "primary capacity"); continue; }
       const dependency = t.deps.map((id) => tasksById.get(id) ?? { id, state: "missing" }).find((d) => d.state !== "accepted");
